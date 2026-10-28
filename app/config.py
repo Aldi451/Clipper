@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "Clipper"
-VERSION = "1.0.1"
+VERSION = "1.0.3"
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -121,6 +121,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # yt-dlp
     "ytdlp_cookies_browser": "",  # chrome | firefox | edge | brave | safari | ""
     "ytdlp_proxy": "",
+    # kualitas unduhan: video1080 (default) | video720 | best (tanpa batas resolusi)
+    # "video1080" sengaja membatasi 1080p supaya hemat kuota & render lebih cepat.
+    "ytdlp_format": "video1080",
     # kredensial youtube (diisi dari tab YouTube)
     "yt_client_id": "",
     "yt_client_secret": "",

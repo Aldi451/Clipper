@@ -9,6 +9,7 @@ Alur:
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -155,17 +156,124 @@ def _youtube_client():
     return build("youtube", "v3", credentials=_credentials(), cache_discovery=False)
 
 
+
+# --------------------------------------------------------------------------- #
+# pesan error yang bisa ditindaklanjuti
+# --------------------------------------------------------------------------- #
+CONSOLE_AUDIENCE_URL = "https://console.cloud.google.com/apis/credentials/consent"
+CONSOLE_CREDENTIALS_URL = "https://console.cloud.google.com/apis/credentials"
+
+_HELP_TESTERS = {
+    "title": "Google memblokir login: akunmu belum terdaftar sebagai test user",
+    "steps": [
+        "Buka Google Cloud Console → APIs & Services → OAuth consent screen (menu 'Audience').",
+        "Pastikan Publishing status = Testing dan User type = External.",
+        "Di bagian 'Test users' klik + ADD USERS, lalu masukkan email Google yang kamu pakai "
+        "untuk channel YouTube ini (harus sama persis).",
+        "Simpan, tunggu ±1 menit, lalu ulangi login. Kalau browser masih memakai akun Google "
+        "lain, coba mode Incognito.",
+    ],
+    "link": CONSOLE_AUDIENCE_URL,
+    "link_label": "Buka OAuth consent screen",
+}
+
+_HELP_INVALID_CLIENT = {
+    "title": "Client ID / secret tidak dikenali Google",
+    "steps": [
+        "Pastikan Client ID diambil dari project yang sama dengan Client secret.",
+        "Untuk login pakai kode, tipe OAuth client harus 'TVs and Limited Input devices'.",
+        "Untuk login via browser, tipenya harus 'Desktop app'.",
+        "Kalau baru membuat ulang client, simpan ulang kredensialnya di tab Pengaturan YouTube.",
+    ],
+    "link": CONSOLE_CREDENTIALS_URL,
+    "link_label": "Buka Credentials",
+}
+
+_HELP_EXPIRED = {
+    "title": "Login kedaluwarsa",
+    "steps": [
+        "Kalau app OAuth masih berstatus Testing, Google mematikan refresh token setiap 7 hari, "
+        "jadi kamu perlu login ulang.",
+        "Klik 'Login dengan kode' sekali lagi untuk memperbarui token.",
+        "Kalau mau permanen, klik 'Publish app' di OAuth consent screen (tanpa verifikasi pun "
+        "bisa dipakai untuk akunmu sendiri, cukup lewati layar peringatan).",
+    ],
+    "link": CONSOLE_AUDIENCE_URL,
+    "link_label": "Buka OAuth consent screen",
+}
+
+
+def help_for(raw: str) -> dict[str, Any] | None:
+    """Petunjuk langkah-demi-langkah untuk error OAuth yang sering muncul."""
+    low = (raw or "").lower()
+    if "verification process" in low or "developer-approved testers" in low:
+        return _HELP_TESTERS
+    if "access_denied" in low or "access blocked" in low or "403" in low:
+        return _HELP_TESTERS
+    if "invalid_client" in low or "unauthorized_client" in low or "client_secret" in low:
+        return _HELP_INVALID_CLIENT
+    if "invalid_grant" in low or "expired" in low or "revoked" in low:
+        return _HELP_EXPIRED
+    return None
+
+
+def friendly_error(raw: str, default: str = "Gagal login ke YouTube") -> str:
+    """Terjemahkan error OAuth mentah jadi penjelasan Bahasa Indonesia."""
+    msg = (raw or "").strip()
+    if not msg:
+        return default
+    low = msg.lower()
+    name = ""
+    if "has not completed the google verification process" in low:
+        # nama app diambil dari pesan Google, mis. "Tester clipper has not completed ..."
+        head_raw = msg.split(" has not completed", 1)[0]
+        head_raw = re.sub(r"^\s*(access blocked|access denied|error\s*403)\s*[:\-]\s*", "", head_raw, flags=re.I)
+        name = head_raw.strip().strip("'\"")
+    if "verification process" in low or "developer-approved testers" in low:
+        head = f'OAuth app "{name}" masih berstatus Testing' if name else "OAuth app masih berstatus Testing"
+        return (
+            f"{head}, jadi Google hanya mengizinkan akun yang terdaftar sebagai test user. "
+            "Tambahkan email Google kamu di Google Cloud Console → APIs & Services → "
+            "OAuth consent screen → Audience → Test users → + ADD USERS (pakai akun yang sama "
+            "dengan channel YouTube-nya), simpan, lalu ulangi login."
+        )
+    if "access_denied" in low:
+        return (
+            "Google menolak akses (access_denied). Biasanya karena akun yang dipakai belum "
+            "terdaftar sebagai test user di OAuth consent screen, atau kamu menekan 'Cancel' "
+            "di layar izin. Tambahkan email kamu di Test users lalu coba lagi."
+        )
+    if "invalid_client" in low:
+        return ("Client ID / Client secret salah atau tipenya tidak cocok. Login pakai kode "
+                "butuh tipe 'TVs and Limited Input devices'; login via browser butuh 'Desktop app'.")
+    if "invalid_grant" in low:
+        return ("Login sudah kedaluwarsa/dicabut (invalid_grant). Kalau app OAuth masih Testing, "
+                "token mati setiap 7 hari. Login ulang di tab YouTube.")
+    if "redirect_uri_mismatch" in low:
+        return ("Redirect URI tidak cocok. Untuk login via browser pakai OAuth client tipe "
+                "'Desktop app' (bukan 'Web application').")
+    if "device_flow_disabled" in low or "device" in low and "not supported" in low:
+        return ("Tipe OAuth client ini tidak mendukung login dengan kode. Buat client tipe "
+                "'TVs and Limited Input devices', atau pakai 'Login via browser'.")
+    return msg[:400]
+
 # --------------------------------------------------------------------------- #
 # device flow
 # --------------------------------------------------------------------------- #
 _pending: dict[str, Any] = {"state": "idle", "message": "", "user_code": "", "url": "",
-                            "expires_at": 0.0, "channel": ""}
+                            "expires_at": 0.0, "channel": "", "help": None}
 _pending_lock = threading.Lock()
 
 
 def device_status() -> dict[str, Any]:
     with _pending_lock:
         state = dict(_pending)
+    token = load_token() or {}
+    obtained = float(token.get("obtained_at") or 0.0)
+    state["token_age_days"] = round((time.time() - obtained) / 86400, 1) if obtained else None
+    state["testing_mode_warning"] = bool(
+        state.get("connected") and obtained and (time.time() - obtained) > 5 * 86400
+    )
     state["connected"] = is_connected()
     if state["connected"] and state["state"] != "connected":
         token = load_token() or {}
@@ -187,9 +295,12 @@ def start_device_auth() -> dict[str, Any]:
 
     resp = _post_form(DEVICE_CODE_URL, {"client_id": client_id, "scope": " ".join(SCOPES)})
     if "device_code" not in resp:
+        raw = f"{resp.get('error', '')} {resp.get('error_description', '')}".strip()
         raise YouTubeError(
-            resp.get("error_description")
-            or "Gagal memulai login. Pastikan OAuth client bertipe 'TVs and Limited Input devices'."
+            friendly_error(
+                raw,
+                "Gagal memulai login. Pastikan OAuth client bertipe 'TVs and Limited Input devices'.",
+            )
         )
     interval = int(resp.get("interval") or 5)
     expire = int(resp.get("expires_in") or 1800)
@@ -197,6 +308,7 @@ def start_device_auth() -> dict[str, Any]:
         _pending.update({
             "state": "waiting",
             "message": "Buka URL lalu masukkan kode",
+            "help": None,
             "user_code": resp.get("user_code", ""),
             "url": resp.get("verification_url") or "https://www.google.com/device",
             "expires_at": time.time() + expire,
@@ -247,12 +359,18 @@ def start_device_auth() -> dict[str, Any]:
                 interval_extra = interval
                 time.sleep(interval_extra)
                 continue
+            raw_message = result.get("error_description") or error or "Gagal login"
             with _pending_lock:
                 _pending.update({"state": "error",
-                                 "message": result.get("error_description") or error or "Gagal login"})
+                                 "message": friendly_error(raw_message),
+                                 "help": help_for(f"{error} {raw_message}")})
             return
         with _pending_lock:
-            _pending.update({"state": "expired", "message": "Kode kedaluwarsa, coba lagi"})
+            _pending.update({
+                "state": "expired",
+                "message": "Kode login kedaluwarsa. Klik 'Login dengan kode' lagi untuk minta kode baru.",
+                "help": None,
+            })
 
     threading.Thread(target=poll, daemon=True).start()
     return device_status()
@@ -277,7 +395,10 @@ def local_browser_auth() -> dict[str, Any]:
         }
     }
     flow = InstalledAppFlow.from_client_config(config, SCOPES)
-    creds = flow.run_local_server(port=0, prompt="consent", open_browser=True)
+    try:
+        creds = flow.run_local_server(port=0, prompt="consent", open_browser=True)
+    except Exception as exc:  # access_denied / invalid_client / port sibuk
+        raise YouTubeError(friendly_error(str(exc), "Login lewat browser gagal")) from exc
     save_token({
         "token": creds.token,
         "refresh_token": creds.refresh_token,

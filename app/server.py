@@ -416,6 +416,10 @@ def create_app() -> FastAPI:
             "source": {
                 "duration": info.duration, "width": info.width, "height": info.height,
                 "has_audio": info.has_audio, "fps": info.fps,
+                "has_video": info.has_video,
+                "has_real_video": info.has_real_video,
+                "attached_pic": info.attached_pic,
+                "warning": editor.source_warning(info),
             },
             "spec": spec,
             "summary": editor.summarize(spec),
@@ -581,20 +585,26 @@ def create_app() -> FastAPI:
             raise HTTPException(400, str(exc))
 
     @app.post("/api/youtube/login/device")
-    def yt_login_device() -> dict[str, Any]:
+    def yt_login_device() -> Any:
         try:
             return youtube.start_device_auth()
         except youtube.YouTubeError as exc:
-            raise HTTPException(400, str(exc))
+            return JSONResponse(
+                {"detail": str(exc), "help": youtube.help_for(str(exc))}, status_code=400
+            )
 
     @app.post("/api/youtube/login/browser")
-    def yt_login_browser() -> dict[str, Any]:
+    def yt_login_browser() -> Any:
         try:
             return youtube.local_browser_auth()
         except youtube.YouTubeError as exc:
-            raise HTTPException(400, str(exc))
+            return JSONResponse(
+                {"detail": str(exc), "help": youtube.help_for(str(exc))}, status_code=400
+            )
         except Exception as exc:
-            raise HTTPException(500, f"Login browser gagal: {exc}")
+            return JSONResponse(
+                {"detail": f"Login browser gagal: {exc}"}, status_code=500
+            )
 
     @app.post("/api/youtube/disconnect")
     def yt_disconnect() -> dict[str, Any]:

@@ -169,6 +169,8 @@ async function renderEditor(clipId) {
             </div>
           </div>
 
+          ${ED.source && ED.source.warning ? `<div class="ed-warn">⚠ ${esc(ED.source.warning)}</div>` : ""}
+
           <div class="ed-transport">
             <button class="btn small ghost" data-ed="play">▶</button>
             <span class="mono tiny" id="ed-time">0:00 / 0:00</span>
@@ -237,6 +239,8 @@ function renderPreviewSource() {
     video.dataset.src = src;
     video.src = src;
   }
+  const preview = edEl("ed-preview");
+  if (preview) preview.classList.toggle("no-video", !!(ED.source && !ED.source.has_video));
   video.muted = false;
   video.volume = 0.85;
   // posisi awal = awal segmen pertama

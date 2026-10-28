@@ -33,11 +33,17 @@ class MediaInfo:
     sample_rate: int = 0
     has_audio: bool = False
     has_video: bool = False
+    attached_pic: bool = False  # stream video cuma 1 gambar (cover art / gambar statis)
     raw: dict = field(default_factory=dict)
 
     @property
     def is_portrait(self) -> bool:
         return self.height > self.width
+
+    @property
+    def has_real_video(self) -> bool:
+        """True kalau ada video yang benar-benar bergerak (bukan cover art)."""
+        return self.has_video and not self.attached_pic
 
 
 def _run(cmd: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
@@ -80,6 +86,7 @@ def probe(path: str | Path) -> MediaInfo:
     vm = _VIDEO_RE.search(text)
     if vm:
         info.has_video = True
+        info.attached_pic = "(attached pic)" in text
         info.video_codec = vm.group(1)
         info.width, info.height = int(vm.group(2)), int(vm.group(3))
         fm = _FPS_RE.search(text)
@@ -108,6 +115,14 @@ def _info_from_ffprobe(data: dict) -> MediaInfo:
             info.video_codec = stream.get("codec_name") or ""
             info.width = int(stream.get("width") or 0)
             info.height = int(stream.get("height") or 0)
+            disposition = stream.get("disposition") or {}
+            frames = stream.get("nb_frames")
+            try:
+                single_frame = frames is not None and int(frames) <= 1
+            except (TypeError, ValueError):
+                single_frame = False
+            # cover art / gambar statis: bukan video bergerak
+            info.attached_pic = bool(disposition.get("attached_pic")) or single_frame
             try:
                 info.fps = eval(stream.get("avg_frame_rate") or "0/1") or 0.0  # noqa: S307
             except Exception:
