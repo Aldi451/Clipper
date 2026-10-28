@@ -52,6 +52,25 @@ class DownloadError(RuntimeError):
     pass
 
 
+FORMAT_CHOICES = {
+    # wajib ada video (>1 frame). Jangan pernah jatuh ke "best" polos: bisa audio saja.
+    "video1080": (
+        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+        "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+    ),
+    "video720": (
+        "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/"
+        "bestvideo[height<=720]+bestaudio/best[height<=720]"
+    ),
+    "best": "bestvideo+bestaudio/best",
+}
+
+
+def _format_selector(choice: str | None) -> str:
+    key = (choice or "video1080").strip()
+    return FORMAT_CHOICES.get(key, FORMAT_CHOICES["video1080"])
+
+
 def download(url: str, job_label: str = "download", on_progress: Callable[[float, str], None] | None = None) -> Path:
     """Download video dari link pakai yt-dlp (YouTube, TikTok, IG, X, FB, dll)."""
     try:
@@ -81,10 +100,7 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
 
     ydl_opts: dict = {
         "outtmpl": str(out_dir / "source.%(ext)s"),
-        "format": (
-            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
-            "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-        ),
+        "format": _format_selector(settings.get("ytdlp_format")),
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
@@ -122,6 +138,22 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
                 if not candidates:
                     raise DownloadError("File hasil download tidak ditemukan")
                 path = candidates[0]
+            # Pastikan hasilnya benar-benar video: kalau ternyata hanya audio
+            # (format fallback / video dihapus), beri tahu jelas daripada
+            # menghasilkan klip tanpa gambar.
+            try:
+                from . import media as _media
+
+                downloaded = _media.probe(path)
+            except Exception:
+                downloaded = None
+            if downloaded is not None and not downloaded.has_video:
+                raise DownloadError(
+                    "Hasil unduhan hanya berisi audio — track videonya tidak tersedia untuk video "
+                    "ini (sering terjadi pada video yang dibatasi/usia-restricted). Coba atur "
+                    "Pengaturan → Ambil video dari link → Format unduhan ke 'Best (tanpa batas "
+                    "resolusi)', atau pakai link lain."
+                )
             return path
     except DownloadError:
         raise

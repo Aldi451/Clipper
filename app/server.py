@@ -416,6 +416,10 @@ def create_app() -> FastAPI:
             "source": {
                 "duration": info.duration, "width": info.width, "height": info.height,
                 "has_audio": info.has_audio, "fps": info.fps,
+                "has_video": info.has_video,
+                "has_real_video": info.has_real_video,
+                "attached_pic": info.attached_pic,
+                "warning": editor.source_warning(info),
             },
             "spec": spec,
             "summary": editor.summarize(spec),

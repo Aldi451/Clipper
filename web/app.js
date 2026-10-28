@@ -1728,6 +1728,22 @@ async function renderSettings() {
           <label>Proxy (opsional)</label>
           <input class="input" data-setting="ytdlp_proxy" placeholder="http://127.0.0.1:8080" value="${esc(s.ytdlp_proxy)}" />
         </div>
+        <div class="field">
+          <label>Format unduhan</label>
+          <select class="select" data-setting="ytdlp_format">
+            ${[
+              ["video1080", "Video maks 1080p (disarankan)"],
+              ["video720", "Video maks 720p (hemat kuota)"],
+              ["best", "Best — tanpa batas resolusi"],
+            ]
+              .map(([v, l]) => `<option value="${v}" ${(s.ytdlp_format || "video1080") === v ? "selected" : ""}>${l}</option>`)
+              .join("")}
+          </select>
+          <div class="tiny dim" style="margin-top:6px">
+            Semua pilihan selalu mengunduh track video + audio. Kalau hasilnya hanya suara,
+            coba "Best".
+          </div>
+        </div>
       </div>
     </div>
 

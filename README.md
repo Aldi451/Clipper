@@ -146,6 +146,23 @@ langsung terlihat di preview (tanpa render).
 Template sekali klik (dropdown di kanan atas editor) mengubah layout + gaya caption sekaligus.
 Template default dan resolusi export bisa diatur di **Pengaturan**.
 
+### "Hasil klip cuma suara, gambarnya tidak ada"
+
+Kalau klip yang kamu unduh isinya audio saja (atau layar hitam), penyebabnya hampir selalu **sumbernya**,
+bukan renderer-nya:
+
+| Penyebab | Ciri | Solusi |
+|---|---|---|
+| Video sumber hanya audio | `ffprobe` tidak punya stream `Video:` (mis. hasil unduhan `.m4a`, podcast, atau format fallback yt-dlp) | Clipper versi ini **otomatis membuat video** dari background gradien + caption. Mau gambar bergerak? pakai video asli. |
+| Video hanya berisi 1 gambar (cover art) | Stream video ada tapi `attached_pic` / 1 frame (musik + cover album) | Klip dirender dengan gambar statis sebagai latar. |
+| Unduhan dibatasi usia / perlu login | yt-dlp hanya dapat audio | Atur **Pengaturan → Ambil video dari link → Cookies browser** ke browser yang sudah login, lalu ulangi. |
+| Video habis di tengah | Video 10 detik, audio 20 detik; segmen di menit 00:12 | Segmen fallback memakai frame terakhir + audio, jadi klip tetap punya gambar. |
+
+Editor sekarang menampilkan **banner peringatan** di atas timeline kalau sumbernya audio-only/gambar
+statis, dan render **menolak menyimpan hasil tanpa track video** (error jelas, bukan file cacat).
+Format unduhan bisa diatur di **Pengaturan → Format unduhan** (`Video maks 1080p` / `720p` /
+`Best`); semua pilihan selalu mengunduh track video + audio.
+
 ### Soal 4K (jujur ya)
 Upscale 4K memakai **lanczos + unsharp** di ffmpeg: hasilnya lebih tajam dan memenuhi syarat
 “video 4K” di platform, tapi **detail baru tidak muncul** — sumber 1080p tetap 1080p.

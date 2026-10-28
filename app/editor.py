@@ -873,12 +873,71 @@ def _layout_chain(layout: str, focus: float, background: dict[str, Any], fps: in
     )
 
 
+def _visual_input(
+    source_path: Path,
+    info: media.MediaInfo | None,
+    start: float,
+    duration: float,
+    workdir: Path,
+    fps: int,
+    width: int,
+    height: int,
+    background: dict[str, Any] | None = None,
+    force_still: bool = False,
+) -> tuple[list[str], str]:
+    """Siapkan input video untuk satu segmen.
+
+    Tiga kemungkinan sumber:
+    1. video normal          → potong langsung dari file sumber (video = input 0, audio = input 0)
+    2. gambar statis / cover → frame dijadikan PNG lalu di-loop, audio dari file sumber (input 1)
+    3. audio saja            → kanvas gradien sebagai video, audio dari file sumber (input 1)
+
+    Tanpa penanganan ini, ffmpeg hanya menghasilkan suara (atau gagal) sehingga
+    klip jadi "audio saja tanpa gambar".
+    """
+    if not force_still and (info is None or info.has_real_video):
+        return (
+            ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source_path)],
+            "0",
+        )
+
+    audio_in = ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source_path)]
+    cover: Path | None = None
+    if info.has_video:
+        cover = workdir / "cover.jpg"
+        if not cover.exists() or cover.stat().st_size < 256:
+            # frame terakhir yang masih ada (video bisa lebih pendek dari audio)
+            at = 0.0
+            if force_still and info.duration:
+                at = max(0.0, min(start, info.duration - 0.5))
+            try:
+                media.thumb(source_path, at, cover, width=max(1080, min(2160, info.width or 1080)))
+            except Exception:
+                cover = None
+            if cover is not None and (not cover.exists() or cover.stat().st_size < 256):
+                cover = None
+    if cover and cover.exists() and cover.stat().st_size > 256:
+        # gambar statis: loop frame-nya selama durasi segmen
+        return (["-loop", "1", "-framerate", str(fps), "-i", str(cover)] + audio_in, "1")
+
+    # audio saja: kanvas gradien senada template (bukan hitam mati) supaya caption terbaca
+    background = background or {}
+    color1 = _hex(background.get("color1"), "#160F2E")[1:]
+    color2 = _hex(background.get("color2"), "#7C5CFF")[1:]
+    canvas = (
+        f"gradients=s={width}x{height}:c0=0x{color1}:c1=0x{color2}:"
+        f"x0=0:y0=0:x1={width}:y1={height}:speed=0.004:r={fps}"
+    )
+    return (["-f", "lavfi", "-i", canvas] + audio_in, "1")
+
+
 def _render_segment(
     source_path: Path,
     segment: dict[str, Any],
     spec: dict[str, Any],
     out_path: Path,
     workdir: Path,
+    info: media.MediaInfo | None = None,
 ) -> None:
     fps = int(spec["output"]["fps"])
     layout = spec["layout"]
@@ -894,19 +953,30 @@ def _render_segment(
     else:
         last = "vbase"
 
-    cmd = [
-        ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error", "-nostats",
-        "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source_path),
-        "-filter_complex", chain, "-map", f"[{last}]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "17",
-        "-pix_fmt", "yuv420p", "-r", str(fps), "-g", str(fps * 2),
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        "-t", f"{out_duration:.3f}", "-progress", "pipe:1", str(out_path),
-    ]
-    if speed != 1.0:
-        cmd.insert(-1, "-af")
-        cmd.insert(-1, f"atempo={speed:.4f},aresample=48000")
-    media.run_with_progress(cmd, out_duration, None, cwd=workdir)
+    def build_and_run(force_still: bool) -> None:
+        inputs, audio_idx = _visual_input(
+            source_path, info, start, duration, workdir, fps, CANVAS_W, CANVAS_H,
+            spec.get("background"), force_still=force_still,
+        )
+        cmd = [
+            ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error", "-nostats",
+            *inputs,
+            "-filter_complex", chain, "-map", f"[{last}]", "-map", f"{audio_idx}:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "17",
+            "-pix_fmt", "yuv420p", "-r", str(fps), "-g", str(fps * 2),
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+            "-t", f"{out_duration:.3f}", "-progress", "pipe:1", str(out_path),
+        ]
+        if speed != 1.0:
+            cmd.insert(-1, "-af")
+            cmd.insert(-1, f"atempo={speed:.4f},aresample=48000")
+        media.run_with_progress(cmd, out_duration, None, cwd=workdir)
+
+    build_and_run(force_still=False)
+    # Kalau hasilnya ternyata tanpa gambar (video sumber habis / hanya audio),
+    # render ulang memakai frame statis / kanvas gradien supaya ada video-nya.
+    if not (out_path.exists() and out_path.stat().st_size > 512) or not media.probe(out_path).has_video:
+        build_and_run(force_still=True)
 
 
 def render_spec(
@@ -950,9 +1020,15 @@ def render_spec(
     for idx, segment in enumerate(segments):
         piece = workdir / f"seg_{idx:02d}.mp4"
         report(0.03 + 0.55 * (idx / max(1, len(segments))), f"Memproses segmen {idx + 1}/{len(segments)}")
-        _render_segment(source_path, segment, spec, piece, workdir)
+        _render_segment(source_path, segment, spec, piece, workdir, source_info)
         if not piece.exists() or piece.stat().st_size < 512:
             raise EditorError(f"Segmen {idx + 1} gagal dirender")
+        piece_info = media.probe(piece)
+        if not piece_info.has_video:
+            raise EditorError(
+                f"Segmen {idx + 1} keluar tanpa gambar (hanya suara). "
+                "Sumbernya kemungkinan audio saja atau gambarnya statis."
+            )
         piece_paths.append(piece)
 
     report(0.6, "Menggabungkan segmen…")
@@ -1068,6 +1144,18 @@ def render_spec(
     media.run_with_progress(cmd, total_out, ffprog, cwd=workdir)
     if not render_path.exists() or render_path.stat().st_size < 2048:
         raise EditorError("Hasil render kosong — coba layout/pengaturan lain")
+    # pastikan hasil akhir benar-benar punya gambar (bukan audio saja)
+    result_info = media.probe(render_path)
+    if not result_info.has_video:
+        raise EditorError(
+            "Hasil render tidak punya track video (hanya suara). Coba Render ulang; "
+            "kalau sumbernya audio saja, video akan dibuat dari background + caption."
+        )
+    if source_info.has_audio and not result_info.has_audio:
+        raise EditorError(
+            "Hasil render tidak punya track audio padahal sumbernya bersuara. Coba render ulang."
+        )
+
     if not safe_replace(render_path, out_path):
         raise EditorError(
             "Hasil render tidak bisa disimpan karena file lama masih dipakai "
@@ -1098,6 +1186,27 @@ def render_spec(
         "height": height,
         "size": out_path.stat().st_size,
     }
+
+
+def source_warning(info: media.MediaInfo) -> str:
+    """Peringatan kalau sumber tidak punya gambar bergerak (klip tetap punya video).
+    """
+    if not info.has_video:
+        return (
+            "Sumber ini hanya berisi audio (tanpa track video). Klip tetap dirender sebagai "
+            "video: background gradien + caption. Mau gambar bergerak? pakai video asli."
+        )
+    if info.attached_pic:
+        return (
+            "Sumber ini hanya berisi satu gambar (cover art) + audio. Klip dirender dengan "
+            "gambar statis sebagai latar."
+        )
+    if info.width and info.height and max(info.width, info.height) < 480:
+        return (
+            f"Resolusi sumber kecil ({info.width}×{info.height}); hasil 1080p/4K hanya upscale, "
+            "detail tidak bertambah."
+        )
+    return ""
 
 
 def cleanup_workdir(job_id: str, clip_id: str | None = None) -> None:

@@ -749,3 +749,22 @@ select.ed-mini { width: 76px !important; }
   color: #fca5a5;
 }
 .yt-error a.btn { margin-top: 4px; }
+
+/* editor: peringatan sumber & preview tanpa video */
+.ed-warn {
+  margin: 8px 0 0;
+  padding: 9px 12px;
+  border: 1px solid #6b5320;
+  border-radius: 9px;
+  background: #1f1a0f;
+  color: #fbbf24;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.ed-preview.no-video {
+  background:
+    radial-gradient(120% 90% at 20% 0%, #241a4a 0%, transparent 60%),
+    radial-gradient(120% 90% at 90% 100%, #123047 0%, transparent 60%),
+    #0b0b12;
+}
+.ed-preview.no-video video { opacity: 0; }
