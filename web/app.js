@@ -1467,11 +1467,14 @@ async function pollDeviceStatus() {
 function cookiesCard(cookies, settings) {
   const st = cookies || { configured: false, count: 0, domains: [], youtube: false };
   const status = st.configured
-    ? `<span class="tag done">terpasang</span> <span class="tiny dim">${st.count} cookie · ${esc((st.domains || []).join(", ") || "-")}</span>`
+    ? `<span class="tag done">terpasang</span> <span class="tiny dim">${st.count} cookie · ${esc((st.domains || []).join(", ") || "-")}${st.auth_cookies ? " · cookie login ✓" : " · tanpa cookie login"}</span>`
     : `<span class="tag">belum ada</span> <span class="tiny dim">video terbatas umur akan gagal diunduh</span>`;
-  const warn = st.configured && !st.youtube
-    ? `<div class="tiny" style="color:#fbbf24;margin-top:6px">Cookies ini tidak berisi domain youtube.com — ekspor ulang dari tab YouTube yang sudah login.</div>`
-    : "";
+  let warn = "";
+  if (st.configured && !st.youtube) {
+    warn = `<div class="tiny" style="color:#fbbf24;margin-top:6px">Cookies ini tidak berisi domain youtube.com — ekspor ulang dari tab YouTube yang sudah login.</div>`;
+  } else if (st.configured && !st.auth_cookies) {
+    warn = `<div class="tiny" style="color:#fbbf24;margin-top:6px">Cookies terpasang, tapi tidak ada cookie login (SID/HSID/SSID). Pastikan kamu sudah login YouTube di browser sebelum mengekspor.</div>`;
+  }
   const browser = (settings.ytdlp_cookies_browser || "");
   return `
     <div class="cookie-box">
@@ -2068,21 +2071,59 @@ document.addEventListener("click", async (e) => {
   }
 });
 
-/* unggah cookies.txt (dipasang sekali) */
-document.addEventListener("change", async (e) => {
-  const el = e.target;
-  if (!el || el.id !== "cookies-file") return;
-  const file = el.files && el.files[0];
+/* baca file: sebagian browser (Safari/Edge lama) belum punya File.text() */
+function readFileText(file) {
+  if (file && typeof file.text === "function") return file.text();
+  return new Promise((resolve, reject) => {
+    try {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("Gagal membaca file cookies"));
+      reader.readAsText(file);
+    } catch (err) {
+      reject(new Error("Browser ini tidak bisa membaca file — coba pakai tombol Tempel"));
+    }
+  });
+}
+
+async function importCookiesFile(file) {
   if (!file) return;
-  const text = await file.text();
   try {
+    const text = await readFileText(file);
     const res = await api("/api/settings/cookies/text", { method: "POST", body: { text } });
     toast("Cookies diimpor (" + (res.count || 0) + " cookie)", "ok");
     await renderSettings();
     loadHealth();
   } catch (err) {
-    toast(err.message, "bad");
+    toast("Gagal impor cookies: " + (err.message || err), "bad");
   }
+}
+
+/* unggah cookies.txt: lewat tombol file picker */
+document.addEventListener("change", async (e) => {
+  const el = e.target;
+  if (!el || el.id !== "cookies-file") return;
+  await importCookiesFile(el.files && el.files[0]);
+});
+
+/* unggah cookies.txt: drag & drop ke kartu cookies */
+document.addEventListener("dragover", (e) => {
+  const box = e.target && e.target.closest && e.target.closest(".cookie-box");
+  if (!box) return;
+  e.preventDefault();
+  box.classList.add("drop");
+});
+document.addEventListener("dragleave", (e) => {
+  const box = e.target && e.target.closest && e.target.closest(".cookie-box");
+  if (box) box.classList.remove("drop");
+});
+document.addEventListener("drop", async (e) => {
+  const box = e.target && e.target.closest && e.target.closest(".cookie-box");
+  if (!box) return;
+  e.preventDefault();
+  box.classList.remove("drop");
+  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  await importCookiesFile(file);
 });
 
 document.addEventListener("keydown", (e) => {

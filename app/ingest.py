@@ -81,6 +81,35 @@ COOKIE_TEMPLATE_HINT = (
 )
 
 
+HTTPONLY_PREFIX = "#HttpOnly_"
+
+
+def clean_cookie_text(raw: str) -> str:
+    """Buang BOM dan samakan akhir baris (ekspor browser kerap CRLF + BOM)."""
+    text = (raw or "").replace("\ufeff", "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.strip("\n")
+
+
+def _cookie_row(line: str) -> list[str] | None:
+    """Baris cookie Netscape → 7 kolom, atau None kalau bukan baris cookie.
+
+    Penting: baris `#HttpOnly_.youtube.com` BUKAN komentar — dia berisi cookie
+    login (SID/HSID/SSID) yang justru dibutuhkan yt-dlp.
+    """
+    line = line.strip("\n").rstrip("\r")
+    if not line.strip():
+        return None
+    if line.startswith(HTTPONLY_PREFIX):
+        line = line[len(HTTPONLY_PREFIX):]
+    elif line.startswith("#"):
+        return None
+    parts = line.split("\t")
+    if len(parts) < 7:
+        return None
+    return parts
+
+
 def cookie_path(settings: dict | None = None) -> Path | None:
     """Lokasi cookies.txt yang dipakai (setting manual atau data/cookies.txt)."""
     from .config import COOKIE_FILE
@@ -102,16 +131,18 @@ def cookie_summary(settings: dict | None = None) -> dict:
         return {"configured": False, "path": str(target), "domains": [], "count": 0, "youtube": False}
     domains: list[str] = []
     count = 0
+    names: list[str] = []
     try:
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line or line.startswith("#"):
+            row = _cookie_row(line)
+            if row is None:
                 continue
-            parts = line.split("\t")
-            if len(parts) >= 7:
-                count += 1
-                domain = parts[0].lstrip(".").lower()
-                if domain and domain not in domains:
-                    domains.append(domain)
+            count += 1
+            domain = row[0].lstrip(".").lower()
+            if domain and domain not in domains:
+                domains.append(domain)
+            if row[5] and row[5] not in names:
+                names.append(row[5])
     except OSError:
         pass
     return {
@@ -120,6 +151,8 @@ def cookie_summary(settings: dict | None = None) -> dict:
         "count": count,
         "domains": domains[:8],
         "youtube": any("youtube" in d or "google" in d for d in domains),
+        "auth_cookies": any(n in ("SID", "HSID", "SSID", "SAPISID", "APISID", "__Secure-1PSID")
+                            for n in names),
         "browser": (settings.get("ytdlp_cookies_browser") or ""),
     }
 
@@ -152,7 +185,7 @@ def _json_cookies_to_netscape(raw: list) -> str:
 
 def parse_cookies(raw: str) -> str:
     """Terima cookies.txt (Netscape) atau JSON ekspor ekstensi → kembalikan teks Netscape."""
-    text = (raw or "").strip()
+    text = clean_cookie_text(raw)
     if not text:
         raise ValueError("Isi cookies masih kosong")
     if text.startswith("[") or text.startswith("{"):
@@ -165,14 +198,19 @@ def parse_cookies(raw: str) -> str:
         if isinstance(data, dict):
             data = data.get("cookies") or []
         return _json_cookies_to_netscape(data)
-    if "\t" not in text:
+    rows = [line for line in text.splitlines() if _cookie_row(line) is not None]
+    if not rows:
+        if "\t" not in text:
+            raise ValueError(
+                "Format cookies tidak dikenali. Pakai cookies.txt (Netscape) atau JSON dari "
+                "ekstensi (Cookie-Editor → Export → JSON)."
+            )
         raise ValueError(
-            "Format cookies tidak dikenali. Pakai cookies.txt (Netscape) atau JSON dari ekstensi."
+            "File ini tidak berisi baris cookie yang valid (tiap baris butuh 7 kolom dipisah TAB). "
+            "Pastikan mengekspor dari halaman youtube.com, bukan file lain."
         )
-    body = text.splitlines()
-    if not any(line.startswith("# Netscape HTTP Cookie File") for line in body[:3]):
-        body.insert(0, "# Netscape HTTP Cookie File")
-    return "\n".join(body) + "\n"
+    header = ["# Netscape HTTP Cookie File", "# Dibuat oleh Clipper", ""]
+    return "\n".join(header + rows) + "\n"
 
 
 def save_cookies(raw: str) -> dict:

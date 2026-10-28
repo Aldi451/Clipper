@@ -163,6 +163,26 @@ menganggap permintaan ini bot. Ini bukan bug Clipper — server YouTube memang b
 Cookies disimpan lokal di `data/cookies.txt` (permission 600) dan **tidak dikirim ke mana pun**
 selain ke YouTube saat mengunduh. Hapus kapan saja lewat tombol **Hapus**.
 
+**Format file yang diterima**
+
+| Format | Contoh nama file | Catatan |
+|---|---|---|
+| Netscape `cookies.txt` | `www.youtube.com_cookies.txt`, `cookies.txt` | Hasil “Get cookies.txt LOCALLY”. Nama file bebas — yang penting isinya. |
+| JSON ekspor ekstensi | `cookies.json` | Cookie-Editor → Export → JSON. |
+| Tempel teks | – | Tombol **Tempel** → paste isi file. |
+
+Baris `#HttpOnly_.youtube.com …` **dihitung** sebagai cookie (bukan komentar) — justru di situ
+cookie login `SID`/`HSID`/`SSID` berada. BOM dan akhir baris Windows (CRLF) juga ditangani.
+
+**Kalau unggahan gagal**
+
+| Gejala | Penyebab / solusi |
+|---|---|
+| Tombol unggah tidak membuka apa pun | Klik kanan file → pastikan ekstensinya `.txt`/`.json` (bukan `.txt.txt`). Atau pakai **Tempel** isi filenya. |
+| “Format cookies tidak dikenali” | File bukan cookies.txt/JSON — ekspor ulang dari halaman `youtube.com`. |
+| “tidak ada cookie login (SID/HSID/SSID)” | Kamu mengekspor sebelum login. Login dulu di YouTube, baru ekspor. |
+| Cookie terpasang tapi unduhan masih gagal | Cookies kedaluwarsa (biasanya beberapa minggu) → ekspor ulang. |
+
 **Alternatif lain**
 
 | Cara | Catatan |

@@ -786,3 +786,7 @@ select.ed-mini { width: 76px !important; }
   flex-wrap: wrap;
 }
 .cookie-box textarea { width: 100%; }
+.cookie-box.drop {
+  border-color: #7c5cff;
+  background: #161327;
+}
