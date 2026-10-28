@@ -112,10 +112,14 @@ def new_id(prefix: str) -> str:
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     ensure_dirs()
+    fresh = not DB_FILE.exists()  # folder data bisa saja dihapus saat server jalan
     conn = sqlite3.connect(DB_FILE, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    if fresh:
+        conn.executescript(SCHEMA)
+        conn.commit()
     try:
         yield conn
         conn.commit()
