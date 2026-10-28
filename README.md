@@ -34,40 +34,97 @@ lalu **upload otomatis ke YouTube Shorts** channel kamu.
 
 ---
 
-## Instalasi
+## Instalasi & menjalankan (panduan singkat)
 
-Butuh **Python 3.10+**. ffmpeg **tidak perlu** di-install manual (diambil dari paket `imageio-ffmpeg`).
+Butuh **Python 3.10+**. ffmpeg, yt-dlp, dan model Whisper **tidak perlu** dipasang manual —
+ffmpeg diambil dari paket `imageio-ffmpeg`, model Whisper diunduh sekali saat pertama dipakai.
 
-**Linux / macOS**
+### Cara tercepat (disarankan)
+
+**Windows**
+1. Install Python dari <https://www.python.org/downloads/> — **centang "Add python.exe to PATH"**.
+2. Double-click **`run.bat`** di folder Clipper.
+3. Skrip otomatis: cek Python → buat `.venv` → install dependensi → start server → buka browser.
+
+**macOS / Linux**
+```bash
+./run.sh
+```
+Sama: otomatis bikin virtualenv, install dependensi, lalu start.
+
+Kalau berhasil, terminal menampilkan:
+
+```
+==============================================================
+  Clipper siap
+==============================================================
+  Buka di browser : http://localhost:8420
+  Data lokal      : /path/ke/Clipper/data
+  Python          : /path/ke/Clipper/.venv/bin/python
+
+  Biarkan jendela ini terbuka. Tekan Ctrl+C untuk berhenti.
+==============================================================
+```
+
+Buka **http://localhost:8420** (biasanya browser terbuka sendiri). Server listen di `0.0.0.0`,
+jadi dari HP di Wi-Fi yang sama bisa buka `http://IP-komputer:8420`.
+
+### Cara manual
 
 ```bash
-git clone <repo-ini> clipper && cd clipper
-python3 -m venv .venv && source .venv/bin/activate
+# Windows (PowerShell / cmd)
+py -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python run.py
+
+# macOS / Linux
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 python run.py
 ```
 
-**Windows (PowerShell)**
-
-```powershell
-git clone <repo-ini> clipper; cd clipper
-py -m venv .venv; .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python run.py
-```
-
-Atau pakai skrip setup: `bash scripts/setup.sh` (Linux/macOS) / `scripts\setup.bat` (Windows).
-
-Buka **http://localhost:8420** (browser terbuka otomatis). Server listen di `0.0.0.0`,
-jadi bisa juga diakses dari HP di jaringan yang sama: `http://IP-komputer:8420`.
+Opsi launcher:
 
 ```bash
-python run.py --port 9000          # ganti port
-python run.py --no-browser         # jangan buka browser
-CLIPPER_DATA_DIR=/mnt/disk/clip python run.py   # simpan video di disk lain
+python run.py                 # start + buka browser
+python run.py --no-browser    # jangan buka browser
+python run.py --port 9000     # ganti port (otomatis pindah kalau bentrok)
+python run.py --doctor        # cek lingkungan: paket, ffmpeg, port, folder data
+python run.py --reload        # mode development
+CLIPPER_DATA_DIR=D:\video-clipper python run.py   # simpan video di disk lain
 ```
+
+### "Saya jalankan run.py tapi tidak terjadi apa-apa" — cek ini
+
+| Gejala | Penyebab & solusi |
+|---|---|
+| **Double-click `run.py` → jendela hitam muncul lalu langsung hilang** | Itu karena skrip selesai/error dan jendela otomatis menutup. Jalankan lewat terminal: buka **cmd/PowerShell** di folder Clipper, lalu `python run.py` — pesan errornya akan kelihatan. Atau lebih mudah: double-click **`run.bat`** (sudah diatur berhenti menunggu Enter kalau error). |
+| **`python` tidak dikenali / membuka Microsoft Store** | Python belum ada di PATH. Di Windows pakai `py -3 run.py`, atau install Python resmi lalu centang "Add python.exe to PATH". |
+| **`ModuleNotFoundError: No module named 'uvicorn'` / `fastapi`** | Dependensi belum terpasang. Jalankan `pip install -r requirements.txt` (dalam venv yang aktif), atau cukup `run.bat` / `./run.sh`. Launcher sekarang menampilkan perintah persisnya. |
+| **Terminal diam, tapi tidak ada halaman di browser** | Lihat baris **`Buka di browser : http://...`** — portnya mungkin **bukan** 8420 karena 8420 sedang dipakai. Clipper otomatis pindah ke 8421/8422 dst. Buka URL yang tertulis. |
+| **`Port 8420 dipakai program lain`** | Clipper lain masih jalan. Tutup yang lama, atau biarkan Clipper memakai port alternatif yang ditampilkan. |
+| **`ffmpeg tidak ditemukan`** | `pip install imageio-ffmpeg` (sudah masuk requirements). Kalau tetap gagal, install ffmpeg dan pastikan ada di `PATH`. |
+| **Python terlalu lama (< 3.10)** | Install Python 3.11+ dari python.org, lalu buat ulang venv: hapus folder `.venv`, jalankan `run.bat` / `./run.sh` lagi. |
+| **`folder data tidak bisa ditulis`** | Project ada di folder terproteksi (mis. `C:\Program Files`). Pindahkan ke `D:\Clipper` atau `Documents`, atau set `CLIPPER_DATA_DIR` ke folder lain. |
+| **Masih bingung** | Jalankan `python run.py --doctor`. Outputnya menyebut satu per satu apa yang OK dan apa yang kurang. |
+
+Catatan: **jendela terminal harus tetap terbuka** selama Clipper dipakai — server berjalan di situ.
+Menutup jendela = mematikan Clipper.
 
 ---
+
+## Cara pakai (3 langkah)
+
+1. **Buat Clip** → tempel link atau drop file. Atur jumlah clip, durasi min/maks, gaya video.
+2. Clipper jalan sendiri: *download → baca metadata → ekstrak audio → transkrip/subtitle →
+   cari momen → buat clip kandidat*. Progress muncul real-time.
+3. Di halaman project: buka **✂ Editor** untuk memotong/menambah teks/caption, atau langsung
+   **Render** / **Render semua**, cek preview, lalu **Upload** ke YouTube Shorts.
+
+Tips: buka **Pengaturan** dan aktifkan `Render otomatis` + `Upload otomatis` di tab YouTube
+untuk alur sekali klik (tempel link → Shorts terbit).
 
 ## Video editor (tab ✂ Editor)
 
@@ -117,19 +174,6 @@ cari momen → render → upload). Bisa juga centang beberapa video lalu **Buat 
 > ⚠️ **Hak cipta:** mengunggah ulang video orang lain apa adanya bisa melanggar hak cipta
 > dan berisiko klaim/strike di channel kamu. Pakai clip sebagai bahan komentar, reaksi,
 > atau potongan transformatif, dan sebutkan sumbernya di deskripsi.
-
-## Cara pakai (3 langkah)
-
-1. **Buat Clip** → tempel link atau drop file. Atur jumlah clip, durasi min/maks, gaya video.
-2. Clipper jalan sendiri: *download → baca metadata → ekstrak audio → transkrip/subtitle →
-   cari momen → buat clip kandidat*. Progress muncul real-time.
-3. Di halaman project: **Render** atau **Render semua**, cek preview, edit kalau perlu,
-   lalu **Upload** / **Upload semua** ke YouTube Shorts.
-
-Tips: buka **Pengaturan** dan aktifkan `Render otomatis` + `Upload otomatis` di tab YouTube
-untuk alur sekali klik.
-
----
 
 ## Upload ke YouTube Shorts (sekali setup, gratis)
 
