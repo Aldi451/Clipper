@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 from typing import BinaryIO, Callable
 
 from .config import UPLOAD_DIR, WORK_DIR, ensure_dirs, load_settings
+from .fsutil import safe_rmtree
 
 ALLOWED_EXT = {
     ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv", ".ts", ".mpg", ".mpeg",
@@ -130,7 +130,4 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
 
 
 def cleanup_dir(path: str | Path) -> None:
-    try:
-        shutil.rmtree(path, ignore_errors=True)
-    except Exception:
-        pass
+    safe_rmtree(path)

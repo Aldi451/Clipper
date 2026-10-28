@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .config import ffmpeg_exe, ffprobe_exe
+from .fsutil import safe_rmtree
 
 _DUR_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)")
 _VIDEO_RE = re.compile(r"Stream #\d+:\d+.*?: Video: (\w+).*?, (\d{2,5})x(\d{2,5})")
@@ -140,35 +141,54 @@ def extract_audio(src: str | Path, dst: str | Path, sample_rate: int = 16000) ->
 def audio_energy(src: str | Path, window: float = 0.5) -> list[tuple[float, float]]:
     """RMS level (dBFS) per window detik, dipakai untuk deteksi bagian ramai/hening."""
     samples = max(400, int(16000 * window))
-    tmp = Path(tempfile.mkstemp(suffix=".txt")[1])
-    cmd = [
-        ffmpeg_exe(), "-hide_banner", "-nostats", "-i", str(src), "-vn",
-        "-af", f"asetnsamples={samples},astats=metadata=1:reset=1,ametadata=print:file={tmp.as_posix()}",
-        "-f", "null", "-",
-    ]
-    _run(cmd)
     result: list[tuple[float, float]] = []
+    # Catatan Windows: jangan pakai fd dari mkstemp() — handle yang masih terbuka
+    # membuat ffmpeg gagal menulis dan `unlink` gagal dengan WinError 32.
+    tempdir = Path(tempfile.mkdtemp(prefix="clipper_energy_"))
+    tmp = tempdir / "astats.txt"
+    text = ""
     try:
-        text = tmp.read_text(encoding="utf-8", errors="replace")
+        cmd = [
+            ffmpeg_exe(), "-hide_banner", "-nostats", "-i", str(src), "-vn",
+            "-af", f"asetnsamples={samples},astats=metadata=1:reset=1,ametadata=print:file={tmp.as_posix()}",
+            "-f", "null", "-",
+        ]
+        _run(cmd)
+        if tmp.exists():
+            text = tmp.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return result
     finally:
-        tmp.unlink(missing_ok=True)
+        safe_rmtree(tempdir)
+    # Satu frame astats mencetak RMS per channel DAN "Overall". Pakai Overall saja
+    # supaya timeline tidak dobel; kalau tidak ada, ambil channel pertama.
     current: float | None = None
+    overall: list[tuple[float, float]] = []
+    per_channel = result
+
+    def _value(raw: str) -> float | None:
+        try:
+            value = float(raw)
+        except ValueError:
+            return None
+        if value != value or value <= -120:  # NaN / senyap total
+            return -90.0
+        return value
+
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("frame:"):
             m = re.search(r"pts_time:([0-9.]+)", line)
             current = float(m.group(1)) if m else None
         elif "RMS_level=" in line and current is not None:
-            try:
-                value = float(line.split("=", 1)[1])
-            except ValueError:
+            value = _value(line.split("=", 1)[1])
+            if value is None:
                 continue
-            if value != value or value <= -120:  # NaN / senyap total
-                value = -90.0
-            result.append((current, value))
-    return result
+            if ".Overall.RMS_level=" in line:
+                overall.append((current, value))
+            else:
+                per_channel.append((current, value))
+    return overall or per_channel
 
 
 def run_with_progress(

@@ -30,13 +30,13 @@ from __future__ import annotations
 import json
 import math
 import re
-import shutil
 import time
 from pathlib import Path
 from typing import Any, Iterable
 
 from . import media
 from .config import CLIP_DIR, WORK_DIR, ffmpeg_exe, load_settings
+from .fsutil import safe_replace, safe_rmtree
 
 CANVAS_W = 1080
 CANVAS_H = 1920
@@ -926,6 +926,9 @@ def render_spec(
     CLIP_DIR.mkdir(parents=True, exist_ok=True)
     out_path = CLIP_DIR / f"{clip_id}.mp4"
     thumb_path = CLIP_DIR / f"{clip_id}.jpg"
+    # Render ke workdir dulu, baru dipindah: di Windows file hasil lama bisa
+    # terkunci (sedang diputar di browser) sehingga ffmpeg gagal menimpanya.
+    render_path = workdir / f"{clip_id}.mp4"
 
     def report(fraction: float, message: str) -> None:
         if on_progress:
@@ -958,7 +961,8 @@ def render_spec(
     else:
         list_file = workdir / "concat.txt"
         list_file.write_text(
-            "\n".join("file '" + str(p.resolve()).replace("'", "'\\''") + "'" for p in piece_paths),
+            # as_posix(): Windows butuh garis miring depan, backslash = escape di concat demuxer
+            "\n".join("file '" + p.resolve().as_posix().replace("'", "'\\''") + "'" for p in piece_paths),
             encoding="utf-8",
         )
         base_path = workdir / "base.mp4"
@@ -1054,7 +1058,7 @@ def render_spec(
     ]
     if is_upscale:
         cmd += ["-maxrate", "60M", "-bufsize", "120M"]
-    cmd += ["-progress", "pipe:1", str(out_path)]
+    cmd += ["-progress", "pipe:1", str(render_path)]
 
     report(0.7, "Render akhir" + (" (upscale 4K)" if height >= 3840 else ""))
 
@@ -1062,8 +1066,13 @@ def render_spec(
         report(0.7 + 0.26 * fraction, f"Render {fraction * 100:.0f}% · {width}×{height}")
 
     media.run_with_progress(cmd, total_out, ffprog, cwd=workdir)
-    if not out_path.exists() or out_path.stat().st_size < 2048:
+    if not render_path.exists() or render_path.stat().st_size < 2048:
         raise EditorError("Hasil render kosong — coba layout/pengaturan lain")
+    if not safe_replace(render_path, out_path):
+        raise EditorError(
+            "Hasil render tidak bisa disimpan karena file lama masih dipakai "
+            "(misalnya sedang diputar di tab lain). Tutup preview lalu render ulang."
+        )
 
     report(0.97, "Bikin thumbnail & subtitle…")
     try:
@@ -1094,7 +1103,7 @@ def render_spec(
 def cleanup_workdir(job_id: str, clip_id: str | None = None) -> None:
     base = WORK_DIR / job_id / "render"
     target = base / clip_id if clip_id else base
-    shutil.rmtree(target, ignore_errors=True)
+    safe_rmtree(target)
 
 
 # --------------------------------------------------------------------------- #
