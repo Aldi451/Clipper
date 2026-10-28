@@ -1,0 +1,10 @@
+# data kerja (video, audio, model, token) tidak ikut di-commit
+data/
+models/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.log
+.env
