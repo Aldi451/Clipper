@@ -203,6 +203,7 @@ function parseRoute() {
   const parts = hash.split("/").filter(Boolean);
   if (!parts.length) return { route: "new", param: "" };
   if (parts[0] === "project" && parts[1]) return { route: "project", param: parts[1] };
+  if (parts[0] === "editor" && parts[1]) return { route: "editor", param: parts[1] };
   if (["new", "viral", "projects", "youtube", "settings"].includes(parts[0])) {
     return { route: parts[0], param: "" };
   }
@@ -223,6 +224,7 @@ async function renderRoute() {
     else if (route === "viral") await renderViral();
     else if (route === "projects") await renderProjects();
     else if (route === "project") await renderProject(param);
+    else if (route === "editor") await renderEditorRoute(param);
     else if (route === "youtube") await renderYouTube();
     else if (route === "settings") await renderSettings();
   } catch (err) {
@@ -918,7 +920,7 @@ function clipCardHtml(clip) {
   return `
     <article class="clip" data-clip="${esc(clip.id)}">
       <div class="clip-head">
-        <div class="clip-thumb" data-action="edit" data-id="${esc(clip.id)}">
+        <div class="clip-thumb" data-action="quick-edit" data-id="${esc(clip.id)}">
           ${thumb}<div class="play">▶</div>
         </div>
         <div class="clip-info">
@@ -938,7 +940,8 @@ function clipCardHtml(clip) {
           <div class="bar thin ${clip.status === "error" ? "err" : ""}"><i style="width:${clip.status === "error" ? 100 : progress}%"></i></div>
           ${clip.error ? `<div class="tiny" style="color:#fca5a5">${esc(clip.error)}</div>` : ""}` : ""}
         <div class="clip-actions">
-          <button class="btn small" data-action="edit" data-id="${esc(clip.id)}">Edit</button>
+          <button class="btn small" data-action="edit" data-id="${esc(clip.id)}">✂ Editor</button>
+          <button class="btn small ghost" data-action="quick-edit" data-id="${esc(clip.id)}">Detail</button>
           <button class="btn small" data-action="render" data-id="${esc(clip.id)}" ${active ? "disabled" : ""}>
             ${clip.has_file ? "Render ulang" : "Render"}
           </button>
@@ -1405,13 +1408,15 @@ async function pollDeviceStatus() {
 /* ------------------------------------------------------------------ */
 async function renderSettings() {
   const view = $("#view");
-  const [settings, health, viralConfig] = await Promise.all([
+  const [settings, health, viralConfig, editorMeta] = await Promise.all([
     api("/api/settings"),
     api("/api/health"),
     api("/api/discover/config").catch(() => null),
+    api("/api/editor/meta").catch(() => null),
   ]);
   state.settings = settings;
   if (viralConfig) state.viral.config = viralConfig;
+  if (editorMeta) state.editorMeta = editorMeta;
   const s = settings;
 
   view.innerHTML = `
@@ -1541,6 +1546,32 @@ async function renderSettings() {
           <input type="checkbox" data-setting="normalize_audio" ${s.normalize_audio ? "checked" : ""} />
           <span class="track"></span><span>Normalisasi audio</span>
         </label>
+      </div>
+      <div class="grid-3" style="margin-top:14px">
+        <div class="field">
+          <label>Resolusi export default</label>
+          <select class="select" data-setting="export_height">
+            ${[[1920, "1080p (Full HD)"], [2560, "1440p (2K)"], [3840, "4K (2160×3840)"]]
+              .map(([v, l]) => `<option value="${v}" ${Number(s.export_height) === v ? "selected" : ""}>${l}</option>`)
+              .join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label>Template editor default</label>
+          <select class="select" data-setting="default_template">
+            <option value="">Ikut gaya global di atas</option>
+            ${(state.editorMeta && state.editorMeta.templates ? state.editorMeta.templates : [])
+              .map((t) => `<option value="${t.id}" ${s.default_template === t.id ? "selected" : ""}>${esc(t.name)}</option>`)
+              .join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label>Upscale</label>
+          <label class="switch" style="margin-top:6px">
+            <input type="checkbox" data-setting="export_sharpen" ${s.export_sharpen ? "checked" : ""} />
+            <span class="track"></span><span class="tiny">Pertajam (unsharp) saat upscale</span>
+          </label>
+        </div>
       </div>
       <p class="hint" style="margin-top:12px">
         Font harus tersedia di sistem untuk hasil terbaik. Install "Inter" (gratis) atau pakai
@@ -1753,6 +1784,9 @@ document.addEventListener("click", async (e) => {
     } else if (action === "new-job") {
       location.hash = "#/new";
     } else if (action === "edit") {
+      e.preventDefault();
+      location.hash = "#/editor/" + id;
+    } else if (action === "quick-edit") {
       e.preventDefault();
       await openClipEditor(id);
     } else if (action === "close-modal") {

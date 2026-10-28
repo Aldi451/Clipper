@@ -5,13 +5,14 @@ tidak mengunci request HTTP dan tidak berebut CPU.
 """
 from __future__ import annotations
 
+import json
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-from . import analyze, db, ingest, media, render, subs, transcribe, youtube
+from . import analyze, db, editor, ingest, media, subs, transcribe, youtube
 from .config import WORK_DIR, load_settings
 
 
@@ -257,14 +258,16 @@ def _run_render(clip_id: str) -> None:
         def on_progress(fraction: float, message: str) -> None:
             db.update_clip(clip_id, progress=round(fraction, 4), message=message)
 
-        result = render.render_clip(clip, source_path, info, transcript, on_progress, settings)
+        spec = editor.load_or_create_spec(clip, transcript, float(info.duration or 0), settings)
+        result = editor.render_spec(clip, spec, source_path, info, on_progress, settings)
         db.update_clip(
             clip_id, status="rendered", progress=1.0, message="Clip siap",
-            file=result["file"], thumb=result["thumb"],
+            file=result["file"], thumb=result["thumb"], spec=json.dumps(spec, ensure_ascii=False),
             duration=round(result["duration"], 3),
-            meta={**(clip.get("meta") or {}), "srt": result.get("srt", ""), "dirty": False},
+            meta={**(clip.get("meta") or {}), "srt": result.get("srt", ""), "dirty": False,
+                  "resolution": f"{result.get('width')}x{result.get('height')}"},
         )
-        render.cleanup_render_workdir(job["id"], clip_id)
+        editor.cleanup_workdir(job["id"], clip_id)
 
         if settings.get("auto_pipeline") and settings.get("yt_auto_upload") and youtube.is_connected():
             start_upload(clip_id)

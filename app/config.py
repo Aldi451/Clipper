@@ -18,6 +18,7 @@ DATA_DIR = Path(os.environ.get("CLIPPER_DATA_DIR", ROOT / "data")).resolve()
 UPLOAD_DIR = DATA_DIR / "uploads"
 CLIP_DIR = DATA_DIR / "clips"
 WORK_DIR = DATA_DIR / "work"
+ASSET_DIR = DATA_DIR / "assets"
 MODEL_DIR = Path(os.environ.get("CLIPPER_MODEL_DIR", ROOT / "models")).resolve()
 SETTINGS_FILE = DATA_DIR / "settings.json"
 TOKEN_FILE = DATA_DIR / "youtube_token.json"
@@ -31,7 +32,7 @@ MAX_UPLOAD_BYTES = int(os.environ.get("CLIPPER_MAX_UPLOAD_MB", "4096")) * 1024 *
 
 
 def ensure_dirs() -> None:
-    for d in (DATA_DIR, UPLOAD_DIR, CLIP_DIR, WORK_DIR, MODEL_DIR):
+    for d in (DATA_DIR, UPLOAD_DIR, CLIP_DIR, WORK_DIR, ASSET_DIR, MODEL_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -105,6 +106,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "normalize_audio": True,
     "fps": 30,
     "crf": 20,
+    "export_height": 1920,       # 1920 = 1080p, 2560 = 2K, 3840 = 4K
+    "export_sharpen": True,      # pertajam saat upscale
+    "default_template": "",      # template editor default (kosong = ikut gaya global)
     # youtube
     "yt_auto_upload": False,
     "yt_privacy": "public",      # public | unlisted | private

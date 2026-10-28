@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS clips (
     message       TEXT NOT NULL DEFAULT '',
     file          TEXT NOT NULL DEFAULT '',
     thumb         TEXT NOT NULL DEFAULT '',
+    spec          TEXT NOT NULL DEFAULT '',
     yt_id         TEXT NOT NULL DEFAULT '',
     yt_url        TEXT NOT NULL DEFAULT '',
     yt_privacy    TEXT NOT NULL DEFAULT '',
@@ -100,7 +101,7 @@ JOB_FIELDS = {
 }
 CLIP_FIELDS = {
     "idx", "start", "duration", "score", "title", "hook", "description", "hashtags",
-    "status", "progress", "message", "file", "thumb", "yt_id", "yt_url", "yt_privacy",
+    "status", "progress", "message", "file", "thumb", "spec", "yt_id", "yt_url", "yt_privacy",
     "error", "meta", "updated_at",
 }
 
@@ -119,6 +120,7 @@ def connect() -> Iterator[sqlite3.Connection]:
     conn.execute("PRAGMA foreign_keys=ON")
     if fresh:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.commit()
     try:
         yield conn
@@ -127,9 +129,20 @@ def connect() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Tambahkan kolom baru ke database lama (idempotent)."""
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(clips)").fetchall()}
+    except sqlite3.Error:
+        return
+    if "spec" not in columns:
+        conn.execute("ALTER TABLE clips ADD COLUMN spec TEXT NOT NULL DEFAULT ''")
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 def _dump(value: Any) -> Any:
@@ -232,6 +245,7 @@ def create_clip(job_id: str, **fields: Any) -> dict[str, Any]:
         "message": "",
         "file": "",
         "thumb": "",
+        "spec": fields.get("spec") or "",
         "meta": json.dumps(fields.get("meta") or {}, ensure_ascii=False),
         "created_at": now,
         "updated_at": now,

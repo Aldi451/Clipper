@@ -21,7 +21,10 @@ lalu **upload otomatis ke YouTube Shorts** channel kamu.
 | 🎙️ **Transkrip offline** | `faster-whisper` (tiny → large-v3, CPU atau CUDA). Model diunduh **sekali**, setelah itu 100% offline. Kalau video sudah punya subtitle, Clipper memakainya lebih dulu (instan, tanpa model). |
 | 🧠 **Pemilihan momen** | Scoring lokal: kata pemicu hook (ID+EN), pertanyaan, angka, energi audio (RMS), kepadatan bicara, kesinambungan, dan panjang ideal. Tidak pakai API AI berbayar. |
 | ✨ **Judul & hashtag** | Heuristik dari kalimat terbaik. Opsional: diperbagus LLM lokal (**Ollama**) kalau kamu punya. |
-| 📱 **Render 9:16** | 1080×1920, dua gaya: **blur background** (video utuh) atau **crop penuh** dengan kontrol fokus horizontal. |
+| 🎬 **Video editor** | Timeline multi-segmen (potong, gabung, atur kecepatan 0.5×–2×), teks overlay tak terbatas (posisi, ukuran, warna, garis, kotak, rotasi, animasi pop/fade), logo/watermark milik sendiri, fade in/out, preview realtime. |
+| 🎨 **Template** | 6 template siap pakai (Podcast Blur, MrBeast, Neon TikTok, Gradient Studio, Clean Vlog, Cinema) + 6 gaya caption, sekali klik langsung berubah. |
+| ✨ **Auto subtitle** | Generate caption word-by-word dari transkrip (tanpa Whisper ulang), geser timing ±0.2s, edit/sembunyikan per baris, export `.srt`. |
+| 🚀 **Export sampai 4K** | 1080p / 1440p / **2160×3840 (4K)** dengan upscale lanczos + unsharp, CRF & FPS bisa diatur. **Tanpa watermark, tanpa batas** — watermark hanya kalau kamu unggah logo sendiri. |
 | 💬 **Caption karaoke** | Word-by-word highlight (3 kata/baris, bisa diatur), warna & font custom, plus overlay judul/hook di atas video. |
 | 🔊 **Normalisasi audio** | Loudnorm -14 LUFS, standar YouTube. |
 | ✂️ **Editor per clip** | Ubah judul/hook/deskripsi/hashtag, geser start, ubah durasi, atur fokus crop, matikan caption, preview langsung, render ulang. |
@@ -65,6 +68,29 @@ CLIPPER_DATA_DIR=/mnt/disk/clip python run.py   # simpan video di disk lain
 ```
 
 ---
+
+## Video editor (tab ✂ Editor)
+
+Buka project → klik **✂ Editor** pada kartu clip. Semua perubahan tersimpan otomatis dan
+langsung terlihat di preview (tanpa render).
+
+| Bagian | Fungsi |
+|---|---|
+| **Preview** | Player dengan overlay caption + teks realtime. Tombol play, seek bar, `⇤`/`⇥` untuk menandai awal/akhir segmen di playhead. |
+| **Timeline** | Segmen-segmen video sumber yang dipakai. Klik segmen → atur awal/akhir/kecepatan, **✂ Pecah di playhead**, tambah/hapus segmen. |
+| **Teks** | Tambah teks overlay: isi, waktu mulai/selesai (bisa “= playhead”), posisi X/Y, ukuran, rotasi, warna, garis luar, kotak latar + transparansi, HURUF BESAR, animasi **pop**/**fade**. |
+| **Caption** | Pilih gaya (Karaoke Kuning, MrBeast, TikTok Neon, Clean, Podcast Box, Cinema Green), kata per baris, ukuran, posisi, warna teks + highlight, ketebalan garis, highlight per kata. Tombol **✨ Auto subtitle** membuat/sinkron ulang caption dari transkrip, `±0.2s` untuk geser timing, klik baris untuk edit, ikon ◉/◌ untuk sembunyikan, **Unduh .srt**. |
+| **Layout & Logo** | Layout `fit` (video utuh), `crop` (penuh 9:16 + fokus horizontal), `black` (letterbox). Background: blur video, gradien (2 warna), atau warna solid. Unggah logo PNG/JPG sendiri (posisi, ukuran, opacity). |
+| **Export & 4K** | Resolusi 1080p/2K/4K, FPS 24–60, CRF, sharpen saat upscale, normalisasi audio, fade in/out, edit deskripsi/hashtag/hook untuk YouTube, lalu **Render** (progress muncul di preview) atau **Upload ke Shorts**. |
+
+Template sekali klik (dropdown di kanan atas editor) mengubah layout + gaya caption sekaligus.
+Template default dan resolusi export bisa diatur di **Pengaturan**.
+
+### Soal 4K (jujur ya)
+Upscale 4K memakai **lanczos + unsharp** di ffmpeg: hasilnya lebih tajam dan memenuhi syarat
+“video 4K” di platform, tapi **detail baru tidak muncul** — sumber 1080p tetap 1080p.
+Kalau sumbernya 4K (atau pakai `layout: crop` dari video 4K), hasilnya benar-benar 4K asli.
+Render 4K kira-kira 3–6× lebih lama daripada 1080p di CPU.
 
 ## Cari video viral (buat bahan clip / re-upload)
 
@@ -141,14 +167,13 @@ Clipper/
 │   ├── transcribe.py       # faster-whisper (lokal)
 │   ├── subs.py             # parser VTT/SRT (fallback transkrip)
 │   ├── analyze.py          # scoring momen + judul/hashtag + Ollama opsional
-│   ├── captions.py         # generator ASS (caption karaoke & hook)
-│   ├── render.py           # render 1080×1920 (blur/crop, caption, loudnorm)
+│   ├── editor.py           # engine video editor: spec JSON → render (timeline, teks, subtitle, template, 4K)
 │   ├── discover.py        # pencarian video viral (YouTube API + yt-dlp) & skor viral
 │   ├── youtube.py          # OAuth device flow + upload resumable
 │   ├── db.py               # SQLite (jobs & clips)
 │   └── config.py           # path, settings, pencarian ffmpeg
 ├── web/                    # UI tanpa framework & tanpa CDN
-│   ├── index.html  app.js  styles.css
+│   ├── index.html  app.js  editor.js  styles.css
 ├── data/                   # dibuat otomatis: uploads, clips, work, token, db
 └── models/                 # cache model Whisper (offline setelah unduh pertama)
 ```
@@ -166,6 +191,7 @@ Clipper/
 | `captions`, `caption_words`, `caption_color`, `caption_highlight`, `caption_font`, `caption_uppercase` | Gaya caption. |
 | `hook_overlay` | Tampilkan judul hook 5 detik pertama. |
 | `fps`, `crf`, `normalize_audio` | Kualitas render. |
+| `export_height`, `export_sharpen`, `default_template` | Default export editor: 1080p/2K/4K, pertajam saat upscale, template awal. |
 | `yt_privacy`, `yt_category`, `yt_hashtags`, `yt_notify_subscribers` | Default upload. |
 | `auto_render`, `yt_auto_upload` | Otomatisasi penuh. |
 | `llm_enabled`, `llm_url`, `llm_model` | Judul dari Ollama lokal (opsional). |
@@ -203,6 +229,20 @@ Pengaturan tersimpan di `data/settings.json` (bisa diedit manual), dan bisa juga
 | Preview video tidak mau seek | Format sumber tidak di-encode ulang; render dulu clip-nya. |
 | Tab Viral: `Tidak ada hasil dari YouTube` | Server tanpa akses internet, atau YouTube minta verifikasi → isi `ytdlp_cookies_browser`, atau pakai API key. |
 | Tab Viral kosong padahal internet lancar | Filter terlalu ketat (minimal views/durasi). Turunkan minimal views atau pilih "Semua durasi". |
+| Caption tampil tapi font aneh / kotak-kotak | Font tidak ada di sistem. Install font tersebut (mis. Inter) atau ganti di Pengaturan → Font caption. |
+| Render 4K lama / laptop panas | Wajar: 2160×3840 ≈ 4× piksel 1080p. Turunkan ke 1080p, atau turunkan FPS/pakai durasi lebih pendek. |
+| Perubahan di editor tidak muncul di video | Klik **Render** — editor menyimpan “spec”, video baru dihasilkan saat render. |
+
+## API editor
+
+| Endpoint | Fungsi |
+|---|---|
+| `GET /api/editor/meta` | daftar template, gaya caption, resolusi, font |
+| `GET /api/clips/{id}/editor` | state editor: clip, spec, ringkasan, info sumber |
+| `PUT /api/clips/{id}/spec` | simpan spec (dinormalisasi & dibatasi di server) |
+| `POST /api/clips/{id}/spec/template` | terapkan template ke spec |
+| `POST /api/clips/{id}/subtitles` | `regenerate` / `shift` / `clear` subtitle otomatis |
+| `POST /api/clips/{id}/assets` | unggah logo/gambar overlay |
 
 ## Lisensi
 

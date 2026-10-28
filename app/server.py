@@ -1,10 +1,12 @@
 """API + server Clipper (FastAPI). Jalankan: python run.py"""
 from __future__ import annotations
 
+import json
 import mimetypes
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,9 +14,9 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analyze, db, discover, ingest, pipeline, transcribe, youtube
+from . import analyze, db, discover, editor, ingest, media, pipeline, transcribe, youtube
 from .config import (
-    APP_NAME, MAX_UPLOAD_BYTES, VERSION, WEB_DIR, WORK_DIR,
+    APP_NAME, ASSET_DIR, MAX_UPLOAD_BYTES, VERSION, WEB_DIR, WORK_DIR,
     ensure_dirs, ffmpeg_exe, load_settings, update_settings,
 )
 
@@ -382,6 +384,173 @@ def create_app() -> FastAPI:
         if not job or not job.get("source_path"):
             raise HTTPException(404, "Sumber tidak ditemukan")
         return _stream(Path(job["source_path"]), request)
+
+    # ------------------------------------------------------------------ #
+    # video editor (timeline, teks, subtitle, template, export 4K)
+    # ------------------------------------------------------------------ #
+    @app.get("/api/editor/meta")
+    def editor_meta() -> dict[str, Any]:
+        payload = editor.templates_payload()
+        payload["fonts"] = [
+            "Inter", "Arial", "Helvetica", "DejaVu Sans", "Roboto", "Montserrat",
+            "Poppins", "Impact", "Oswald", "Bebas Neue", "Verdana", "Georgia",
+        ]
+        return payload
+
+    @app.get("/api/clips/{clip_id}/editor")
+    def clip_editor_state(clip_id: str) -> dict[str, Any]:
+        clip = db.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip tidak ditemukan")
+        job = db.get_job(clip["job_id"])
+        if not job:
+            raise HTTPException(404, "Project tidak ditemukan")
+        settings = load_settings()
+        source_path = Path(job.get("source_path") or "")
+        if not source_path.exists():
+            raise HTTPException(400, "File sumber sudah tidak ada — jalankan ulang analisis project")
+        info = media.probe(source_path)
+        transcript = transcribe.load_transcript(job["id"])
+        spec = editor.load_or_create_spec(clip, transcript, float(info.duration or 0), settings)
+        return {
+            "clip": {**clip, "has_file": bool(clip.get("file")) and Path(clip["file"]).exists()},
+            "job": {"id": job["id"], "title": job.get("title"), "duration": job.get("duration")},
+            "source": {
+                "duration": info.duration, "width": info.width, "height": info.height,
+                "has_audio": info.has_audio, "fps": info.fps,
+            },
+            "spec": spec,
+            "summary": editor.summarize(spec),
+            "transcript_available": bool(transcript and transcript.get("segments")),
+            "meta": editor.templates_payload(),
+        }
+
+    @app.put("/api/clips/{clip_id}/spec")
+    def save_clip_spec(clip_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        clip = db.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip tidak ditemukan")
+        job = db.get_job(clip["job_id"])
+        if not job:
+            raise HTTPException(404, "Project tidak ditemukan")
+        source_path = Path(job.get("source_path") or "")
+        duration = float(job.get("duration") or 0)
+        if source_path.exists():
+            try:
+                duration = media.probe(source_path).duration or duration
+            except Exception:
+                pass
+        spec = editor.normalize_spec(payload.get("spec") if isinstance(payload, dict) else payload,
+                                     clip, load_settings(), duration)
+        first, last = spec["segments"][0], spec["segments"][-1]
+        db.update_clip(
+            clip_id,
+            spec=json.dumps(spec, ensure_ascii=False),
+            start=round(first["start"], 3),
+            duration=round(editor.spec_duration(spec), 3),
+            meta={**((db.get_clip(clip_id) or {}).get("meta") or {}), "dirty": True,
+                  "edited": True, "last_end": round(last["end"], 3)},
+        )
+        return {"ok": True, "spec": spec, "summary": editor.summarize(spec)}
+
+    @app.post("/api/clips/{clip_id}/spec/template")
+    def apply_clip_template(clip_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        clip = db.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip tidak ditemukan")
+        template_id = str(payload.get("template") or "")
+        if not editor.template_by_id(template_id):
+            raise HTTPException(400, "Template tidak dikenal")
+        job = db.get_job(clip["job_id"]) or {}
+        source_path = Path(job.get("source_path") or "")
+        duration = 0.0
+        if source_path.exists():
+            try:
+                duration = media.probe(source_path).duration
+            except Exception:
+                duration = float(job.get("duration") or 0)
+        spec = editor.load_or_create_spec(clip, transcribe.load_transcript(clip["job_id"]), duration)
+        spec = editor.normalize_spec(editor.apply_template(spec, template_id), clip,
+                                     load_settings(), duration)
+        db.update_clip(clip_id, spec=json.dumps(spec, ensure_ascii=False),
+                       meta={**(clip.get("meta") or {}), "dirty": True, "edited": True})
+        return {"ok": True, "spec": spec, "summary": editor.summarize(spec)}
+
+    @app.post("/api/clips/{clip_id}/subtitles")
+    def clip_subtitles(clip_id: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        clip = db.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip tidak ditemukan")
+        job = db.get_job(clip["job_id"]) or {}
+        source_path = Path(job.get("source_path") or "")
+        duration = 0.0
+        if source_path.exists():
+            try:
+                duration = media.probe(source_path).duration
+            except Exception:
+                duration = float(job.get("duration") or 0)
+        transcript = transcribe.load_transcript(clip["job_id"])
+        spec = editor.load_or_create_spec(clip, transcript, duration)
+        action = str(payload.get("action") or "regenerate")
+
+        if action == "regenerate":
+            if not transcript or not transcript.get("segments"):
+                raise HTTPException(
+                    400,
+                    "Transkrip belum tersedia untuk project ini (Whisper belum jalan / video tanpa audio).",
+                )
+            spec["subtitles"] = editor.generate_subtitles(
+                transcript, spec["segments"],
+                int(payload.get("words_per_line") or spec["captions"].get("words_per_line", 3)),
+                bool(payload.get("word_level", spec["captions"].get("word_level", True))),
+            )
+            spec["captions"]["enabled"] = True
+        elif action == "shift":
+            shift = max(-30.0, min(30.0, float(payload.get("seconds") or 0)))
+            for line in spec.get("subtitles") or []:
+                line["start"] = round(max(0.0, float(line.get("start", 0)) + shift), 3)
+                line["end"] = round(max(0.2, float(line.get("end", 0)) + shift), 3)
+                for word in line.get("words") or []:
+                    word["start"] = round(max(0.0, float(word.get("start", 0)) + shift), 3)
+                    word["end"] = round(max(0.2, float(word.get("end", 0)) + shift), 3)
+            spec["subtitles"] = sorted(spec.get("subtitles") or [], key=lambda s: s["start"])
+        elif action == "clear":
+            spec["subtitles"] = []
+        elif action == "set_words_per_line":
+            spec["captions"]["words_per_line"] = int(payload.get("words_per_line") or 3)
+        else:
+            raise HTTPException(400, f"Aksi subtitle '{action}' tidak dikenal")
+
+        spec = editor.normalize_spec(spec, clip, load_settings(), duration)
+        db.update_clip(clip_id, spec=json.dumps(spec, ensure_ascii=False),
+                       meta={**(clip.get("meta") or {}), "dirty": True, "edited": True})
+        return {"ok": True, "spec": spec, "summary": editor.summarize(spec)}
+
+    @app.post("/api/clips/{clip_id}/assets")
+    def upload_clip_asset(clip_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
+        clip = db.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip tidak ditemukan")
+        ext = Path(file.filename or "logo.png").suffix.lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+            raise HTTPException(400, "Logo harus PNG/JPG/WebP")
+        ASSET_DIR.mkdir(parents=True, exist_ok=True)
+        target = ASSET_DIR / f"{clip_id}_{int(time.time())}{ext}"
+        with target.open("wb") as out:
+            shutil.copyfileobj(file.file, out)
+        if target.stat().st_size > 8 * 1024 * 1024:
+            target.unlink(missing_ok=True)
+            raise HTTPException(413, "Logo terlalu besar (maks 8 MB)")
+        # PNG transparan paling aman untuk overlay
+        return {"ok": True, "path": str(target), "url": f"/api/clips/{clip_id}/assets/{target.name}"}
+
+    @app.get("/api/clips/{clip_id}/assets/{name}")
+    def get_clip_asset(clip_id: str, name: str) -> Response:
+        safe = Path(name).name
+        path = ASSET_DIR / safe
+        if not path.exists() or not safe.startswith(clip_id):
+            raise HTTPException(404, "Aset tidak ditemukan")
+        return FileResponse(path)
 
     # ------------------------------------------------------------------ #
     # youtube
