@@ -146,6 +146,35 @@ langsung terlihat di preview (tanpa render).
 Template sekali klik (dropdown di kanan atas editor) mengubah layout + gaya caption sekaligus.
 Template default dan resolusi export bisa diatur di **Pengaturan**.
 
+### Video dibatasi umur / "Sign in to confirm your age"
+
+YouTube menolak unduhan kalau videonya **age-restricted**, private, members-only, atau
+menganggap permintaan ini bot. Ini bukan bug Clipper — server YouTube memang butuh sesi login.
+
+**Cara paling andal: pasang cookies (sekali saja)**
+
+1. Login YouTube di browser (akun yang berusia 18+ kalau video memang dibatasi umur).
+2. Pasang ekstensi **“Get cookies.txt LOCALLY”** (Chrome/Firefox), buka `youtube.com`,
+   lalu **Export** → dapat file `cookies.txt`.
+3. Di Clipper: **Pengaturan → Cookies untuk video terbatas usia** → **Unggah cookies.txt**
+   (bisa juga **Tempel** isi file, atau tempel JSON dari ekstensi Cookie-Editor).
+4. Ulangi project yang gagal → klik **Coba lagi**.
+
+Cookies disimpan lokal di `data/cookies.txt` (permission 600) dan **tidak dikirim ke mana pun**
+selain ke YouTube saat mengunduh. Hapus kapan saja lewat tombol **Hapus**.
+
+**Alternatif lain**
+
+| Cara | Catatan |
+|---|---|
+| **Cookies browser** | Di Pengaturan pilih Chrome/Firefox/Edge/Brave/Safari. Clipper membaca cookies langsung dari profil browser — **tutup browsernya dulu** (terutama di Windows) supaya file cookies bisa dibaca. |
+| **Client YouTube → TV** | Clipper otomatis mencoba client `tv` setelah client web kalau videonya diblokir umur (`Client YouTube: Auto`). Memilih **TV** membuat semua unduhan memakai client itu. |
+| **Unduh manual** | Kalau semua gagal: unduh videonya sendiri, lalu di tab **Buat Clip** pilih **Dari file** (drag & drop). Semua fitur editor tetap jalan. |
+
+Pesan error di Clipper sekarang menyebutkan penyebabnya secara spesifik (batas umur, bot,
+private, geo-restricted, jaringan) beserta langkah perbaikannya, dan halaman project menampilkan
+tombol **“Atur cookies / unduhan”** saat error-nya berkaitan dengan login.
+
 ### "Hasil klip cuma suara, gambarnya tidak ada"
 
 Kalau klip yang kamu unduh isinya audio saja (atau layar hitam), penyebabnya hampir selalu **sumbernya**,

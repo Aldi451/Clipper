@@ -60,6 +60,7 @@ def create_app() -> FastAPI:
             "ytdlp_version": ytdlp_version,
             "whisper": whisper_ok,
             "youtube": youtube.is_connected(),
+            "cookies": ingest.cookie_summary().get("configured", False),
             "cpu": os.cpu_count() or 1,
             "busy": pipeline.busy_state(),
         }
@@ -75,6 +76,37 @@ def create_app() -> FastAPI:
         saved = update_settings(patch)
         saved.pop("yt_client_secret", None)
         return saved
+
+    # ------------------------------------------------------------------ #
+    # cookies yt-dlp (video terbatas usia / perlu login)
+    # ------------------------------------------------------------------ #
+    @app.get("/api/settings/cookies")
+    def get_cookies() -> dict[str, Any]:
+        return ingest.cookie_summary()
+
+    @app.post("/api/settings/cookies")
+    def upload_cookies(file: UploadFile = File(...)) -> Any:
+        raw = file.file.read()
+        if len(raw) > 2 * 1024 * 1024:
+            raise HTTPException(413, "File cookies terlalu besar (maks 2 MB)")
+        try:
+            text = raw.decode("utf-8", "replace")
+            summary = ingest.save_cookies(text)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return {"ok": True, **summary}
+
+    @app.post("/api/settings/cookies/text")
+    def paste_cookies(payload: dict[str, Any] = Body(...)) -> Any:
+        try:
+            summary = ingest.save_cookies(str(payload.get("text") or ""))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return {"ok": True, **summary}
+
+    @app.delete("/api/settings/cookies")
+    def remove_cookies() -> dict[str, Any]:
+        return {"ok": True, **ingest.clear_cookies()}
 
     # ------------------------------------------------------------------ #
     # project / job
