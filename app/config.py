@@ -120,6 +120,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # kredensial youtube (diisi dari tab YouTube)
     "yt_client_id": "",
     "yt_client_secret": "",
+    # pencarian video viral
+    "discover_region": "ID",
+    "discover_days": 30,
+    "discover_min_views": 100000,
+    "discover_min_duration": 240,   # 0 = semua durasi; 240 dtk = fokus video panjang
+    "discover_max_duration": 0,     # 0 = tanpa batas
+    "discover_limit": 24,
+    "discover_queries": "podcast indonesia, motivasi hidup, ceramah agama, bisnis online",
+    "discover_use_api": True,       # pakai YouTube Data API kalau tersedia (akurat, pakai kuota)
+    "discover_api_key": "",         # opsional: API key gratis, tanpa perlu login
 }
 
 _settings_lock = threading.RLock()  # RLock: update_settings() memanggil load_settings()

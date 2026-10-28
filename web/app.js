@@ -12,6 +12,16 @@ const state = {
   yt: null,
   editing: null,
   busy: {},
+  viral: {
+    config: null,
+    items: [],
+    selected: new Set(),
+    query: "",
+    filters: { region: "ID", days: 30, min_views: 100000, min_duration: 240, max_duration: 0, sort: "score", only_unused: false, use_api: true, category: "" },
+    loading: false,
+    notes: [],
+    backend: "",
+  },
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -44,6 +54,27 @@ function fmtDur(seconds) {
   const m = Math.floor(s / 60);
   const rest = s % 60;
   return m + " mnt" + (rest ? " " + rest + " dtk" : "");
+}
+
+function fmtViews(n) {
+  const v = Number(n) || 0;
+  if (v >= 1e9) return (v / 1e9).toFixed(1).replace(".0", "") + " M";
+  if (v >= 1e6) return (v / 1e6).toFixed(1).replace(".0", "") + " jt";
+  if (v >= 1e3) return (v / 1e3).toFixed(1).replace(".0", "") + " rb";
+  return String(v);
+}
+
+function fmtAge(publishedAt) {
+  const ts = Number(publishedAt) || 0;
+  if (!ts) return "tanggal ?";
+  const hours = Math.max(0, (Date.now() / 1000 - ts) / 3600);
+  if (hours < 1) return Math.round(hours * 60) + " mnt lalu";
+  if (hours < 24) return Math.round(hours) + " jam lalu";
+  const days = Math.round(hours / 24);
+  if (days < 30) return days + " hari lalu";
+  const months = Math.round(days / 30);
+  if (months < 12) return months + " bln lalu";
+  return Math.round(months / 12) + " thn lalu";
 }
 
 function clamp(value, min, max) {
@@ -172,7 +203,7 @@ function parseRoute() {
   const parts = hash.split("/").filter(Boolean);
   if (!parts.length) return { route: "new", param: "" };
   if (parts[0] === "project" && parts[1]) return { route: "project", param: parts[1] };
-  if (["new", "projects", "youtube", "settings"].includes(parts[0])) {
+  if (["new", "viral", "projects", "youtube", "settings"].includes(parts[0])) {
     return { route: parts[0], param: "" };
   }
   return { route: "new", param: "" };
@@ -189,6 +220,7 @@ async function renderRoute() {
   view.innerHTML = `<div class="empty"><div class="spinner"></div> Memuat…</div>`;
   try {
     if (route === "new") await renderNew();
+    else if (route === "viral") await renderViral();
     else if (route === "projects") await renderProjects();
     else if (route === "project") await renderProject(param);
     else if (route === "youtube") await renderYouTube();
@@ -254,6 +286,11 @@ async function renderNew() {
           <div class="hint" id="upload-label" style="margin-top:6px"></div>
         </div>
         <input type="file" id="file-input" accept="video/*,audio/*,.mkv,.webm,.mov,.flv,.ts" hidden />
+      </div>
+
+      <div class="row" style="margin-top:12px;justify-content:center">
+        <span class="tiny dim">Belum tahu mau clip apa?</span>
+        <a class="tiny" href="#/viral">🔥 Cari video yang sedang viral →</a>
       </div>
 
       <div class="card tight" style="margin-top:16px">
@@ -439,6 +476,385 @@ async function loadRecent() {
     box.innerHTML = `<div class="projects">${jobs.map(jobCardHtml).join("")}</div>`;
   } catch (err) {
     box.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* view: video viral                                                  */
+/* ------------------------------------------------------------------ */
+function viralBackendLabel(backends) {
+  if (!backends) return "";
+  if (backends.api_available && backends.prefer_api) {
+    return backends.api_key ? "YouTube API (API key)" : "YouTube API (akun terhubung)";
+  }
+  if (backends.ytdlp) return "yt-dlp (tanpa login)";
+  return "tidak ada backend";
+}
+
+function viralCardHtml(item) {
+  const selected = state.viral.selected.has(item.id);
+  const scoreClass = item.score >= 70 ? "hot" : item.score >= 45 ? "warm" : "";
+  return `
+    <article class="viral-card ${selected ? "selected" : ""}" data-viral="${esc(item.id)}">
+      <div class="vc-thumb" data-action="viral-open" data-url="${esc(item.url)}">
+        <img loading="lazy" src="${esc(item.thumbnail)}" alt="" onerror="this.style.opacity=.15" />
+        <span class="vc-dur">${esc(fmtTime(item.duration))}</span>
+        <span class="vc-score ${scoreClass}" title="Skor viral">${Math.round(item.score)}</span>
+        <label class="vc-check" title="Pilih untuk diproses sekaligus">
+          <input type="checkbox" data-action="viral-select" data-id="${esc(item.id)}" ${selected ? "checked" : ""} />
+        </label>
+        ${item.used_job_id ? `<span class="vc-used">sudah diproses</span>` : ""}
+      </div>
+      <div class="vc-body">
+        <div class="vc-title" title="${esc(item.title)}">${esc(item.title)}</div>
+        <div class="tiny dim vc-channel">${esc(item.channel || "—")}</div>
+        <div class="meta-row">
+          <span>${esc(fmtViews(item.views))} views</span>
+          <span>·</span>
+          <span>${esc(fmtAge(item.published_at))}</span>
+          <span>·</span>
+          <span title="views per jam">${esc(fmtViews(item.vph))}/jam</span>
+          ${item.query ? `<span class="tag" style="text-transform:none">${esc(item.query)}</span>` : `<span class="tag">trending</span>`}
+        </div>
+        <div class="clip-actions">
+          <button class="btn small primary" data-action="viral-clip" data-id="${esc(item.id)}">Buat clip</button>
+          <a class="btn small ghost" href="${esc(item.url)}" target="_blank" rel="noopener">Buka ↗</a>
+          ${item.used_job_id ? `<a class="btn small ghost" href="#/project/${esc(item.used_job_id)}">Lihat project</a>` : ""}
+        </div>
+      </div>
+    </article>`;
+}
+
+function viralFilterBar() {
+  const f = state.viral.filters;
+  const cfg = state.viral.config || { regions: [], categories: [] };
+  return `
+    <div class="grid-3" style="margin-top:14px">
+      <div class="field">
+        <label>Negara / region trending</label>
+        <select class="select" data-viral-filter="region">
+          ${(cfg.regions || []).map((r) => `<option value="${esc(r.code)}" ${f.region === r.code ? "selected" : ""}>${esc(r.label)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field">
+        <label>Rentang waktu</label>
+        <select class="select" data-viral-filter="days">
+          ${[[7, "7 hari terakhir"], [14, "14 hari"], [30, "30 hari"], [90, "3 bulan"], [365, "1 tahun"]]
+            .map(([v, label]) => `<option value="${v}" ${Number(f.days) === v ? "selected" : ""}>${label}</option>`)
+            .join("")}
+        </select>
+      </div>
+      <div class="field">
+        <label>Minimal views</label>
+        <select class="select" data-viral-filter="min_views">
+          ${[[0, "Semua"], [10000, "10 rb"], [50000, "50 rb"], [100000, "100 rb"], [500000, "500 rb"], [1000000, "1 juta"], [5000000, "5 juta"]]
+            .map(([v, label]) => `<option value="${v}" ${Number(f.min_views) === v ? "selected" : ""}>${label}</option>`)
+            .join("")}
+        </select>
+      </div>
+      <div class="field">
+        <label>Durasi video</label>
+        <select class="select" data-viral-filter="duration_preset">
+          ${[
+            ["long", "Video panjang (≥ 4 menit)"],
+            ["medium", "Sedang (1–4 menit)"],
+            ["short", "Shorts (≤ 3 menit)"],
+            ["all", "Semua durasi"],
+          ]
+            .map(([v, label]) => {
+              const active = v === "long" ? Number(f.min_duration) >= 240 && !Number(f.max_duration)
+                : v === "short" ? Number(f.max_duration) === 180
+                : v === "medium" ? Number(f.min_duration) === 60 && Number(f.max_duration) === 240
+                : !Number(f.min_duration) && !Number(f.max_duration);
+              return `<option value="${v}" ${active ? "selected" : ""}>${label}</option>`;
+            })
+            .join("")}
+        </select>
+      </div>
+      <div class="field">
+        <label>Kategori</label>
+        <select class="select" data-viral-filter="category">
+          ${(cfg.categories || []).map((c) => `<option value="${esc(c.id)}" ${f.category === c.id ? "selected" : ""}>${esc(c.label)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field">
+        <label>Sumber pencarian</label>
+        <label class="switch" style="margin-top:6px">
+          <input type="checkbox" data-viral-filter="use_api" ${f.use_api ? "checked" : ""} ${cfg.backends && cfg.backends.api_available ? "" : "disabled"} />
+          <span class="track"></span>
+          <span class="tiny">${cfg.backends && cfg.backends.api_available ? "Pakai YouTube API resmi (akurat, pakai kuota)" : "API belum aktif — memakai yt-dlp"}</span>
+        </label>
+      </div>
+    </div>`;
+}
+
+async function renderViral() {
+  const view = $("#view");
+  const [config, cached] = await Promise.all([
+    api("/api/discover/config"),
+    api("/api/discover?limit=60&sort=" + encodeURIComponent(state.viral.filters.sort)),
+  ]);
+  state.viral.config = config;
+  if (!state.viral.items.length) state.viral.items = cached;
+  const f = state.viral.filters;
+  if (config.defaults) {
+    // pakai default dari pengaturan kalau belum pernah cari
+    if (!state.viral.touched) {
+      f.region = config.defaults.region || f.region;
+      f.days = Number(config.defaults.days) || f.days;
+      if (Number.isFinite(Number(config.defaults.min_views))) f.min_views = Number(config.defaults.min_views);
+      if (Number.isFinite(Number(config.defaults.min_duration))) f.min_duration = Number(config.defaults.min_duration);
+      f.max_duration = Number(config.defaults.max_duration) || 0;
+      f.use_api = config.defaults.use_api !== false;
+    }
+  }
+
+  const backends = config.backends || {};
+  view.innerHTML = `
+    <div class="page-head">
+      <div>
+        <h1>Video viral <span class="g">siap di-clip</span></h1>
+        <p class="sub">
+          Cari video yang sedang ramai (trending + pencarian "paling banyak ditonton"), lalu
+          satu klik untuk dijadikan bahan clip. Video hanya diunduh saat kamu klik <b>Buat clip</b>.
+        </p>
+      </div>
+      <span class="tag ${backends.api_available ? "done" : ""}">${esc(viralBackendLabel(backends))}</span>
+    </div>
+
+    <div class="card tight">
+      <div class="url-bar" style="margin-top:0">
+        <input class="input" id="viral-q" placeholder="Kata kunci, mis: podcast indonesia, motivasi hidup, ceramah… (pisahkan dengan koma)"
+          value="${esc(state.viral.query || config.defaults && config.defaults.queries || "")}" />
+        <button class="btn primary" id="viral-search">🔥 Cari viral</button>
+      </div>
+      <div class="pill-row" id="viral-presets" style="margin-top:10px">
+        ${(config.presets || []).slice(0, 14).map((p) =>
+          `<button class="chip-btn" data-action="viral-preset" data-query="${esc(p.query)}">${esc(p.label)}</button>`
+        ).join("")}
+      </div>
+      ${viralFilterBar()}
+      <div class="row" style="margin-top:14px;justify-content:space-between">
+        <div class="row">
+          <button class="btn small ghost" data-action="viral-trending">Ambil trending sekarang</button>
+          <span class="tiny dim" id="viral-status">${state.viral.notes.length ? esc(state.viral.notes[state.viral.notes.length - 1]) : ""}</span>
+        </div>
+        <span class="tiny dim">Skor viral = kecepatan views/jam + total views + engagement</span>
+      </div>
+    </div>
+
+    <div class="notice tiny">
+      <b>Catatan hak cipta:</b> mengunggah ulang video orang lain apa adanya bisa melanggar hak cipta dan
+      berisiko klaim/strike. Pakai clip sebagai bahan komentar, reaksi, atau potongan transformatif,
+      dan sebutkan sumbernya di deskripsi.
+    </div>
+
+    <div class="row" style="justify-content:space-between;margin:18px 0 10px;gap:10px">
+      <h2 style="font-size:16px;margin:0">Hasil <span class="tiny dim" id="viral-count">${state.viral.items.length} video</span></h2>
+      <div class="row">
+        <select class="select" id="viral-sort" style="width:auto;padding:8px 34px 8px 12px">
+          ${[["score", "Skor viral"], ["vph", "Views/jam"], ["views", "Total views"], ["recent", "Terbaru"], ["new", "Baru ditemukan"]]
+            .map(([v, label]) => `<option value="${v}" ${state.viral.filters.sort === v ? "selected" : ""}>${label}</option>`)
+            .join("")}
+        </select>
+        <label class="switch tiny">
+          <input type="checkbox" id="viral-only-unused" ${state.viral.filters.only_unused ? "checked" : ""} />
+          <span class="track"></span><span>Belum diproses</span>
+        </label>
+        <button class="btn small primary" data-action="viral-clip-batch" ${state.viral.selected.size ? "" : "disabled"}>
+          Buat clip terpilih${state.viral.selected.size ? ` (${state.viral.selected.size})` : ""}
+        </button>
+        <button class="btn small ghost danger" data-action="viral-clear">Bersihkan daftar</button>
+      </div>
+    </div>
+
+    <div id="viral-results">
+      ${state.viral.loading ? `<div class="empty"><div class="spinner"></div><div style="margin-top:10px">Mencari video viral… (bisa 10–60 detik)</div></div>` : ""}
+      ${
+        !state.viral.loading && state.viral.items.length
+          ? `<div class="viral-grid">${state.viral.items.map(viralCardHtml).join("")}</div>`
+          : !state.viral.loading
+            ? `<div class="card"><div class="empty"><div class="big">🔥</div>
+                Belum ada hasil. Tulis kata kunci lalu <b>Cari viral</b>, atau ambil trending sekarang.
+                <div style="margin-top:14px"><button class="btn primary" data-action="viral-trending">Ambil trending sekarang</button></div>
+              </div></div>`
+            : ""
+      }
+    </div>
+  `;
+
+  const input = $("#viral-q");
+  if (input) {
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") runViralSearch();
+    });
+  }
+  $("#viral-search")?.addEventListener("click", () => runViralSearch());
+  $("#viral-sort")?.addEventListener("change", async (e) => {
+    state.viral.filters.sort = e.target.value;
+    await refreshViralList();
+  });
+  $("#viral-only-unused")?.addEventListener("change", async (e) => {
+    state.viral.filters.only_unused = e.target.checked;
+    await refreshViralList();
+  });
+  $$("[data-viral-filter]").forEach((el) => {
+    el.addEventListener("change", () => {
+      const key = el.dataset.viralFilter;
+      state.viral.touched = true;
+      if (key === "duration_preset") {
+        const presets = {
+          long: { min_duration: 240, max_duration: 0 },
+          medium: { min_duration: 60, max_duration: 240 },
+          short: { min_duration: 0, max_duration: 180 },
+          all: { min_duration: 0, max_duration: 0 },
+        };
+        Object.assign(state.viral.filters, presets[el.value] || presets.all);
+      } else if (key === "use_api") {
+        state.viral.filters.use_api = el.checked;
+      } else if (["days", "min_views", "region"].includes(key)) {
+        state.viral.filters[key] = key === "region" ? el.value : Number(el.value);
+      } else {
+        state.viral.filters[key] = el.value;
+      }
+    });
+  });
+}
+
+function setViralStatus(text) {
+  const el = $("#viral-status");
+  if (el) el.textContent = text || "";
+}
+
+async function runViralSearch() {
+  const f = state.viral.filters;
+  const qInput = $("#viral-q");
+  const queries = (qInput ? qInput.value : state.viral.query || "")
+    .split(",")
+    .map((q) => q.trim())
+    .filter(Boolean);
+  state.viral.query = queries.join(", ");
+  state.viral.touched = true;
+  state.viral.loading = true;
+  state.viral.notes = [];
+  const resultsBox = $("#viral-results");
+  if (resultsBox) resultsBox.innerHTML = `<div class="empty"><div class="spinner"></div><div style="margin-top:10px">Mencari video viral… (bisa 10–60 detik)</div></div>`;
+  const btn = $("#viral-search");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span> Mencari…`;
+  }
+  setViralStatus("Menghubungi YouTube…");
+  try {
+    const res = await api("/api/discover/search", {
+      method: "POST",
+      body: {
+        queries,
+        region: f.region,
+        days: f.days,
+        min_views: f.min_views,
+        min_duration: f.min_duration,
+        max_duration: f.max_duration,
+        limit: Number(state.viral.config?.defaults?.limit || 24),
+        include_trending: true,
+        category: f.category,
+        use_api: f.use_api,
+        enrich: true,
+      },
+    });
+    state.viral.items = res.items || [];
+    state.viral.notes = res.notes || [];
+    state.viral.backend = res.backend || "";
+    state.viral.selected.clear();
+    await renderViral();
+    const last = state.viral.notes[state.viral.notes.length - 1] || "";
+    toast(last || (state.viral.items.length + " video ditemukan"), state.viral.items.length ? "ok" : "bad");
+  } catch (err) {
+    toast(err.message, "bad");
+    state.viral.loading = false;
+    if (resultsBox) {
+      resultsBox.innerHTML = `<div class="card"><div class="empty"><div class="big">😵</div>
+        ${esc(err.message)}<div style="margin-top:14px"><button class="btn" onclick="location.reload()">Muat ulang</button></div></div></div>`;
+    }
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = "🔥 Cari viral";
+    }
+  }
+}
+
+async function fetchViralTrending() {
+  const f = state.viral.filters;
+  const btn = document.querySelector('[data-action="viral-trending"]');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spinner"></span> Mengambil…`;
+  }
+  setViralStatus("Mengambil trending YouTube…");
+  try {
+    const res = await api("/api/discover/trending", {
+      method: "POST",
+      body: {
+        region: f.region,
+        limit: Number(state.viral.config?.defaults?.limit || 24),
+        category: f.category,
+        days: f.days,
+        use_api: f.use_api,
+        enrich: true,
+      },
+    });
+    if (res.items && res.items.length) {
+      const known = new Set(state.viral.items.map((i) => i.id));
+      state.viral.items = [...res.items.filter((i) => !known.has(i.id)), ...state.viral.items];
+    }
+    state.viral.notes = res.notes || [];
+    await renderViral();
+    toast((res.items || []).length + " video trending ditambahkan", "ok");
+  } catch (err) {
+    toast(err.message, "bad");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = "Ambil trending sekarang";
+    }
+  }
+}
+
+async function refreshViralList() {
+  const f = state.viral.filters;
+  const params = new URLSearchParams({
+    sort: f.sort,
+    min_views: String(f.min_views || 0),
+    min_duration: String(f.min_duration || 0),
+    max_duration: String(f.max_duration || 0),
+    only_unused: f.only_unused ? "true" : "false",
+    limit: "60",
+  });
+  try {
+    state.viral.items = await api("/api/discover?" + params.toString());
+    state.viral.selected.clear();
+    await renderViral();
+  } catch (err) {
+    toast(err.message, "bad");
+  }
+}
+
+async function viralMakeClip(id, button) {
+  if (button) {
+    button.dataset.label = button.textContent.trim();
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span>`;
+  }
+  try {
+    const res = await api("/api/discover/" + id + "/clip", { method: "POST", body: {} });
+    toast("Video masuk antrean — menganalisa momen…", "ok");
+    location.hash = "#/project/" + res.job.id;
+  } catch (err) {
+    toast(err.message, "bad");
+    if (button) {
+      button.disabled = false;
+      button.innerHTML = button.dataset.label || "Buat clip";
+    }
   }
 }
 
@@ -989,8 +1405,13 @@ async function pollDeviceStatus() {
 /* ------------------------------------------------------------------ */
 async function renderSettings() {
   const view = $("#view");
-  const [settings, health] = await Promise.all([api("/api/settings"), api("/api/health")]);
+  const [settings, health, viralConfig] = await Promise.all([
+    api("/api/settings"),
+    api("/api/health"),
+    api("/api/discover/config").catch(() => null),
+  ]);
   state.settings = settings;
+  if (viralConfig) state.viral.config = viralConfig;
   const s = settings;
 
   view.innerHTML = `
@@ -1153,6 +1574,62 @@ async function renderSettings() {
     </div>
 
     <div class="card">
+      <div class="card-title"><h2>Pencarian video viral</h2><span class="tiny dim">tab 🔥 Viral</span></div>
+      <p class="hint" style="margin-top:0">
+        Dipakai untuk menyarankan video yang sedang ramai. Kalau API resmi aktif (login YouTube atau API key),
+        data views/engagement paling akurat; kalau tidak, Clipper memakai yt-dlp tanpa login.
+      </p>
+      <div class="grid-3" style="margin-top:12px">
+        <div class="field">
+          <label>Region default</label>
+          <select class="select" data-setting="discover_region">
+            ${(state.viral.config && state.viral.config.regions ? state.viral.config.regions : [{ code: "ID", label: "Indonesia" }])
+              .map((r) => `<option value="${esc(r.code)}" ${s.discover_region === r.code ? "selected" : ""}>${esc(r.label)}</option>`)
+              .join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label>Rentang waktu (hari)</label>
+          <input class="input" type="number" min="1" max="365" data-setting="discover_days" value="${s.discover_days}" />
+        </div>
+        <div class="field">
+          <label>Minimal views</label>
+          <input class="input" type="number" min="0" step="1000" data-setting="discover_min_views" value="${s.discover_min_views}" />
+        </div>
+        <div class="field">
+          <label>Durasi minimum (detik, 0 = semua)</label>
+          <input class="input" type="number" min="0" data-setting="discover_min_duration" value="${s.discover_min_duration}" />
+        </div>
+        <div class="field">
+          <label>Durasi maksimum (0 = tanpa batas)</label>
+          <input class="input" type="number" min="0" data-setting="discover_max_duration" value="${s.discover_max_duration}" />
+        </div>
+        <div class="field">
+          <label>Jumlah hasil</label>
+          <input class="input" type="number" min="4" max="60" data-setting="discover_limit" value="${s.discover_limit}" />
+        </div>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label>Kata kunci default (pisahkan dengan koma)</label>
+        <input class="input" data-setting="discover_queries" value="${esc(s.discover_queries)}" />
+      </div>
+      <div class="grid-2" style="margin-top:12px">
+        <div class="field">
+          <label>YouTube API key (opsional, gratis)</label>
+          <input class="input mono" data-setting="discover_api_key" placeholder="AIza…" value="${esc(s.discover_api_key || "")}" spellcheck="false" />
+          <span class="hint">Biar pencarian viral jalan tanpa login YouTube. Buat di Google Cloud Console → Credentials → API key.</span>
+        </div>
+        <div class="field">
+          <label>Mode</label>
+          <label class="switch" style="margin-top:6px">
+            <input type="checkbox" data-setting="discover_use_api" ${s.discover_use_api ? "checked" : ""} />
+            <span class="track"></span><span class="tiny">Pakai API resmi kalau tersedia (akurat, kuota 10.000/hari)</span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="card-title"><h2>Ambil video dari link</h2><span class="tiny dim">yt-dlp</span></div>
       <div class="grid-2">
         <div class="field">
@@ -1194,6 +1671,65 @@ async function renderSettings() {
   bindSettingInputs();
 }
 
+async function handleViralAction(e, action, id, target) {
+  if (action === "viral-clip") {
+    e.preventDefault();
+    await viralMakeClip(id, target);
+  } else if (action === "viral-clip-batch") {
+    const ids = Array.from(state.viral.selected);
+    if (!ids.length) return;
+    target.dataset.label = target.textContent.trim();
+    target.disabled = true;
+    target.innerHTML = `<span class="spinner"></span> Memproses…`;
+    try {
+      const res = await api("/api/discover/clip-batch", { method: "POST", body: { ids } });
+      toast(res.count + " video masuk antrean clip", "ok");
+      state.viral.selected.clear();
+      if (res.jobs && res.jobs.length === 1) location.hash = "#/project/" + res.jobs[0];
+      else location.hash = "#/projects";
+    } catch (err) {
+      toast(err.message, "bad");
+      target.disabled = false;
+      target.innerHTML = "Buat clip terpilih";
+    }
+  } else if (action === "viral-trending") {
+    e.preventDefault();
+    await fetchViralTrending();
+  } else if (action === "viral-preset") {
+    e.preventDefault();
+    const q = target.dataset.query || "";
+    const input = $("#viral-q");
+    if (input) input.value = q;
+    state.viral.query = q;
+    await runViralSearch();
+  } else if (action === "viral-select") {
+    // jangan preventDefault: state checkbox diurus browser
+    const discoveryId = target.dataset.id;
+    if (target.checked) state.viral.selected.add(discoveryId);
+    else state.viral.selected.delete(discoveryId);
+    const card = target.closest(".viral-card");
+    if (card) card.classList.toggle("selected", target.checked);
+    const batchBtn = document.querySelector('[data-action="viral-clip-batch"]');
+    if (batchBtn) {
+      const count = state.viral.selected.size;
+      batchBtn.disabled = count === 0;
+      batchBtn.textContent = count ? `Buat clip terpilih (${count})` : "Buat clip terpilih";
+    }
+  } else if (action === "viral-open") {
+    e.preventDefault();
+    const url = target.dataset.url;
+    if (url) window.open(url, "_blank", "noopener");
+  } else if (action === "viral-clear") {
+    e.preventDefault();
+    if (!confirm("Hapus daftar video viral yang tersimpan?")) return;
+    await api("/api/discover", { method: "DELETE" });
+    state.viral.items = [];
+    state.viral.selected.clear();
+    await renderViral();
+    toast("Daftar viral dibersihkan", "ok");
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* aksi global                                                        */
 /* ------------------------------------------------------------------ */
@@ -1205,6 +1741,11 @@ document.addEventListener("click", async (e) => {
   }
   const action = target.dataset.action;
   const id = target.dataset.id;
+
+  if (action.startsWith("viral-")) {
+    await handleViralAction(e, action, id, target);
+    return;
+  }
 
   try {
     if (action === "open-job") {

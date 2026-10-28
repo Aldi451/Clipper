@@ -111,6 +111,11 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
             info = ydl.extract_info(url, download=True)
             if info and info.get("entries"):
                 info = info["entries"][0]
+            if not info:
+                raise DownloadError(
+                    "Video tidak bisa diunduh. Cek linknya (video private/dihapus?), atau server "
+                    "ini tidak punya akses internet ke YouTube/TikTok."
+                )
             path = Path(ydl.prepare_filename(info))
             if not path.exists():
                 candidates = sorted(out_dir.glob("source.*"))

@@ -15,6 +15,7 @@ lalu **upload otomatis ke YouTube Shorts** channel kamu.
 
 | | |
 |---|---|
+| 🔥 **Cari yang viral** | Tab **Viral**: trending YouTube per negara + pencarian "paling banyak ditonton" per kata kunci, diberi skor viral (views/jam, total views, engagement). Satu klik → jadi bahan clip. |
 | 🔗 **Dari link** | YouTube, TikTok, Instagram, X/Twitter, Facebook, Vimeo, ratusan situs lain via `yt-dlp`. Bisa pakai cookies browser untuk video yang perlu login. |
 | 📁 **Dari file** | Upload lewat browser (drag & drop, aman untuk file besar, streaming) atau tunjuk path lokal di server. |
 | 🎙️ **Transkrip offline** | `faster-whisper` (tiny → large-v3, CPU atau CUDA). Model diunduh **sekali**, setelah itu 100% offline. Kalau video sudah punya subtitle, Clipper memakainya lebih dulu (instan, tanpa model). |
@@ -64,6 +65,32 @@ CLIPPER_DATA_DIR=/mnt/disk/clip python run.py   # simpan video di disk lain
 ```
 
 ---
+
+## Cari video viral (buat bahan clip / re-upload)
+
+Buka tab **🔥 Viral**. Ada dua cara:
+
+1. **Trending sekarang** — ambil daftar trending YouTube untuk negara terpilih.
+2. **Cari kata kunci** — mis. `podcast indonesia, motivasi hidup, ceramah agama`
+   (urut "paling banyak ditonton" dalam rentang waktu yang dipilih).
+
+Hasilnya diberi **skor viral 0–100** = kecepatan views/jam (50%) + total views (32%) +
+engagement like/komentar (18%). Filter yang tersedia: negara, rentang waktu (7 hari–1 tahun),
+minimal views, durasi (video panjang / sedang / Shorts), dan kategori.
+
+Klik **Buat clip** pada kartu → video otomatis masuk antrean project (unduh → transkrip →
+cari momen → render → upload). Bisa juga centang beberapa video lalu **Buat clip terpilih**.
+
+**Dua backend** (otomatis dipilih):
+
+| Backend | Kapan dipakai | Catatan |
+|---|---|---|
+| YouTube Data API v3 | Kalau akun YouTube sudah login **atau** kamu mengisi API key gratis di Pengaturan | Paling akurat (views, like, komentar, tanggal). Trending = 1 unit kuota, pencarian keyword ≈ 101 unit. |
+| yt-dlp | Kalau API tidak tersedia / dimatikan | Tanpa login & tanpa kuota; data views dilengkapi bertahap otomatis. |
+
+> ⚠️ **Hak cipta:** mengunggah ulang video orang lain apa adanya bisa melanggar hak cipta
+> dan berisiko klaim/strike di channel kamu. Pakai clip sebagai bahan komentar, reaksi,
+> atau potongan transformatif, dan sebutkan sumbernya di deskripsi.
 
 ## Cara pakai (3 langkah)
 
@@ -116,6 +143,7 @@ Clipper/
 │   ├── analyze.py          # scoring momen + judul/hashtag + Ollama opsional
 │   ├── captions.py         # generator ASS (caption karaoke & hook)
 │   ├── render.py           # render 1080×1920 (blur/crop, caption, loudnorm)
+│   ├── discover.py        # pencarian video viral (YouTube API + yt-dlp) & skor viral
 │   ├── youtube.py          # OAuth device flow + upload resumable
 │   ├── db.py               # SQLite (jobs & clips)
 │   └── config.py           # path, settings, pencarian ffmpeg
@@ -142,6 +170,10 @@ Clipper/
 | `auto_render`, `yt_auto_upload` | Otomatisasi penuh. |
 | `llm_enabled`, `llm_url`, `llm_model` | Judul dari Ollama lokal (opsional). |
 | `ytdlp_cookies_browser`, `ytdlp_proxy` | Untuk video yang perlu login / koneksi khusus. |
+| `discover_region`, `discover_days` | Default region & rentang waktu pencarian viral. |
+| `discover_min_views`, `discover_min_duration`, `discover_max_duration`, `discover_limit` | Filter default hasil viral (`120–180` detik cocok untuk cari Shorts). |
+| `discover_queries` | Kata kunci default (dipisah koma) saat tab Viral dibuka. |
+| `discover_use_api`, `discover_api_key` | Pakai YouTube API resmi & API key gratis (opsional, tanpa login). |
 
 Pengaturan tersimpan di `data/settings.json` (bisa diedit manual), dan bisa juga lewat API
 `PATCH /api/settings`. Dokumentasi API interaktif: **http://localhost:8420/api/docs**.
@@ -169,6 +201,8 @@ Pengaturan tersimpan di `data/settings.json` (bisa diedit manual), dan bisa juga
 | Upload 403 `quotaExceeded` | Kuota harian YouTube habis (≈6 upload/hari). Coba besok. |
 | Login kode gagal | Pastikan OAuth client bertipe **TVs and Limited Input devices** dan email kamu terdaftar di *Test users*. |
 | Preview video tidak mau seek | Format sumber tidak di-encode ulang; render dulu clip-nya. |
+| Tab Viral: `Tidak ada hasil dari YouTube` | Server tanpa akses internet, atau YouTube minta verifikasi → isi `ytdlp_cookies_browser`, atau pakai API key. |
+| Tab Viral kosong padahal internet lancar | Filter terlalu ketat (minimal views/durasi). Turunkan minimal views atau pilih "Semua durasi". |
 
 ## Lisensi
 

@@ -57,7 +57,42 @@ CREATE TABLE IF NOT EXISTS clips (
 );
 CREATE INDEX IF NOT EXISTS idx_clips_job ON clips(job_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS discoveries (
+    id            TEXT PRIMARY KEY,
+    platform      TEXT NOT NULL DEFAULT 'youtube',
+    ext_id        TEXT NOT NULL,
+    url           TEXT NOT NULL DEFAULT '',
+    title         TEXT NOT NULL DEFAULT '',
+    channel       TEXT NOT NULL DEFAULT '',
+    channel_url   TEXT NOT NULL DEFAULT '',
+    thumbnail     TEXT NOT NULL DEFAULT '',
+    duration      REAL NOT NULL DEFAULT 0,
+    views         INTEGER NOT NULL DEFAULT 0,
+    likes         INTEGER NOT NULL DEFAULT 0,
+    comments      INTEGER NOT NULL DEFAULT 0,
+    published_at  REAL NOT NULL DEFAULT 0,
+    vph           REAL NOT NULL DEFAULT 0,
+    score         REAL NOT NULL DEFAULT 0,
+    is_short      INTEGER NOT NULL DEFAULT 0,
+    query         TEXT NOT NULL DEFAULT '',
+    source        TEXT NOT NULL DEFAULT '',
+    region        TEXT NOT NULL DEFAULT '',
+    used_job_id   TEXT NOT NULL DEFAULT '',
+    meta          TEXT NOT NULL DEFAULT '{}',
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL,
+    UNIQUE (platform, ext_id)
+);
+CREATE INDEX IF NOT EXISTS idx_discover_score ON discoveries(score DESC);
+CREATE INDEX IF NOT EXISTS idx_discover_published ON discoveries(published_at DESC);
 """
+
+DISCOVERY_FIELDS = {
+    "platform", "ext_id", "url", "title", "channel", "channel_url", "thumbnail", "duration",
+    "views", "likes", "comments", "published_at", "vph", "score", "is_short", "query", "source",
+    "region", "used_job_id", "meta", "updated_at",
+}
 
 JOB_FIELDS = {
     "kind", "status", "stage", "progress", "message", "title", "source", "source_path",
@@ -251,3 +286,128 @@ def reset_jobs_on_startup() -> None:
             "UPDATE clips SET status='suggested', progress=0, message='' "
             "WHERE status='rendering'"
         )
+
+
+# --------------------------------------------------------------------------- #
+# discoveries (video viral yang ditemukan)
+# --------------------------------------------------------------------------- #
+def upsert_discoveries(items: list[dict[str, Any]]) -> int:
+    """Simpan/perbarui hasil pencarian viral (dedupe per platform+video id)."""
+    if not items:
+        return 0
+    now = time.time()
+    saved = 0
+    with connect() as conn:
+        for item in items:
+            values = {
+                "id": new_id("viral"),
+                "platform": item.get("platform") or "youtube",
+                "ext_id": str(item.get("ext_id") or ""),
+                "url": item.get("url") or "",
+                "title": (item.get("title") or "")[:300],
+                "channel": (item.get("channel") or "")[:200],
+                "channel_url": item.get("channel_url") or "",
+                "thumbnail": item.get("thumbnail") or "",
+                "duration": float(item.get("duration") or 0),
+                "views": int(item.get("views") or 0),
+                "likes": int(item.get("likes") or 0),
+                "comments": int(item.get("comments") or 0),
+                "published_at": float(item.get("published_at") or 0),
+                "vph": float(item.get("vph") or 0),
+                "score": float(item.get("score") or 0),
+                "is_short": 1 if item.get("is_short") else 0,
+                "query": item.get("query") or "",
+                "source": item.get("source") or "",
+                "region": item.get("region") or "",
+                "meta": json.dumps(item.get("meta") or {}, ensure_ascii=False),
+                "created_at": now,
+                "updated_at": now,
+            }
+            if not values["ext_id"]:
+                continue
+            columns = ", ".join(values)
+            placeholders = ", ".join("?" for _ in values)
+            updates = ", ".join(
+                f"{key} = excluded.{key}" for key in values
+                if key not in ("id", "created_at")
+            )
+            conn.execute(
+                f"INSERT INTO discoveries ({columns}) VALUES ({placeholders}) "
+                f"ON CONFLICT(platform, ext_id) DO UPDATE SET {updates}",
+                list(values.values()),
+            )
+            saved += 1
+    return saved
+
+
+def list_discoveries(
+    limit: int = 60,
+    sort: str = "score",
+    platform: str = "",
+    query: str = "",
+    min_views: int = 0,
+    min_duration: float = 0,
+    max_duration: float = 0,
+    only_unused: bool = False,
+) -> list[dict[str, Any]]:
+    order = {
+        "score": "score DESC, views DESC",
+        "views": "views DESC",
+        "recent": "published_at DESC",
+        "vph": "vph DESC",
+        "new": "created_at DESC",
+    }.get(sort, "score DESC")
+    where: list[str] = []
+    args: list[Any] = []
+    if platform:
+        where.append("platform = ?")
+        args.append(platform)
+    if query:
+        where.append("(title LIKE ? OR channel LIKE ? OR query LIKE ?)")
+        args.extend([f"%{query}%"] * 3)
+    if min_views:
+        where.append("views >= ?")
+        args.append(int(min_views))
+    if min_duration:
+        where.append("duration >= ?")
+        args.append(float(min_duration))
+    if max_duration:
+        where.append("(duration > 0 AND duration <= ?)")
+        args.append(float(max_duration))
+    if only_unused:
+        where.append("used_job_id = ''")
+    sql = "SELECT * FROM discoveries"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += f" ORDER BY {order} LIMIT ?"
+    args.append(max(1, min(300, limit)))
+    with connect() as conn:
+        rows = conn.execute(sql, args).fetchall()
+    result = []
+    for row in rows:
+        data = _row_to_dict(row) or {}
+        data["is_short"] = bool(data.get("is_short"))
+        result.append(data)
+    return result
+
+
+def get_discovery(discovery_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM discoveries WHERE id = ?", (discovery_id,)).fetchone()
+    data = _row_to_dict(row)
+    if data:
+        data["is_short"] = bool(data.get("is_short"))
+    return data
+
+
+def mark_discovery_used(discovery_id: str, job_id: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE discoveries SET used_job_id = ?, updated_at = ? WHERE id = ?",
+            (job_id, time.time(), discovery_id),
+        )
+
+
+def clear_discoveries() -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM discoveries")

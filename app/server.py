@@ -12,7 +12,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analyze, db, ingest, pipeline, transcribe, youtube
+from . import analyze, db, discover, ingest, pipeline, transcribe, youtube
 from .config import (
     APP_NAME, MAX_UPLOAD_BYTES, VERSION, WEB_DIR, WORK_DIR,
     ensure_dirs, ffmpeg_exe, load_settings, update_settings,
@@ -432,6 +432,129 @@ def create_app() -> FastAPI:
     @app.post("/api/youtube/disconnect")
     def yt_disconnect() -> dict[str, Any]:
         youtube.disconnect()
+        return {"ok": True}
+
+    # ------------------------------------------------------------------ #
+    # video viral (buat bahan clip / re-upload)
+    # ------------------------------------------------------------------ #
+    @app.get("/api/discover/config")
+    def discover_config() -> dict[str, Any]:
+        settings = load_settings()
+        return {
+            "regions": [{"code": c, "label": label} for c, label in discover.REGIONS],
+            "categories": [{"id": i, "label": label} for i, label in discover.CATEGORIES],
+            "presets": discover.suggestion_queries(settings.get("discover_region") or "ID"),
+            "backends": discover.backends(),
+            "defaults": {
+                "region": settings.get("discover_region"),
+                "days": settings.get("discover_days"),
+                "min_views": settings.get("discover_min_views"),
+                "min_duration": settings.get("discover_min_duration"),
+                "max_duration": settings.get("discover_max_duration"),
+                "limit": settings.get("discover_limit"),
+                "queries": settings.get("discover_queries"),
+                "use_api": settings.get("discover_use_api"),
+            },
+        }
+
+    @app.get("/api/discover")
+    def discover_list(
+        sort: str = "score",
+        q: str = "",
+        platform: str = "",
+        min_views: int = 0,
+        min_duration: float = 0,
+        max_duration: float = 0,
+        only_unused: bool = False,
+        limit: int = 60,
+    ) -> list[dict[str, Any]]:
+        return db.list_discoveries(
+            limit=limit, sort=sort, query=q, platform=platform,
+            min_views=min_views, min_duration=min_duration,
+            max_duration=max_duration, only_unused=only_unused,
+        )
+
+    @app.post("/api/discover/search")
+    def discover_search(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        params = discover.SearchParams.from_payload(payload or {})
+        try:
+            return discover.search(params)
+        except discover.DiscoverError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"Pencarian gagal: {exc}")
+
+    @app.post("/api/discover/trending")
+    def discover_trending(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        payload = payload or {}
+        settings = load_settings()
+        try:
+            return discover.trending_now(
+                region=str(payload.get("region") or settings.get("discover_region") or "ID"),
+                limit=int(payload.get("limit") or settings.get("discover_limit") or 24),
+                min_views=int(payload.get("min_views") or 0),
+                category=str(payload.get("category") or ""),
+                days=int(payload.get("days") or settings.get("discover_days") or 30),
+                use_api=bool(payload.get("use_api", True)),
+                enrich=bool(payload.get("enrich", False)),
+            )
+        except discover.DiscoverError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"Gagal mengambil trending: {exc}")
+
+    def _job_from_discovery(item: dict[str, Any]) -> dict[str, Any]:
+        url = item.get("url") or ""
+        if not url and item.get("ext_id") and (item.get("platform") or "youtube") == "youtube":
+            url = f"https://www.youtube.com/watch?v={item['ext_id']}"
+        if not url:
+            raise HTTPException(400, "URL video tidak tersedia")
+        job = db.create_job(
+            "url",
+            source=url,
+            title=item.get("title") or "",
+            meta={
+                "discovery_id": item["id"],
+                "channel": item.get("channel", ""),
+                "views": item.get("views", 0),
+                "viral_score": item.get("score", 0),
+                "original_url": url,
+            },
+        )
+        db.mark_discovery_used(item["id"], job["id"])
+        pipeline.start_analysis(job["id"])
+        return job
+
+    @app.post("/api/discover/{discovery_id}/clip")
+    def discover_make_clip(discovery_id: str) -> dict[str, Any]:
+        item = db.get_discovery(discovery_id)
+        if not item:
+            raise HTTPException(404, "Video tidak ditemukan di daftar viral")
+        job = _job_from_discovery(item)
+        return {"ok": True, "job": job}
+
+    @app.post("/api/discover/clip-batch")
+    def discover_make_clips(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        ids = payload.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            raise HTTPException(400, "Pilih minimal satu video")
+        created: list[str] = []
+        for discovery_id in ids[:5]:  # batasi supaya CPU tidak penuh
+            item = db.get_discovery(str(discovery_id))
+            if not item:
+                continue
+            try:
+                job = _job_from_discovery(item)
+            except HTTPException:
+                continue  # lewati video yang datanya tidak lengkap
+            created.append(job["id"])
+        if not created:
+            raise HTTPException(400, "Tidak ada video valid yang bisa diproses")
+        return {"ok": True, "jobs": created, "count": len(created)}
+
+    @app.delete("/api/discover")
+    def discover_clear() -> dict[str, Any]:
+        db.clear_discoveries()
         return {"ok": True}
 
     # ------------------------------------------------------------------ #
