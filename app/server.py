@@ -19,6 +19,7 @@ from .config import (
     APP_NAME, ASSET_DIR, MAX_UPLOAD_BYTES, VERSION, WEB_DIR, WORK_DIR,
     ensure_dirs, ffmpeg_exe, load_settings, update_settings,
 )
+from .fsutil import safe_rmtree, safe_unlink
 
 
 def create_app() -> FastAPI:
@@ -130,7 +131,7 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"Format {ext} belum didukung")
         saved = ingest.save_upload(file.file, file.filename or "video.mp4")
         if saved.stat().st_size > MAX_UPLOAD_BYTES:
-            saved.unlink(missing_ok=True)
+            safe_unlink(saved)
             raise HTTPException(413, "File terlalu besar")
         job = db.create_job("upload", source=file.filename or saved.name,
                             source_path=str(saved), title=title.strip() or saved.stem)
@@ -162,22 +163,19 @@ def create_app() -> FastAPI:
         for clip in db.list_clips(job_id):
             for key in ("file", "thumb"):
                 if clip.get(key):
-                    Path(clip[key]).unlink(missing_ok=True)
+                    safe_unlink(clip[key])
             srt = (clip.get("meta") or {}).get("srt")
             if srt:
-                Path(srt).unlink(missing_ok=True)
+                safe_unlink(srt)
         source_path = job.get("source_path")
         db.delete_job(job_id)
-        shutil.rmtree(WORK_DIR / job_id, ignore_errors=True)
+        safe_rmtree(WORK_DIR / job_id)
         if source_path:
             p = Path(source_path)
-            try:
-                if p.is_file():
-                    p.unlink()
-                elif p.is_dir():
-                    shutil.rmtree(p, ignore_errors=True)
-            except OSError:
-                pass
+            if p.is_dir():
+                safe_rmtree(p)
+            else:
+                safe_unlink(p)
         return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/transcript")
@@ -267,10 +265,10 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Clip tidak ditemukan")
         for key in ("file", "thumb"):
             if clip.get(key):
-                Path(clip[key]).unlink(missing_ok=True)
+                safe_unlink(clip[key])
         srt = (clip.get("meta") or {}).get("srt")
         if srt:
-            Path(srt).unlink(missing_ok=True)
+            safe_unlink(srt)
         db.delete_clip(clip_id)
         return {"ok": True}
 
@@ -539,7 +537,7 @@ def create_app() -> FastAPI:
         with target.open("wb") as out:
             shutil.copyfileobj(file.file, out)
         if target.stat().st_size > 8 * 1024 * 1024:
-            target.unlink(missing_ok=True)
+            safe_unlink(target)
             raise HTTPException(413, "Logo terlalu besar (maks 8 MB)")
         # PNG transparan paling aman untuk overlay
         return {"ok": True, "path": str(target), "url": f"/api/clips/{clip_id}/assets/{target.name}"}

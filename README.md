@@ -108,6 +108,9 @@ CLIPPER_DATA_DIR=D:\video-clipper python run.py   # simpan video di disk lain
 | **`ffmpeg tidak ditemukan`** | `pip install imageio-ffmpeg` (sudah masuk requirements). Kalau tetap gagal, install ffmpeg dan pastikan ada di `PATH`. |
 | **Python terlalu lama (< 3.10)** | Install Python 3.11+ dari python.org, lalu buat ulang venv: hapus folder `.venv`, jalankan `run.bat` / `./run.sh` lagi. |
 | **`folder data tidak bisa ditulis`** | Project ada di folder terproteksi (mis. `C:\Program Files`). Pindahkan ke `D:\Clipper` atau `Documents`, atau set `CLIPPER_DATA_DIR` ke folder lain. |
+| **`[WinError 32] The process cannot access the file because it is being used by another process: ...\Temp\tmpXXXX.txt`** | Bug lama (sudah diperbaiki): file sementara untuk analisa audio tidak ditutup sebelum dipakai ffmpeg, jadi Windows menganggapnya terkunci. Sudah diatasi di versi ini — cukup klik **Coba lagi** pada project yang gagal. Kalau masih muncul: tutup pemutar video/preview browser yang memutar file clip, exclude folder Clipper dari antivirus, lalu coba lagi. |
+| **`[WinError 5] Access is denied`** | Folder Clipper di lokasi terproteksi atau dijalankan tanpa izin tulis. Pindahkan ke `D:\Clipper` / `Documents`. |
+| **Render gagal padahalsebelumnya bisa** | File clip lama sedang diputar di tab browser lain. Clipper sekarang merender ke file sementara lalu memindahkannya; cukup tutup preview lalu render ulang. |
 | **Masih bingung** | Jalankan `python run.py --doctor`. Outputnya menyebut satu per satu apa yang OK dan apa yang kurang. |
 
 Catatan: **jendela terminal harus tetap terbuka** selama Clipper dipakai — server berjalan di situ.

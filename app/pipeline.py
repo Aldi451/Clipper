@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from . import analyze, db, editor, ingest, media, subs, transcribe, youtube
 from .config import WORK_DIR, load_settings
+from .fsutil import safe_unlink
 
 
 analysis_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="analyze")
@@ -111,7 +112,8 @@ def _run_analysis(job_id: str) -> None:
                 media.extract_audio(source_path, audio_path)
                 _job_set(job_id, stage="audio", progress=0.3, message="Analisa energi audio…")
                 energy = media.audio_energy(audio_path, window=0.5)
-            except media.FFmpegError:
+            except Exception as exc:  # analisa energi tidak boleh menggagalkan job
+                print(f"[clipper] analisa energi audio dilewati: {exc}", flush=True)
                 energy = []
 
         # 4) transkrip
@@ -166,10 +168,7 @@ def _run_analysis(job_id: str) -> None:
         existing = db.list_clips(job_id)
         for clip in existing:
             if clip["file"]:
-                try:
-                    Path(clip["file"]).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                safe_unlink(clip["file"])
             db.delete_clip(clip["id"])
 
         for idx, cand in enumerate(candidates):
@@ -206,7 +205,7 @@ def _run_analysis(job_id: str) -> None:
     except Exception as exc:
         traceback.print_exc()
         _job_set(job_id, status="error", stage="gagal", progress=0.0,
-                 message="Gagal", error=str(exc)[:600])
+                 message="Gagal", error=friendly_error(exc))
     finally:
         _release(f"analyze:{job_id}")
 
@@ -221,6 +220,23 @@ def _friendly_transcribe_error(exc: Exception) -> str:
         return "RAM/VRAM tidak cukup untuk model ini — coba model 'base' atau 'tiny' di Pengaturan"
     return msg[:300]
 
+
+
+def friendly_error(exc: Exception) -> str:
+    """Ubah error teknis (khususnya Windows) jadi pesan yang bisa ditindaklanjuti."""
+    msg = str(exc) or exc.__class__.__name__
+    low = msg.lower()
+    if "winerror 32" in low or "being used by another process" in low or "errno 32" in low:
+        return ("File sedang dipakai proses lain (antivirus, pemutar video, atau preview di "
+                "browser). Tutup preview/lainnya lalu klik Coba lagi. · detail: " + msg[:180])
+    if "winerror 5" in low or "access is denied" in low or "errno 13" in low:
+        return ("Akses file ditolak. Pindahkan folder Clipper ke lokasi yang bisa ditulis "
+                "(mis. D:\\Clipper) atau jalankan sebagai pengguna biasa. · detail: " + msg[:180])
+    if "no space left" in low or "not enough space" in low:
+        return "Disk penuh — kosongkan ruang lalu coba lagi. · detail: " + msg[:180]
+    if "no such file or directory" in low or "cannot find the file" in low:
+        return "File sumber tidak ditemukan (mungkin dihapus/dipindah). Unggah ulang videonya. · detail: " + msg[:180]
+    return msg[:600]
 
 # --------------------------------------------------------------------------- #
 # render
@@ -273,7 +289,7 @@ def _run_render(clip_id: str) -> None:
             start_upload(clip_id)
     except Exception as exc:
         traceback.print_exc()
-        db.update_clip(clip_id, status="error", message="Render gagal", error=str(exc)[:700])
+        db.update_clip(clip_id, status="error", message="Render gagal", error=friendly_error(exc))
     finally:
         _release(f"render:{clip_id}")
 
