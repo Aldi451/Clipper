@@ -113,7 +113,11 @@ async function api(path, options = {}) {
   }
   if (!res.ok) {
     const detail = data && (data.detail || data.message);
-    throw new Error(typeof detail === "string" ? detail : "Permintaan gagal (" + res.status + ")");
+    const err = new Error(typeof detail === "string" ? detail : "Permintaan gagal (" + res.status + ")");
+    if (data && typeof data === "object") {
+      err.help = data.help || null;
+    }
+    throw err;
   }
   return data;
 }
@@ -1241,6 +1245,10 @@ async function renderYouTube() {
             <div class="tiny dim">
               ${channel ? Number(channel.subscribers || 0).toLocaleString("id-ID") + " subscriber · " + Number(channel.videos || 0).toLocaleString("id-ID") + " video" : "Terhubung"}
             </div>
+            ${yt.testing_mode_warning ? `<div class="tiny" style="color:#fbbf24;margin-top:6px">
+              Token login sudah ${yt.token_age_days} hari. Kalau OAuth app masih status Testing, Google mematikannya di hari ke-7 —
+              kalau upload mulai gagal, klik “Login dengan kode” lagi.
+            </div>` : ""}
           </div>
         </div>
       </div>`
@@ -1256,6 +1264,26 @@ async function renderYouTube() {
               <li>Menu <b>Credentials</b> → Create credentials → OAuth client ID → tipe <b>TVs and Limited Input devices</b>.</li>
               <li>Salin <b>Client ID</b> dan <b>Client secret</b> ke kolom di bawah.</li>
             </ol>
+            <details class="yt-help">
+              <summary>Muncul <b>Error 403: access_denied</b> / “has not completed the Google verification process”?</summary>
+              <div class="tiny muted" style="margin-top:8px;line-height:1.8">
+                Artinya OAuth app-mu masih berstatus <b>Testing</b> dan akun yang dipakai
+                <b> belum terdaftar sebagai test user</b> — bukan bug Clipper, dan Clipper tidak bisa
+                melewatinya (Google yang memblokir sebelum halaman izin tampil).
+                <ol style="padding-left:18px;margin:8px 0">
+                  <li>Buka <a href="https://console.cloud.google.com/apis/credentials/consent" target="_blank" rel="noopener">APIs &amp; Services → OAuth consent screen</a>.</li>
+                  <li>Pastikan <b>Publishing status = Testing</b>, <b>User type = External</b>.</li>
+                  <li>Bagian <b>Test users</b> → <b>+ ADD USERS</b> → masukkan email Google yang kamu pakai (harus sama dengan akun channel YouTube-nya).</li>
+                  <li>Simpan (±1 menit), lalu login lagi. Kalau browser masih memakai akun Google lain, pakai mode Incognito.</li>
+                </ol>
+                <div>
+                  Catatan: selama app masih <b>Testing</b>, Google mematikan refresh token setiap
+                  <b> 7 hari</b> — jadi sesekali perlu login ulang. Kalau mau tanpa login ulang,
+                  klik <b>Publish app</b> (untuk akun sendiri cukup lewati layar peringatan;
+                  verifikasi hanya perlu kalau dipakai orang lain).
+                </div>
+              </div>
+            </details>
             <div class="field">
               <label>Client ID</label>
               <input class="input" id="yt-client-id" placeholder="xxxx.apps.googleusercontent.com" value="${esc(settings.yt_client_id || "")}" spellcheck="false" />
@@ -1286,6 +1314,11 @@ async function renderYouTube() {
               Kalau Clipper jalan di komputer ini dan client bertipe <b>Desktop app</b>, bisa langsung buka browser:
             </p>
             <button class="btn ghost small" data-action="yt-browser" ${yt.client_has_secret ? "" : "disabled"}>Login via browser</button>
+            <div class="tiny dim" style="margin-top:14px;line-height:1.7">
+              Tipe client harus cocok: <b>“TVs and Limited Input devices”</b> untuk login pakai kode,
+              <b>“Desktop app”</b> untuk login via browser. Salah tipe → error
+              <span class="mono">invalid_client</span>.
+            </div>
           </div>
         </div>
       </div>`;
@@ -1376,6 +1409,19 @@ function bindSettingInputs() {
   });
 }
 
+function ytErrorBox(status) {
+  const help = status && status.help;
+  const msg = (status && status.message) || "Login gagal";
+  if (!help) return `<div class="tiny" style="color:#fca5a5">${esc(msg)}</div>`;
+  const steps = (help.steps || []).map((s) => `<li>${esc(s)}</li>`).join("");
+  return `<div class="yt-error">
+      <div class="yt-error-title">${esc(help.title || "Login gagal")}</div>
+      <div class="tiny muted" style="margin-top:6px;line-height:1.7">${esc(msg)}</div>
+      ${steps ? `<ol class="tiny muted" style="padding-left:18px;margin:10px 0;line-height:1.8">${steps}</ol>` : ""}
+      ${help.link ? `<a class="btn small ghost" href="${esc(help.link)}" target="_blank" rel="noopener">${esc(help.link_label || "Buka Google Cloud Console")} ↗</a>` : ""}
+    </div>`;
+}
+
 async function pollDeviceStatus() {
   const box = $("#yt-device-box");
   try {
@@ -1396,7 +1442,7 @@ async function pollDeviceStatus() {
       await renderYouTube();
       loadHealth();
     } else if (status.state === "error" || status.state === "expired") {
-      if (box) box.innerHTML = `<div class="tiny" style="color:#fca5a5">${esc(status.message)}</div>`;
+      if (box) box.innerHTML = ytErrorBox(status);
     }
   } catch (err) {
     /* diamkan, coba lagi nanti */
@@ -1866,7 +1912,14 @@ document.addEventListener("click", async (e) => {
       toast("Kredensial diimpor", "ok");
       await renderYouTube();
     } else if (action === "yt-device") {
-      const status = await api("/api/youtube/login/device", { method: "POST" });
+      let status;
+      try {
+        status = await api("/api/youtube/login/device", { method: "POST" });
+      } catch (err) {
+        const box = $("#yt-device-box");
+        if (box) box.innerHTML = ytErrorBox({ message: err.message, help: err.help || null });
+        throw err;
+      }
       state.yt = status;
       if (status.connected) {
         toast("Sudah terhubung", "ok");

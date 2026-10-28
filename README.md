@@ -152,6 +152,46 @@ Upscale 4K memakai **lanczos + unsharp** di ffmpeg: hasilnya lebih tajam dan mem
 Kalau sumbernya 4K (atau pakai `layout: crop` dari video 4K), hasilnya benar-benar 4K asli.
 Render 4K kira-kira 3–6× lebih lama daripada 1080p di CPU.
 
+### YouTube: `Error 403: access_denied` / "has not completed the Google verification process"
+
+Pesan ini datang dari **Google**, bukan dari Clipper:
+
+> Access blocked: **Tester clipper** has not completed the Google verification process. The app is
+> currently being tested, and can only be accessed by developer-approved testers. Error 403: access_denied
+
+Artinya OAuth app yang kamu buat masih berstatus **Testing**, dan akun Google yang sedang login
+**belum didaftarkan sebagai test user**. Selama statusnya Testing, Google hanya mengizinkan akun
+yang ada di daftar test user — Clipper tidak bisa melewati ini.
+
+**Perbaikan (2 menit, sekali saja):**
+
+1. Buka <https://console.cloud.google.com/apis/credentials/consent> — pilih project yang sama
+   dengan OAuth client kamu.
+2. Pastikan **Publishing status = Testing** dan **User type = External**.
+3. Di bagian **Test users**, klik **+ ADD USERS**, masukkan **email Google yang dipakai untuk
+   channel YouTube** (harus sama persis, termasuk kalau ada `+` alias).
+4. **Save**, tunggu ±1 menit, lalu login ulang di tab YouTube. Kalau browser masih login dengan
+   akun Google lain, pakai **Incognito** atau logout akun lain dulu.
+
+Setelah akun terdaftar, Google akan menampilkan layar *"Google hasn't verified this app"* →
+klik **Advanced → Go to … (unsafe)**, lalu **Allow**. Layar itu normal untuk app pribadi yang
+belum diverifikasi.
+
+**Catatan penting:**
+
+| Hal | Penjelasan |
+|---|---|
+| Token mati tiap 7 hari | Selama app berstatus **Testing**, Google mematikan refresh token setelah 7 hari. Cukup klik **Login dengan kode** lagi. |
+| Mau tanpa login ulang? | Klik **Publish app** di OAuth consent screen. Untuk dipakai sendiri, verifikasi tidak wajib — cukup lewati layar peringatan. Verifikasi (bisa berhari-hari) hanya perlu kalau app dipakai banyak orang. |
+| Batas 100 test user | Status Testing maksimal 100 akun test user. |
+| `invalid_client` | Tipe OAuth client salah. Login pakai **kode** → tipe *TVs and Limited Input devices*; login via **browser** → tipe *Desktop app*. |
+| `invalid_grant` | Token sudah kedaluwarsa/dicabut → login ulang. |
+| API belum aktif | Kalau upload gagal `accessNotConfigured`, aktifkan **YouTube Data API v3** di Library. |
+
+Clipper versi ini menampilkan panduan di atas langsung di tab **YouTube** (blok
+*"Muncul Error 403: access_denied?"*) dan menerjemahkan error OAuth mentah jadi langkah perbaikan
+di kotak login.
+
 ## Cari video viral (buat bahan clip / re-upload)
 
 Buka tab **🔥 Viral**. Ada dua cara:

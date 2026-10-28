@@ -338,8 +338,10 @@ def _run_upload(clip_id: str) -> None:
         )
     except Exception as exc:
         traceback.print_exc()
+        # error OAuth (token kedaluwarsa / app belum verified) dijelaskan dalam Bahasa Indonesia
+        detail = youtube.friendly_error(str(exc), "Upload gagal")
         db.update_clip(clip_id, status="rendered" if clip.get("file") else "suggested",
-                       message="Upload gagal", error=str(exc)[:700])
+                       message="Upload gagal", error=detail[:700])
     finally:
         _release(f"upload:{clip_id}")
 
