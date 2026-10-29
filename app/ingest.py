@@ -71,6 +71,329 @@ def _format_selector(choice: str | None) -> str:
     return FORMAT_CHOICES.get(key, FORMAT_CHOICES["video1080"])
 
 
+# --------------------------------------------------------------------------- #
+# cookies (video terbatas usia / perlu login)
+# --------------------------------------------------------------------------- #
+COOKIE_TEMPLATE_HINT = (
+    "Pengaturan → 'Cookies browser/berkas'. Cara termudah: login YouTube di browser, "
+    "pasang ekstensi 'Get cookies.txt LOCALLY', ekspor youtube.com sebagai cookies.txt, "
+    "lalu unggah/tempel di tab Pengaturan Clipper."
+)
+
+
+HTTPONLY_PREFIX = "#HttpOnly_"
+
+
+def clean_cookie_text(raw: str) -> str:
+    """Buang BOM dan samakan akhir baris (ekspor browser kerap CRLF + BOM)."""
+    text = (raw or "").replace("\ufeff", "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.strip("\n")
+
+
+def _cookie_row(line: str) -> list[str] | None:
+    """Baris cookie Netscape → 7 kolom, atau None kalau bukan baris cookie.
+
+    Penting: baris `#HttpOnly_.youtube.com` BUKAN komentar — dia berisi cookie
+    login (SID/HSID/SSID) yang justru dibutuhkan yt-dlp.
+    """
+    line = line.strip("\n").rstrip("\r")
+    if not line.strip():
+        return None
+    if line.startswith(HTTPONLY_PREFIX):
+        line = line[len(HTTPONLY_PREFIX):]
+    elif line.startswith("#"):
+        return None
+    parts = line.split("\t")
+    if len(parts) < 7:
+        return None
+    return parts
+
+
+def cookie_path(settings: dict | None = None) -> Path | None:
+    """Lokasi cookies.txt yang dipakai (setting manual atau data/cookies.txt)."""
+    from .config import COOKIE_FILE
+
+    settings = settings if settings is not None else load_settings()
+    raw = (settings.get("ytdlp_cookies_file") or "").strip()
+    path = Path(raw).expanduser() if raw else COOKIE_FILE
+    return path if path.is_file() else None
+
+
+def cookie_summary(settings: dict | None = None) -> dict:
+    """Info singkat cookies untuk UI (tanpa membocorkan isinya)."""
+    from .config import COOKIE_FILE
+
+    settings = settings if settings is not None else load_settings()
+    path = cookie_path(settings)
+    target = path or COOKIE_FILE
+    if not path:
+        return {"configured": False, "path": str(target), "domains": [], "count": 0, "youtube": False}
+    domains: list[str] = []
+    count = 0
+    names: list[str] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            row = _cookie_row(line)
+            if row is None:
+                continue
+            count += 1
+            domain = row[0].lstrip(".").lower()
+            if domain and domain not in domains:
+                domains.append(domain)
+            if row[5] and row[5] not in names:
+                names.append(row[5])
+    except OSError:
+        pass
+    return {
+        "configured": True,
+        "path": str(path),
+        "count": count,
+        "domains": domains[:8],
+        "youtube": any("youtube" in d or "google" in d for d in domains),
+        "auth_cookies": any(n in ("SID", "HSID", "SSID", "SAPISID", "APISID", "__Secure-1PSID")
+                            for n in names),
+        "browser": (settings.get("ytdlp_cookies_browser") or ""),
+    }
+
+
+def _json_cookies_to_netscape(raw: list) -> str:
+    """Konversi ekspor JSON (Cookie-Editor / EditThisCookie) ke format Netscape."""
+    lines = ["# Netscape HTTP Cookie File", "# Dibuat oleh Clipper", ""]
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not domain or not name:
+            continue
+        value = str(item.get("value") or "")
+        path = str(item.get("path") or "/")
+        secure = "TRUE" if item.get("secure") else "FALSE"
+        expires = int(item.get("expirationDate") or item.get("expires") or 0)
+        if expires <= 0:
+            expires = 2147483647  # sesi → treat as jauh di masa depan
+        include_sub = "TRUE" if domain.startswith(".") else "FALSE"
+        http_only = "#HttpOnly_" if item.get("httpOnly") else ""
+        lines.append(
+            f"{http_only}{domain}\t{include_sub}\t{path}\t{secure}\t{expires}\t{name}\t{value}"
+        )
+    if len(lines) <= 3:
+        raise ValueError("Tidak ada cookie yang bisa dibaca dari JSON tersebut")
+    return "\n".join(lines) + "\n"
+
+
+def parse_cookies(raw: str) -> str:
+    """Terima cookies.txt (Netscape) atau JSON ekspor ekstensi → kembalikan teks Netscape."""
+    text = clean_cookie_text(raw)
+    if not text:
+        raise ValueError("Isi cookies masih kosong")
+    if text.startswith("[") or text.startswith("{"):
+        import json as _json
+
+        try:
+            data = _json.loads(text)
+        except ValueError as exc:
+            raise ValueError("JSON cookies tidak valid") from exc
+        if isinstance(data, dict):
+            data = data.get("cookies") or []
+        return _json_cookies_to_netscape(data)
+    rows = [line for line in text.splitlines() if _cookie_row(line) is not None]
+    if not rows:
+        if "\t" not in text:
+            raise ValueError(
+                "Format cookies tidak dikenali. Pakai cookies.txt (Netscape) atau JSON dari "
+                "ekstensi (Cookie-Editor → Export → JSON)."
+            )
+        raise ValueError(
+            "File ini tidak berisi baris cookie yang valid (tiap baris butuh 7 kolom dipisah TAB). "
+            "Pastikan mengekspor dari halaman youtube.com, bukan file lain."
+        )
+    header = ["# Netscape HTTP Cookie File", "# Dibuat oleh Clipper", ""]
+    return "\n".join(header + rows) + "\n"
+
+
+def save_cookies(raw: str) -> dict:
+    """Simpan cookies untuk dipakai yt-dlp (menangani video terbatas usia)."""
+    from .config import COOKIE_FILE
+    from .fsutil import safe_unlink
+    from .config import update_settings
+
+    text = parse_cookies(raw)
+    COOKIE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    COOKIE_FILE.write_text(text, encoding="utf-8")
+    try:
+        COOKIE_FILE.chmod(0o600)
+    except OSError:
+        pass
+    # setting manual dikosongkan supaya memakai data/cookies.txt yang baru
+    update_settings({"ytdlp_cookies_file": ""})
+    summary = cookie_summary()
+    if not summary["count"]:
+        safe_unlink(COOKIE_FILE)
+        raise ValueError("Cookies tidak berisi baris cookie yang valid")
+    return summary
+
+
+def clear_cookies() -> dict:
+    from .config import COOKIE_FILE
+    from .fsutil import safe_unlink
+
+    safe_unlink(COOKIE_FILE)
+    return cookie_summary()
+
+
+# --------------------------------------------------------------------------- #
+# pesan error download
+# --------------------------------------------------------------------------- #
+AGE_HINTS = (
+    "sign in to confirm your age",
+    "confirm your age",
+    "age-restricted",
+    "age restricted",
+    "inappropriate for some users",
+    "only available for users",
+    "inappropriate",
+)
+BOT_HINTS = ("confirm you're not a bot", "confirm you’re not a bot", "not a bot", "unusual traffic", "captcha")
+LOGIN_HINTS = ("login required", "sign in to confirm", "please log in", "this video is private", "private video",
+               "members-only", "join this channel")
+GEO_HINTS = ("available in your country", "country", "geo restricted", "geo-restricted", "geo-blocked")
+UNAVAILABLE_HINTS = ("video unavailable", "has been removed", "no longer available", "does not exist",
+                     "removed by the uploader", "account associated with this video has been terminated")
+NETWORK_HINTS = ("timed out", "connection", "getaddrinfo", "ssl", "temporary failure", "network",
+                 "unable to download webpage", "http error 5", "proxy")
+
+
+def classify_download_error(message: str) -> str:
+    low = (message or "").lower()
+    if any(k in low for k in BOT_HINTS):
+        return "bot"
+    if any(k in low for k in AGE_HINTS):
+        return "age"
+    if any(k in low for k in GEO_HINTS):
+        return "geo"
+    if any(k in low for k in LOGIN_HINTS):
+        return "login"
+    if any(k in low for k in UNAVAILABLE_HINTS):
+        return "unavailable"
+    if any(k in low for k in NETWORK_HINTS):
+        return "network"
+    return "other"
+
+
+def friendly_download_error(message: str, has_cookies: bool = False) -> str:
+    """Ubah error yt-dlp jadi penjelasan + langkah perbaikan."""
+    raw = (message or "").strip()
+    raw = re.sub(r"^ERROR:\s*", "", raw, flags=re.I)
+    kind = classify_download_error(raw)
+    detail = raw.splitlines()[0][:220] if raw else "tanpa detail"
+
+    if kind in ("age", "bot", "login"):
+        head = {
+            "age": "Video ini dibatasi umur (YouTube minta login untuk memastikan usia).",
+            "bot": "YouTube menganggap permintaan ini bot (biasanya butuh login/cookies).",
+            "login": "Video ini butuh login (private / members-only / dibatasi).",
+        }[kind]
+        if has_cookies:
+            return (
+                f"{head} Cookies sudah terpasang tapi ditolak — kemungkinan sudah kedaluwarsa "
+                "atau akunnya belum lolos verifikasi usia. Ekspor ulang cookies.txt dari browser "
+                "yang sudah login ke akun berusia 18+, unggah lagi di Pengaturan, lalu coba lagi. "
+                f"· detail: {detail}"
+            )
+        return (
+            f"{head} Clipper perlu cookies dari browser yang sudah login. {COOKIE_TEMPLATE_HINT} "
+            f"Alternatif: unduh videonya manual, lalu pakai 'Dari file' (drag & drop). · detail: {detail}"
+        )
+    if kind == "geo":
+        return (
+            "Video dibatasi untuk negara tertentu. Pakai proxy/VPN: isi kolom Proxy di Pengaturan "
+            f"(mis. http://127.0.0.1:8080), lalu coba lagi. · detail: {detail}"
+        )
+    if kind == "unavailable":
+        return f"Video tidak tersedia (dihapus/private/diblokir pemiliknya). Coba link lain. · detail: {detail}"
+    if kind == "network":
+        return (
+            "Tidak bisa menghubungi server video (jaringan/DNS/proxy/SSL). Cek koneksi internet, "
+            f"atau isi Proxy di Pengaturan kalau memakai VPN. · detail: {detail}"
+        )
+    return f"Gagal mengunduh: {detail}"
+
+
+# --------------------------------------------------------------------------- #
+# download
+# --------------------------------------------------------------------------- #
+TV_PLAYER_ARGS = {"youtube": {"player_client": ["tv", "web_safari"]}}
+
+
+def _build_opts(out_dir: Path, settings: dict, hook: Callable[[dict], None], extra: dict | None = None) -> dict:
+    opts: dict = {
+        "outtmpl": str(out_dir / "source.%(ext)s"),
+        "format": _format_selector(settings.get("ytdlp_format")),
+        "merge_output_format": "mp4",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "progress_hooks": [hook],
+        "restrictfilenames": True,
+        "concurrent_fragment_downloads": 4,
+        # biarkan error asli keluar supaya bisa diterjemahkan jadi pesan jelas
+        "ignoreerrors": False,
+        # subtitle video (kalau ada) dipakai sebagai fallback transkrip
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["id", "en"],
+        "subtitlesformat": "vtt/srt/best",
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 2,
+    }
+    cookies = (settings.get("ytdlp_cookies_browser") or "").strip()
+    if cookies:
+        opts["cookiesfrombrowser"] = (cookies,)
+    cookie_file = cookie_path(settings)
+    if cookie_file is not None:
+        opts["cookiefile"] = str(cookie_file)
+    proxy = (settings.get("ytdlp_proxy") or "").strip()
+    if proxy:
+        opts["proxy"] = proxy
+    if extra:
+        opts.update(extra)
+    return opts
+
+
+def _extract(yt_dlp, url: str, opts: dict, out_dir: Path) -> Path:
+    """Satu percobaan unduh; mengembalikan path file hasil."""
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        if info and info.get("entries"):
+            info = info["entries"][0]
+        if not info:
+            raise DownloadError("Hasil unduhan kosong (video tidak bisa diambil)")
+        path = Path(ydl.prepare_filename(info))
+        if not path.exists():
+            candidates = sorted(out_dir.glob("source.*"))
+            if not candidates:
+                raise DownloadError("File hasil download tidak ditemukan")
+            path = candidates[0]
+    # Pastikan hasilnya benar-benar video: kalau ternyata hanya audio
+    # (format fallback / video dihapus), beri tahu jelas.
+    try:
+        from . import media as _media
+
+        downloaded = _media.probe(path)
+    except Exception:
+        downloaded = None
+    if downloaded is not None and not downloaded.has_video:
+        raise DownloadError(
+            "Hasil unduhan hanya berisi audio — track video tidak tersedia untuk video ini "
+            "(sering pada video yang dibatasi usia). Tambahkan cookies atau atur Format unduhan "
+            "ke 'Best' di Pengaturan, lalu coba lagi."
+        )
+    return path
+
+
 def download(url: str, job_label: str = "download", on_progress: Callable[[float, str], None] | None = None) -> Path:
     """Download video dari link pakai yt-dlp (YouTube, TikTok, IG, X, FB, dll)."""
     try:
@@ -98,67 +421,35 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
         elif status.get("status") == "finished":
             on_progress(1.0, "Download selesai, memproses file…")
 
-    ydl_opts: dict = {
-        "outtmpl": str(out_dir / "source.%(ext)s"),
-        "format": _format_selector(settings.get("ytdlp_format")),
-        "merge_output_format": "mp4",
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "progress_hooks": [hook],
-        "restrictfilenames": True,
-        "concurrent_fragment_downloads": 4,
-        # subtitle video (kalau ada) dipakai sebagai fallback transkrip
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["id", "en"],
-        "subtitlesformat": "vtt/srt/best",
-        "ignoreerrors": True,
-    }
-    cookies = (settings.get("ytdlp_cookies_browser") or "").strip()
-    if cookies:
-        ydl_opts["cookiesfrombrowser"] = (cookies,)
-    proxy = (settings.get("ytdlp_proxy") or "").strip()
-    if proxy:
-        ydl_opts["proxy"] = proxy
+    has_cookies = bool(cookie_path(settings) is not None or (settings.get("ytdlp_cookies_browser") or "").strip())
+    client_pref = (settings.get("ytdlp_player_client") or "auto").strip().lower()
+    attempts: list[tuple[str, dict | None]] = []
+    if client_pref == "tv":
+        attempts.append(("tv", {"extractor_args": TV_PLAYER_ARGS}))
+    elif client_pref == "default":
+        attempts.append(("default", None))
+    else:  # auto: coba client biasa, lalu client tv kalau diblokir umur
+        attempts.append(("default", None))
+        attempts.append(("tv", {"extractor_args": TV_PLAYER_ARGS}))
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info and info.get("entries"):
-                info = info["entries"][0]
-            if not info:
-                raise DownloadError(
-                    "Video tidak bisa diunduh. Cek linknya (video private/dihapus?), atau server "
-                    "ini tidak punya akses internet ke YouTube/TikTok."
-                )
-            path = Path(ydl.prepare_filename(info))
-            if not path.exists():
-                candidates = sorted(out_dir.glob("source.*"))
-                if not candidates:
-                    raise DownloadError("File hasil download tidak ditemukan")
-                path = candidates[0]
-            # Pastikan hasilnya benar-benar video: kalau ternyata hanya audio
-            # (format fallback / video dihapus), beri tahu jelas daripada
-            # menghasilkan klip tanpa gambar.
-            try:
-                from . import media as _media
+    last_error = ""
+    for label, extra in attempts:
+        try:
+            return _extract(yt_dlp, url, _build_opts(out_dir, settings, hook, extra), out_dir)
+        except DownloadError as exc:
+            last_error = str(exc)
+            if classify_download_error(last_error) not in ("age", "bot", "login"):
+                raise
+            if on_progress:
+                on_progress(0.02, "Diblokir batas umur, mencoba metode lain…")
+        except Exception as exc:  # noqa: BLE001 - error yt-dlp apa pun
+            last_error = str(exc)
+            if classify_download_error(last_error) not in ("age", "bot", "login"):
+                raise DownloadError(friendly_download_error(last_error, has_cookies)) from exc
+            if on_progress:
+                on_progress(0.02, "Diblokir batas umur, mencoba metode lain…")
 
-                downloaded = _media.probe(path)
-            except Exception:
-                downloaded = None
-            if downloaded is not None and not downloaded.has_video:
-                raise DownloadError(
-                    "Hasil unduhan hanya berisi audio — track videonya tidak tersedia untuk video "
-                    "ini (sering terjadi pada video yang dibatasi/usia-restricted). Coba atur "
-                    "Pengaturan → Ambil video dari link → Format unduhan ke 'Best (tanpa batas "
-                    "resolusi)', atau pakai link lain."
-                )
-            return path
-    except DownloadError:
-        raise
-    except Exception as exc:
-        raise DownloadError(f"Gagal mengunduh link: {exc}") from exc
+    raise DownloadError(friendly_download_error(last_error, has_cookies))
 
 
 def cleanup_dir(path: str | Path) -> None:

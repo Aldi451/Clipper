@@ -768,3 +768,25 @@ select.ed-mini { width: 76px !important; }
     #0b0b12;
 }
 .ed-preview.no-video video { opacity: 0; }
+
+/* --- Pengaturan: cookies yt-dlp --- */
+.cookie-box {
+  grid-column: 1 / -1;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid #2a2a3d;
+  border-radius: 10px;
+  background: #12121c;
+}
+.cookie-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.cookie-box textarea { width: 100%; }
+.cookie-box.drop {
+  border-color: #7c5cff;
+  background: #161327;
+}

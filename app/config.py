@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "Clipper"
-VERSION = "1.0.3"
+VERSION = "1.0.5"
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -22,6 +22,7 @@ ASSET_DIR = DATA_DIR / "assets"
 MODEL_DIR = Path(os.environ.get("CLIPPER_MODEL_DIR", ROOT / "models")).resolve()
 SETTINGS_FILE = DATA_DIR / "settings.json"
 TOKEN_FILE = DATA_DIR / "youtube_token.json"
+COOKIE_FILE = DATA_DIR / "cookies.txt"
 CLIENT_SECRET_FILE = DATA_DIR / "youtube_client_secret.json"
 DB_FILE = DATA_DIR / "clipper.db"
 
@@ -120,7 +121,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_pipeline": True,       # analisis -> render -> upload (kalau login) tanpa klik
     # yt-dlp
     "ytdlp_cookies_browser": "",  # chrome | firefox | edge | brave | safari | ""
+    "ytdlp_cookies_file": "",     # path cookies.txt (Netscape). kosong = pakai data/cookies.txt
     "ytdlp_proxy": "",
+    # client YouTube yang dipakai saat video dibatasi umur ("Sign in to confirm your age").
+    # "auto" = coba client default dulu, lalu tv/web_safari kalau diblokir.
+    "ytdlp_player_client": "auto",  # auto | default | tv
     # kualitas unduhan: video1080 (default) | video720 | best (tanpa batas resolusi)
     # "video1080" sengaja membatasi 1080p supaya hemat kuota & render lebih cepat.
     "ytdlp_format": "video1080",
