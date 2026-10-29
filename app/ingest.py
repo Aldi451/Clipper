@@ -53,17 +53,30 @@ class DownloadError(RuntimeError):
 
 
 FORMAT_CHOICES = {
-    # wajib ada video (>1 frame). Jangan pernah jatuh ke "best" polos: bisa audio saja.
+    # Rantai fallback, dari kualitas terbaik ke paling luas:
+    #   1. video-only + audio-only (kualitas terbaik, tetap mp4/m4a kalau ada)
+    #   2. video-only + audio-only tanpa batas ekstensi
+    #   3. format gabungan (video+audio dalam satu stream) → untuk video lama/Shorts
+    #   4. apa pun yang tersedia
+    # Catatan: sengaja pakai `bv`/`ba` (bukan `bv*`) supaya yt-dlp tidak memilih
+    # format gabungan beresolusi rendah ketika stream terpisah tersedia.
     "video1080": (
-        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
-        "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+        "bv[height<=1080][ext=mp4]+ba[ext=m4a]/"
+        "bv[height<=1080]+ba/"
+        "b[height<=1080]/"
+        "b"
     ),
     "video720": (
-        "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/"
-        "bestvideo[height<=720]+bestaudio/best[height<=720]"
+        "bv[height<=720][ext=mp4]+ba[ext=m4a]/"
+        "bv[height<=720]+ba/"
+        "b[height<=720]/"
+        "b"
     ),
-    "best": "bestvideo+bestaudio/best",
+    "best": "bv+ba/b",
 }
+
+# dipakai saat format dari setting tetap ditolak yt-dlp
+FORMAT_FALLBACKS = ["bv+ba/b", "b"]
 
 
 def _format_selector(choice: str | None) -> str:
@@ -246,6 +259,14 @@ def clear_cookies() -> dict:
 # --------------------------------------------------------------------------- #
 # pesan error download
 # --------------------------------------------------------------------------- #
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def strip_ansi(text: str) -> str:
+    """Buang kode warna ANSI, mis. '\x1b[0;31mERROR:\x1b[0m ...' dari yt-dlp."""
+    return ANSI_RE.sub("", text or "").strip()
+
+
 AGE_HINTS = (
     "sign in to confirm your age",
     "confirm your age",
@@ -263,10 +284,15 @@ UNAVAILABLE_HINTS = ("video unavailable", "has been removed", "no longer availab
                      "removed by the uploader", "account associated with this video has been terminated")
 NETWORK_HINTS = ("timed out", "connection", "getaddrinfo", "ssl", "temporary failure", "network",
                  "unable to download webpage", "http error 5", "proxy")
+FORMAT_HINTS = ("requested format is not available", "requested format not available",
+                "no video formats found", "no formats found", "requested downloading of",
+                "format is not available", "unable to extract")
 
 
 def classify_download_error(message: str) -> str:
-    low = (message or "").lower()
+    low = strip_ansi(message).lower()
+    if any(k in low for k in FORMAT_HINTS):
+        return "format"
     if any(k in low for k in BOT_HINTS):
         return "bot"
     if any(k in low for k in AGE_HINTS):
@@ -284,7 +310,7 @@ def classify_download_error(message: str) -> str:
 
 def friendly_download_error(message: str, has_cookies: bool = False) -> str:
     """Ubah error yt-dlp jadi penjelasan + langkah perbaikan."""
-    raw = (message or "").strip()
+    raw = strip_ansi(message)
     raw = re.sub(r"^ERROR:\s*", "", raw, flags=re.I)
     kind = classify_download_error(raw)
     detail = raw.splitlines()[0][:220] if raw else "tanpa detail"
@@ -313,6 +339,13 @@ def friendly_download_error(message: str, has_cookies: bool = False) -> str:
         )
     if kind == "unavailable":
         return f"Video tidak tersedia (dihapus/private/diblokir pemiliknya). Coba link lain. · detail: {detail}"
+    if kind == "format":
+        return (
+            "Video ini tidak menyediakan format yang diminta (sering pada video lama atau "
+            "Shorts yang hanya punya satu format gabungan). Clipper sudah mencoba beberapa "
+            "alternatif otomatis. Kalau masih gagal: Pengaturan → Format unduhan → 'Best', "
+            "lalu coba lagi. · detail: " + detail
+        )
     if kind == "network":
         return (
             "Tidak bisa menghubungi server video (jaringan/DNS/proxy/SSL). Cek koneksi internet, "
@@ -432,22 +465,33 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
         attempts.append(("default", None))
         attempts.append(("tv", {"extractor_args": TV_PLAYER_ARGS}))
 
+    RETRYABLE = ("age", "bot", "login", "format")
     last_error = ""
     for label, extra in attempts:
-        try:
-            return _extract(yt_dlp, url, _build_opts(out_dir, settings, hook, extra), out_dir)
-        except DownloadError as exc:
-            last_error = str(exc)
-            if classify_download_error(last_error) not in ("age", "bot", "login"):
-                raise
-            if on_progress:
-                on_progress(0.02, "Diblokir batas umur, mencoba metode lain…")
-        except Exception as exc:  # noqa: BLE001 - error yt-dlp apa pun
-            last_error = str(exc)
-            if classify_download_error(last_error) not in ("age", "bot", "login"):
-                raise DownloadError(friendly_download_error(last_error, has_cookies)) from exc
-            if on_progress:
-                on_progress(0.02, "Diblokir batas umur, mencoba metode lain…")
+        # percobaan pertama pakai format dari Pengaturan, lalu format yang lebih longgar
+        format_tries: list[str | None] = [None] + list(FORMAT_FALLBACKS)
+        for fmt in format_tries:
+            opts = _build_opts(out_dir, settings, hook, extra)
+            if fmt:
+                opts["format"] = fmt
+            try:
+                return _extract(yt_dlp, url, opts, out_dir)
+            except DownloadError as exc:
+                last_error = str(exc)
+                kind = classify_download_error(last_error)
+                if kind not in RETRYABLE:
+                    raise
+                if fmt is None and kind == "format" and on_progress:
+                    on_progress(0.02, "Format tidak tersedia, mencoba format lain…")
+            except Exception as exc:  # noqa: BLE001 - error yt-dlp apa pun
+                last_error = str(exc)
+                kind = classify_download_error(last_error)
+                if kind not in RETRYABLE:
+                    raise DownloadError(friendly_download_error(last_error, has_cookies)) from exc
+                if fmt is None and kind == "format" and on_progress:
+                    on_progress(0.02, "Format tidak tersedia, mencoba format lain…")
+        if on_progress and classify_download_error(last_error) in ("age", "bot", "login"):
+            on_progress(0.02, "Diblokir batas umur, mencoba metode lain…")
 
     raise DownloadError(friendly_download_error(last_error, has_cookies))
 

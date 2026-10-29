@@ -174,6 +174,19 @@ selain ke YouTube saat mengunduh. Hapus kapan saja lewat tombol **Hapus**.
 Baris `#HttpOnly_.youtube.com …` **dihitung** sebagai cookie (bukan komentar) — justru di situ
 cookie login `SID`/`HSID`/`SSID` berada. BOM dan akhir baris Windows (CRLF) juga ditangani.
 
+**Kalau unduhan gagal karena format**
+
+`Requested format is not available` biasanya berarti video itu tidak punya stream
+video+audio terpisah (video lama, Shorts, atau format dibatasi). Clipper sekarang mencoba
+rantai format otomatis:
+
+```
+video+audio (mp4/m4a) → video+audio (ekstensi apa pun) → format gabungan → apa pun
+```
+
+Kalau masih gagal, set **Pengaturan → Format unduhan → Best** lalu ulangi. Kalau videonya
+butuh login, lihat bagian *batas umur* di atas (pasang cookies dulu — daftar format ikut berubah).
+
 **Kalau unggahan gagal**
 
 | Gejala | Penyebab / solusi |
