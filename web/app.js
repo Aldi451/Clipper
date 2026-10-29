@@ -1833,6 +1833,11 @@ async function renderSettings() {
           Perbarui dengan: <span class="mono">pip install -U yt-dlp</span> (atau
           <span class="mono">.venv\\Scripts\\python -m pip install -U yt-dlp</span> di Windows).
         </div>` : ""}
+        ${health.ffmpeg && !health.ffmpeg_ytdlp ? `<div class="tiny" style="color:#fbbf24;grid-column:1/-1;line-height:1.7">
+          yt-dlp tidak tahu lokasi ffmpeg, jadi unduhan video+audio bisa gagal dengan pesan
+          “ffmpeg is not installed”. Perbaiki dengan:
+          <span class="mono">pip install -U imageio-ffmpeg</span> lalu restart Clipper.
+        </div>` : ""}
         <div class="stat"><span class="v">${health.cpu}</span><span class="k">core CPU</span></div>
         <div class="stat"><span class="v">${health.youtube ? "✓" : "—"}</span><span class="k">youtube</span></div>
       </div>
