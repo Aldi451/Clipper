@@ -225,6 +225,7 @@ def _friendly_transcribe_error(exc: Exception) -> str:
 def friendly_error(exc: Exception) -> str:
     """Ubah error teknis (khususnya Windows) jadi pesan yang bisa ditindaklanjuti."""
     msg = str(exc) or exc.__class__.__name__
+    msg = ingest.strip_ansi(msg)  # buang kode warna dari yt-dlp/ffmpeg
     low = msg.lower()
     if "winerror 32" in low or "being used by another process" in low or "errno 32" in low:
         return ("File sedang dipakai proses lain (antivirus, pemutar video, atau preview di "
