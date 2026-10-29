@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from . import analyze, db, discover, editor, ingest, media, pipeline, transcribe, youtube
 from .config import (
     APP_NAME, ASSET_DIR, MAX_UPLOAD_BYTES, VERSION, WEB_DIR, WORK_DIR,
-    ensure_dirs, ffmpeg_exe, load_settings, update_settings,
+    ensure_dirs, ffmpeg_exe, ffmpeg_for_ytdlp, load_settings, update_settings,
 )
 from .fsutil import safe_rmtree, safe_unlink
 
@@ -34,11 +34,17 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ #
     @app.get("/api/health")
     def health() -> dict[str, Any]:
-        ffmpeg_ok, ffmpeg_path = True, ""
+        ffmpeg_ok, ffmpeg_path, ffmpeg_ytdlp = True, "", ""
         try:
             ffmpeg_path = ffmpeg_exe()
         except Exception:
             ffmpeg_ok = False
+        # yt-dlp hanya tahu lokasi ffmpeg kalau kita kirim lewat `ffmpeg_location`.
+        # Kalau kosong, unduhan video+audio gagal ("ffmpeg is not installed").
+        try:
+            ffmpeg_ytdlp = ffmpeg_for_ytdlp() or ""
+        except Exception:
+            ffmpeg_ytdlp = ""
         try:
             import yt_dlp  # type: ignore
 
@@ -69,6 +75,8 @@ def create_app() -> FastAPI:
             "version": VERSION,
             "ffmpeg": ffmpeg_ok,
             "ffmpeg_path": ffmpeg_path,
+            # lokasi yang dikirim ke yt-dlp; kosong = merge video+audio akan gagal
+            "ffmpeg_ytdlp": ffmpeg_ytdlp,
             "ytdlp": bool(ytdlp_version),
             "ytdlp_version": ytdlp_version,
             "ytdlp_age_days": ytdlp_age_days,

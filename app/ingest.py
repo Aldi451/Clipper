@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import BinaryIO, Callable
 
-from .config import UPLOAD_DIR, WORK_DIR, ensure_dirs, load_settings
+from .config import UPLOAD_DIR, WORK_DIR, ensure_dirs, ffmpeg_for_ytdlp, load_settings
 from .fsutil import safe_rmtree
 
 ALLOWED_EXT = {
@@ -287,6 +287,8 @@ NETWORK_HINTS = ("timed out", "connection", "getaddrinfo", "ssl", "temporary fai
                  "unable to download webpage", "http error 5", "proxy")
 RELOAD_HINTS = ("the page needs to be reloaded", "page needs to be reloaded",
                 "needs to be reloaded", "page needs reloading")
+FFMPEG_HINTS = ("ffmpeg is not installed", "ffmpeg not installed", "requested merging of multiple formats",
+                "merging of multiple formats", "ffmpeg is required", "ffmpeg-location does not exist")
 FORMAT_HINTS = ("requested format is not available", "requested format not available",
                 "no video formats found", "no formats found", "requested downloading of",
                 "format is not available", "unable to extract")
@@ -296,6 +298,8 @@ def classify_download_error(message: str) -> str:
     low = strip_ansi(message).lower()
     if any(k in low for k in RELOAD_HINTS):
         return "reload"
+    if any(k in low for k in FFMPEG_HINTS):
+        return "ffmpeg"
     if any(k in low for k in FORMAT_HINTS):
         return "format"
     if any(k in low for k in BOT_HINTS):
@@ -358,6 +362,14 @@ def friendly_download_error(message: str, has_cookies: bool = False) -> str:
             "Kalau terus terjadi: 1) perbarui yt-dlp (pip install -U yt-dlp), 2) pasang cookies "
             "(Pengaturan → Cookies), 3) coba Client YouTube → TV. · detail: " + detail
         )
+    if kind == "ffmpeg":
+        return (
+            "yt-dlp tidak menemukan ffmpeg, padahal ffmpeg dibutuhkan untuk menggabungkan "
+            "video+audio. Clipper sudah mencoba ulang dengan format tunggal (tanpa gabung). "
+            "Kalau masih gagal: jalankan `pip install -U imageio-ffmpeg` (Clipper memakai ffmpeg "
+            "dari paket itu) atau install ffmpeg dan pastikan ada di PATH, lalu coba lagi. "
+            "· detail: " + detail
+        )
     if kind == "network":
         return (
             "Tidak bisa menghubungi server video (jaringan/DNS/proxy/SSL). Cek koneksi internet, "
@@ -373,6 +385,7 @@ TV_PLAYER_ARGS = {"youtube": {"player_client": ["tv", "web_safari"]}}
 
 
 def _build_opts(out_dir: Path, settings: dict, hook: Callable[[dict], None], extra: dict | None = None) -> dict:
+    ffmpeg = ffmpeg_for_ytdlp()
     opts: dict = {
         "outtmpl": str(out_dir / "source.%(ext)s"),
         "format": _format_selector(settings.get("ytdlp_format")),
@@ -394,6 +407,13 @@ def _build_opts(out_dir: Path, settings: dict, hook: Callable[[dict], None], ext
         "fragment_retries": 3,
         "extractor_retries": 2,
     }
+    if ffmpeg:
+        # ffmpeg bawaan Clipper (imageio-ffmpeg) belum tentu ada di PATH —
+        # tanpa opsi ini yt-dlp gagal merge video+audio di Windows.
+        opts["ffmpeg_location"] = ffmpeg
+    else:
+        # ffmpeg tidak ada sama sekali: hindari format gabungan yang pasti gagal
+        opts["format"] = "b[ext=mp4]/b"
     cookies = (settings.get("ytdlp_cookies_browser") or "").strip()
     if cookies:
         opts["cookiesfrombrowser"] = (cookies,)
@@ -492,14 +512,18 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
         attempts.append(("default", None))
         attempts.append(("tv", {"extractor_args": TV_PLAYER_ARGS}))
 
-    RETRYABLE = ("age", "bot", "login", "format", "reload")
+    ffmpeg_ok = ffmpeg_for_ytdlp() is not None
+    RETRYABLE = ("age", "bot", "login", "format", "reload", "ffmpeg")
     RETRY_MESSAGE = {
         "age": "Diblokir batas umur, mencoba metode lain…",
         "bot": "YouTube mendeteksi bot, mencoba metode lain…",
         "login": "Video butuh login, mencoba metode lain…",
         "format": "Format tidak tersedia, mencoba format lain…",
         "reload": "YouTube meminta halaman dimuat ulang, mengulang unduhan…",
+        "ffmpeg": "ffmpeg tidak ditemukan, memakai format tunggal tanpa gabung…",
     }
+    # tanpa ffmpeg, format gabungan (bv+ba) mustahil di-merge → langsung format tunggal
+    format_chain = [None, *FORMAT_FALLBACKS] if ffmpeg_ok else [None, "b[ext=mp4]/b", "b"]
 
     def attempt(extra: dict | None, fmt: str | None) -> tuple[Path | None, str]:
         _clean_partials(out_dir)
@@ -517,7 +541,7 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
     # instance YoutubeDL baru (dan buang file parsial sisa unduhan sebelumnya).
     for pass_no in range(2):
         for label, extra in attempts:
-            for fmt in [None, *FORMAT_FALLBACKS]:
+            for fmt in format_chain:
                 path, error = attempt(extra, fmt)
                 if path is not None:
                     return path
@@ -527,9 +551,9 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
                     raise DownloadError(friendly_download_error(last_error, has_cookies))
                 if on_progress and last_kind in RETRY_MESSAGE:
                     on_progress(0.02, RETRY_MESSAGE[last_kind])
-                # cuma error format yang perlu dicoba dengan format lain;
+                # error format/ffmpeg masih bisa diselamatkan format lain;
                 # error lain → langsung ganti client/percobaan berikutnya
-                if last_kind != "format":
+                if last_kind not in ("format", "ffmpeg"):
                     break
         if last_kind not in ("reload", "network"):
             break

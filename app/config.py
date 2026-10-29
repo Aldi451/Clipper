@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "Clipper"
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -67,6 +67,30 @@ def ffmpeg_exe() -> str:
             raise RuntimeError(
                 "ffmpeg tidak ditemukan. Install ffmpeg atau jalankan: pip install imageio-ffmpeg"
             ) from exc
+
+
+def ffmpeg_for_ytdlp() -> str | None:
+    """Lokasi ffmpeg untuk opsi `ffmpeg_location` milik yt-dlp.
+
+    Tanpa ini yt-dlp hanya mencari `ffmpeg` di PATH. Di Windows ffmpeg jarang ada
+    di PATH (Clipper memakai binary dari paket imageio-ffmpeg), sehingga unduhan
+    video+audio gagal dengan "You have requested merging of multiple formats but
+    ffmpeg is not installed".
+
+    yt-dlp menerima path file maupun folder. Kalau nama binary-nya persis
+    `ffmpeg`/`ffmpeg.exe`, kita kirim foldernya supaya yt-dlp sekaligus menemukan
+    `ffprobe` di sebelahnya; kalau namanya versi (mis. ffmpeg-win-x86_64-v7.0.2.exe)
+    kita kirim path file-nya.
+    """
+    try:
+        exe = Path(ffmpeg_exe())
+    except Exception:  # pragma: no cover - ffmpeg benar-benar tidak ada
+        return None
+    if not exe.exists():
+        return None
+    if exe.stem.lower() == "ffmpeg":
+        return str(exe.parent)
+    return str(exe)
 
 
 def ffprobe_exe() -> str | None:

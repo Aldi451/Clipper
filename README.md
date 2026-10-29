@@ -174,6 +174,24 @@ selain ke YouTube saat mengunduh. Hapus kapan saja lewat tombol **Hapus**.
 Baris `#HttpOnly_.youtube.com …` **dihitung** sebagai cookie (bukan komentar) — justru di situ
 cookie login `SID`/`HSID`/`SSID` berada. BOM dan akhir baris Windows (CRLF) juga ditangani.
 
+**Kalau muncul “You have requested merging of multiple formats but ffmpeg is not installed”**
+
+yt-dlp butuh ffmpeg untuk menggabungkan video+audio. Clipper memakai ffmpeg dari paket
+`imageio-ffmpeg`, yang **tidak selalu ada di PATH** — karena itu Clipper sekarang mengirim
+lokasi ffmpeg langsung ke yt-dlp (`ffmpeg_location`), jadi tidak perlu install ffmpeg terpisah.
+Cek di Pengaturan → Diagnostik baris `yt-dlp → ffmpeg` (atau jalankan `python run.py --doctor`).
+
+Kalau tetap muncul:
+
+```bash
+pip install -U imageio-ffmpeg         # Clipper memakai ffmpeg dari paket ini
+python run.py --doctor                # pastikan baris "yt-dlp → ffmpeg" OK
+```
+
+Sebagai jaring pengaman, kalau ffmpeg benar-benar tidak ada Clipper otomatis beralih ke
+**format tunggal** (`b`) yang tidak perlu penggabungan, jadi unduhan tetap jalan walau
+kualitasnya mengikuti file gabungan yang disediakan YouTube.
+
 **Kalau unduhan berhenti di tengah (mis. 3%) dengan “The page needs to be reloaded”**
 
 YouTube membagikan halaman/player yang sudah kedaluwarsa, sehingga unduhan terputus beberapa

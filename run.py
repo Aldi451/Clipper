@@ -125,6 +125,31 @@ def check_ffmpeg() -> bool:
         return False
 
 
+def check_ytdlp_ffmpeg() -> bool:
+    """yt-dlp hanya bisa merge video+audio kalau tahu lokasi ffmpeg."""
+    try:
+        from app.config import ffmpeg_exe, ffmpeg_for_ytdlp
+
+        loc = ffmpeg_for_ytdlp()
+        if not loc:
+            bad("yt-dlp tidak diberi lokasi ffmpeg (merge video+audio akan gagal)")
+            info("Perbaiki: pip install -U imageio-ffmpeg")
+            return False
+        import subprocess
+
+        target = loc if os.path.isfile(loc) else os.path.join(loc, "ffmpeg")
+        out = subprocess.run([target, "-version"], capture_output=True, text=True, timeout=20)
+        line = (out.stdout or out.stderr or "").splitlines()[:1]
+        ok(f"yt-dlp → ffmpeg: {loc}")
+        if line:
+            info(f"  {line[0][:70]}")
+        return True
+    except Exception as exc:
+        bad(f"gagal memeriksa ffmpeg untuk yt-dlp: {exc}")
+        info("Perbaiki: pip install -U imageio-ffmpeg")
+        return False
+
+
 def check_files() -> bool:
     good = True
     if not (ROOT / "web" / "index.html").exists():
@@ -177,6 +202,7 @@ def doctor(host: str, port: int) -> int:
         problems += 1
     say("")
     problems += 0 if check_ffmpeg() else 1
+    problems += 0 if check_ytdlp_ffmpeg() else 1
     say("")
     problems += 0 if check_files() else 1
     say("")
