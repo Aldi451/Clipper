@@ -51,6 +51,19 @@ def create_app() -> FastAPI:
             whisper_ok = True
         except Exception:
             whisper_ok = False
+        # yt-dlp berbasis tanggal rilis: kalau terlalu tua, YouTube sering menolak
+        # ("The page needs to be reloaded" / signature error).
+        ytdlp_age_days = None
+        try:
+            parts = ytdlp_version.split(".")
+            if len(parts) >= 3:
+                from datetime import date
+
+                released = date(int(parts[0]), int(parts[1]), int(parts[2]))
+                ytdlp_age_days = (date.today() - released).days
+        except Exception:
+            ytdlp_age_days = None
+
         return {
             "app": APP_NAME,
             "version": VERSION,
@@ -58,6 +71,8 @@ def create_app() -> FastAPI:
             "ffmpeg_path": ffmpeg_path,
             "ytdlp": bool(ytdlp_version),
             "ytdlp_version": ytdlp_version,
+            "ytdlp_age_days": ytdlp_age_days,
+            "ytdlp_outdated": bool(ytdlp_age_days is not None and ytdlp_age_days > 45),
             "whisper": whisper_ok,
             "youtube": youtube.is_connected(),
             "cookies": ingest.cookie_summary().get("configured", False),

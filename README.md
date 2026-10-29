@@ -174,6 +174,26 @@ selain ke YouTube saat mengunduh. Hapus kapan saja lewat tombol **Hapus**.
 Baris `#HttpOnly_.youtube.com …` **dihitung** sebagai cookie (bukan komentar) — justru di situ
 cookie login `SID`/`HSID`/`SSID` berada. BOM dan akhir baris Windows (CRLF) juga ditangani.
 
+**Kalau unduhan berhenti di tengah (mis. 3%) dengan “The page needs to be reloaded”**
+
+YouTube membagikan halaman/player yang sudah kedaluwarsa, sehingga unduhan terputus beberapa
+detik setelah mulai. Clipper sekarang:
+
+1. **mengulang otomatis** — percobaan kedua memakai instance yt-dlp baru dan membuang file
+   parsial (`.part`) sisa unduhan sebelumnya,
+2. **berganti client** (web → TV) kalau percobaan pertama masih gagal,
+3. menampilkan pesan yang menjelaskan langkah manual kalau semuanya gagal.
+
+Kalau masih berulang, biasanya **yt-dlp kamu sudah tua** (YouTube sering mengubah halamannya):
+
+```bash
+pip install -U yt-dlp          # macOS/Linux
+.venv\Scripts\python -m pip install -U yt-dlp   # Windows (venv project)
+```
+
+Pengaturan → Diagnostik sekarang menunjukkan umur rilis yt-dlp dan menampilkan peringatan kalau
+lebih dari 45 hari. Cara lain: pasang cookies (Pengaturan → Cookies) atau ganti **Client YouTube → TV**.
+
 **Kalau unduhan gagal karena format**
 
 `Requested format is not available` biasanya berarti video itu tidak punya stream
