@@ -1827,6 +1827,12 @@ async function renderSettings() {
         <div class="stat"><span class="v">${health.ffmpeg ? "✓" : "✗"}</span><span class="k">ffmpeg</span></div>
         <div class="stat"><span class="v">${health.whisper ? "✓" : "✗"}</span><span class="k">faster-whisper</span></div>
         <div class="stat"><span class="v">${health.ytdlp ? esc(health.ytdlp_version) : "✗"}</span><span class="k">yt-dlp</span></div>
+        ${health.ytdlp_outdated ? `<div class="tiny" style="color:#fbbf24;grid-column:1/-1;line-height:1.7">
+          yt-dlp kamu berumur ${health.ytdlp_age_days} hari. YouTube sering mengubah halamannya,
+          sehingga unduhan bisa gagal dengan pesan seperti “The page needs to be reloaded”.
+          Perbarui dengan: <span class="mono">pip install -U yt-dlp</span> (atau
+          <span class="mono">.venv\\Scripts\\python -m pip install -U yt-dlp</span> di Windows).
+        </div>` : ""}
         <div class="stat"><span class="v">${health.cpu}</span><span class="k">core CPU</span></div>
         <div class="stat"><span class="v">${health.youtube ? "✓" : "—"}</span><span class="k">youtube</span></div>
       </div>
