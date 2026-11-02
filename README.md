@@ -294,6 +294,17 @@ Setelah akun terdaftar, Google akan menampilkan layar *"Google hasn't verified t
 klik **Advanced → Go to … (unsafe)**, lalu **Allow**. Layar itu normal untuk app pribadi yang
 belum diverifikasi.
 
+**Kalau Google bilang “Success! Device connected” tapi Clipper masih “belum terhubung”**
+
+Ini bug yang sudah diperbaiki di v1.0.10. Penyebabnya: endpoint token Google membalas
+**HTTP 400** `{"error": "authorization_pending"}` selama kamu belum menekan izinkan, dan
+`HTTPError` (subclass `URLError`) tertangkap oleh blok “tidak bisa menghubungi Google” — thread
+polling mati diam-diam di percobaan pertama, jadi status tidak pernah berubah.
+
+Kalau masih mengalaminya: klik **“Sudah disetujui di browser? Cek sekarang”** (memanggil
+`POST /api/youtube/login/device/check`) untuk memeriksa sekali lagi tanpa mengulang dari awal,
+atau ulangi **Login dengan kode**.
+
 **Catatan penting:**
 
 | Hal | Penjelasan |

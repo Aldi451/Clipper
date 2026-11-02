@@ -116,17 +116,20 @@ def _post_form(url: str, payload: dict[str, str]) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8", "replace"))
-    except urllib.error.URLError as exc:
-        raise YouTubeError(
-            "Tidak bisa menghubungi Google. Cek koneksi internet server ini "
-            f"({getattr(exc, 'reason', exc)})"
-        ) from exc
+    # PENTING: HTTPError adalah subclass URLError, jadi harus ditangkap lebih dulu.
+    # Endpoint token Google membalas HTTP 400 {"error": "authorization_pending"}
+    # selama user belum menyetujui di browser — itu bukan gangguan jaringan.
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")
         try:
             return json.loads(body)
         except json.JSONDecodeError:
             raise YouTubeError(f"Google menolak permintaan ({exc.code})") from exc
+    except urllib.error.URLError as exc:
+        raise YouTubeError(
+            "Tidak bisa menghubungi Google. Cek koneksi internet server ini "
+            f"({getattr(exc, 'reason', exc)})"
+        ) from exc
 
 
 def _credentials():
@@ -321,6 +324,74 @@ def device_status() -> dict[str, Any]:
     return state
 
 
+def _device_poll_once(client_id: str, client_secret: str, device_code: str) -> tuple[bool, float]:
+    """Satu kali cek status device flow.
+
+    Mengembalikan (selesai?, interval_baru). Kalau selesai, token sudah disimpan.
+    """
+    payload = {
+        "client_id": client_id,
+        "device_code": device_code,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    }
+    if client_secret:
+        payload["client_secret"] = client_secret
+    result = _post_form(TOKEN_URL, payload)
+    if "access_token" in result:
+        save_token({
+            "token": result["access_token"],
+            "refresh_token": result.get("refresh_token"),
+            "scopes": SCOPES,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "expires_at": time.time() + float(result.get("expires_in") or 3600),
+            "obtained_at": time.time(),
+        })
+        title = ""
+        try:
+            title = channel_info().get("title", "")
+        except Exception:
+            pass
+        if title:
+            token = load_token() or {}
+            token["channel"] = title
+            save_token(token)
+        with _pending_lock:
+            _pending.update({"state": "connected", "channel": title,
+                             "message": "Terhubung ke YouTube", "help": None})
+        return True, 0.0
+    error = result.get("error", "")
+    if error == "authorization_pending":
+        return False, 0.0
+    if error == "slow_down":
+        return False, 5.0
+    raw_message = result.get("error_description") or error or "Gagal login"
+    with _pending_lock:
+        _pending.update({"state": "error",
+                         "message": friendly_error(raw_message),
+                         "help": help_for(f"{error} {raw_message}")})
+    return True, 0.0
+
+
+def check_device_once() -> dict[str, Any]:
+    """Cek sekali sekarang (tombol 'Cek status login').
+
+    Berguna kalau Google sudah bilang "Success! Device connected" tapi Clipper
+    belum berubah — mis. jendela Clipper sempat ditutup atau jaringan sempat putus.
+    """
+    with _pending_lock:
+        state = dict(_pending)
+    if state.get("state") == "waiting" and state.get("device_code"):
+        client_id = state.get("client_id") or client_credentials()[0]
+        client_secret = client_credentials()[1]
+        try:
+            _device_poll_once(client_id, client_secret, state["device_code"])
+        except Exception as exc:  # noqa: BLE001
+            return {"state": "error", "message": friendly_error(str(exc)),
+                    "help": help_for(str(exc)), "connected": is_connected()}
+    return device_status()
+
+
 def start_device_auth() -> dict[str, Any]:
     client_id, _ = client_credentials()
     if not client_id:
@@ -354,55 +425,40 @@ def start_device_auth() -> dict[str, Any]:
 
     device_code = resp["device_code"]
     client_secret = client_credentials()[1]
+    with _pending_lock:
+        # disimpan supaya user bisa "Cek status login" kalau thread polling mati
+        _pending.update({"device_code": device_code, "client_id": client_id})
 
     def poll() -> None:
         deadline = time.time() + expire
+        wait = interval
+        network_errors = 0
         while time.time() < deadline:
-            time.sleep(interval)
-            payload = {
-                "client_id": client_id,
-                "device_code": device_code,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            }
-            if client_secret:
-                payload["client_secret"] = client_secret
-            result = _post_form(TOKEN_URL, payload)
-            if "access_token" in result:
-                save_token({
-                    "token": result["access_token"],
-                    "refresh_token": result.get("refresh_token"),
-                    "scopes": SCOPES,
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                    "expires_at": time.time() + float(result.get("expires_in") or 3600),
-                    "obtained_at": time.time(),
-                })
-                title = ""
-                try:
-                    title = channel_info().get("title", "")
-                except Exception:
-                    pass
-                if title:
-                    token = load_token() or {}
-                    token["channel"] = title
-                    save_token(token)
+            time.sleep(wait)
+            try:
+                done, wait_next = _device_poll_once(client_id, client_secret, device_code)
+            except Exception as exc:  # noqa: BLE001 - jangan sampai thread mati diam-diam
+                network_errors += 1
+                if network_errors >= 5:
+                    with _pending_lock:
+                        _pending.update({
+                            "state": "error",
+                            "message": friendly_error(str(exc), "Gagal login ke YouTube"),
+                            "help": help_for(str(exc)),
+                        })
+                    return
                 with _pending_lock:
-                    _pending.update({"state": "connected", "channel": title,
-                                     "message": "Terhubung ke YouTube"})
+                    _pending.update({
+                        "message": "Menunggu persetujuan di browser… (gangguan jaringan, "
+                                   f"mencoba lagi: {network_errors}/5)"
+                    })
+                continue
+            network_errors = 0
+            if done:
                 return
-            error = result.get("error", "")
-            if error == "authorization_pending":
-                continue
-            if error == "slow_down":
-                interval_extra = interval
-                time.sleep(interval_extra)
-                continue
-            raw_message = result.get("error_description") or error or "Gagal login"
-            with _pending_lock:
-                _pending.update({"state": "error",
-                                 "message": friendly_error(raw_message),
-                                 "help": help_for(f"{error} {raw_message}")})
-            return
+            if wait_next:
+                # slow_down: interval hanya boleh naik, jangan turun
+                wait = max(wait, wait_next)
         with _pending_lock:
             _pending.update({
                 "state": "expired",

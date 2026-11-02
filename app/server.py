@@ -648,6 +648,16 @@ def create_app() -> FastAPI:
                 {"detail": str(exc), "help": youtube.help_for(str(exc))}, status_code=400
             )
 
+    @app.post("/api/youtube/login/device/check")
+    def yt_login_device_check() -> Any:
+        """Cek sekali sekarang — untuk kasus Google sudah 'Success' tapi Clipper diam."""
+        try:
+            return youtube.check_device_once()
+        except youtube.YouTubeError as exc:
+            return JSONResponse(
+                {"detail": str(exc), "help": youtube.help_for(str(exc))}, status_code=400
+            )
+
     @app.post("/api/youtube/login/browser")
     def yt_login_browser() -> Any:
         try:

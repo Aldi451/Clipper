@@ -1451,6 +1451,9 @@ async function pollDeviceStatus() {
           <div class="tiny muted" style="margin-top:10px">
             Buka <a href="${esc(status.url)}" target="_blank" rel="noopener">${esc(status.url)}</a>, masukkan kode di atas,
             lalu izinkan akses. Halaman ini otomatis lanjut setelah kamu setuju.
+          </div>
+          <div style="margin-top:10px">
+            <button class="btn small ghost" data-action="yt-device-check">Cek status login sekarang</button>
           </div>`;
       }
       setTimeout(pollDeviceStatus, 4000);
@@ -2062,9 +2065,24 @@ document.addEventListener("click", async (e) => {
           box.innerHTML = `<div class="code-box">${esc(status.user_code)}</div>
             <div class="tiny muted" style="margin-top:10px">Buka
               <a href="${esc(status.url)}" target="_blank" rel="noopener">${esc(status.url)}</a>,
-              masukkan kode di atas lalu izinkan. Halaman ini lanjut otomatis.</div>`;
+              masukkan kode di atas lalu izinkan. Halaman ini lanjut otomatis.</div>
+            <div style="margin-top:10px">
+              <button class="btn small ghost" data-action="yt-device-check">Sudah disetujui di browser? Cek sekarang</button>
+            </div>`;
         }
         pollDeviceStatus();
+      }
+    } else if (action === "yt-device-check") {
+      const status = await api("/api/youtube/login/device/check", { method: "POST" });
+      state.yt = status;
+      if (status.connected || status.state === "connected") {
+        toast("YouTube terhubung 🎉", "ok");
+        await renderYouTube();
+        loadHealth();
+      } else {
+        toast(status.message || "Google belum menerima persetujuan. Selesaikan di browser dulu.");
+        const box = $("#yt-device-box");
+        if (box && status.state === "waiting") pollDeviceStatus();
       }
     } else if (action === "yt-browser") {
       toast("Browser dibuka di mesin Clipper. Selesaikan login di sana…");
