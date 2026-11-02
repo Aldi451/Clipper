@@ -334,6 +334,49 @@ Clipper versi ini menampilkan panduan di atas langsung di tab **YouTube** (blok
 *"Muncul Error 403: access_denied?"*) dan menerjemahkan error OAuth mentah jadi langkah perbaikan
 di kotak login.
 
+## Folder Clipper dipindah (mis. `C:` → `D:`) — Clipper blank / tidak bisa dibuka
+
+Ini normal dan **bukan data yang hilang**. Penyebabnya: `.venv` menyimpan path absolut, jadi
+setelah folder dipindah:
+
+1. `python.exe` di `.venv` masih ada tapi paket-paketnya tidak bisa di-import → server gagal
+   start, jendela langsung tertutup atau halaman kosong;
+2. Windows service / autostart masih menunjuk `C:\...` lama → `localhost:8420` tidak menjawab.
+
+**Perbaikan satu kali klik:**
+
+```bat
+repair.bat
+```
+
+Yang dikerjakan `repair.bat`:
+
+| Langkah | Isi |
+|---|---|
+| 1 | memeriksa file penting (`run.py`, `app/`, `web/`) — kalau hilang, folder belum tersalin lengkap |
+| 2 | menghentikan Clipper/service yang masih jalan |
+| 3 | mendeteksi `.venv` rusak → menghapus dan **membuat ulang** + memasang dependensi |
+| 4 | menjalankan `python run.py --repair` → mengarahkan **Windows service** & **autostart** ke folder baru (tipe startup dipertahankan) |
+| 5 | `--doctor` untuk verifikasi akhir |
+
+**Data aman:** `data/` (video, klip, cookies, token YouTube, DB) tidak dihapus.
+
+Alternatif per langkah:
+
+```bat
+.venv\Scripts\python run.py --doctor     :: lihat apa yang rusak
+.venv\Scripts\python run.py --repair     :: perbaiki venv + service + autostart
+```
+
+Kalau memakai `ClipperService.exe`, buka aplikasinya — status akan menampilkan
+**“PERLU DIPERBAIKI: service masih menunjuk folder lama”** dan ada tombol **Perbaiki**.
+
+Kalau `repair.bat` bilang butuh Administrator, klik kanan → **Run as administrator** (perlu untuk
+memasang ulang service).
+
+`run.bat` sekarang juga mendeteksi `.venv` rusak otomatis dan membuat ulang, jadi untuk pemakaian
+manual cukup `run.bat` saja.
+
 ## Jalankan sebagai Windows service (tanpa jendela Command Prompt)
 
 Kalau tidak mau ada jendela cmd yang harus dibiarkan terbuka, jalankan Clipper sebagai

@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -363,6 +364,114 @@ def read_log(project: Path | None, lines: int = 60) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# perbaikan setelah folder dipindah
+# --------------------------------------------------------------------------- #
+def _python_of(project: Path) -> Path | None:
+    return venv_python(project)
+
+
+def venv_healthy(project: Path | None) -> tuple[bool, str]:
+    """venv dianggap sehat kalau python-nya bisa import fastapi + uvicorn."""
+    if project is None:
+        return False, "folder Clipper tidak ditemukan"
+    python = venv_python(project)
+    if python is None:
+        return False, ".venv belum ada"
+    try:
+        proc = subprocess.run([str(python), "-c", "import fastapi, uvicorn"],
+                              capture_output=True, text=True, timeout=180,
+                              creationflags=_no_window() if sys.platform.startswith("win") else 0)
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)[:160]
+    if proc.returncode != 0:
+        last = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
+        return False, (last[-1] if last else "venv tidak bisa dipakai")[:160]
+    return True, "OK"
+
+
+def rebuild_venv(project: Path, progress=None) -> tuple[bool, str]:
+    """Hapus .venv lalu buat ulang + pasang dependensi."""
+    import shutil
+
+    target = project / ".venv"
+    if target.exists():
+        try:
+            shutil.rmtree(target)
+        except Exception as exc:  # noqa: BLE001
+            return False, (f"Gagal menghapus .venv: {exc}\n"
+                           "Tutup Clipper/service dulu, lalu coba lagi.")
+    launcher = sys.executable
+    steps = [
+        ([launcher, "-m", "venv", str(target)], 600, "membuat .venv"),
+        ([str(venv_python(project)), "-m", "pip", "install", "--upgrade", "pip", "--quiet"], 900,
+         "memperbarui pip"),
+        ([str(venv_python(project)), "-m", "pip", "install", "-r",
+          str(project / "requirements.txt")], 3600, "memasang dependensi"),
+    ]
+    for cmd, timeout, label in steps:
+        if progress:
+            progress(label)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"gagal {label}: {exc}"
+        if proc.returncode != 0:
+            detail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
+            return False, f"gagal {label}: {(detail[-1] if detail else '')[:200]}"
+    return True, "venv baru siap"
+
+
+def service_bin_path() -> str:
+    """Baris BINARY_PATH_NAME dari `sc qc` (path yang dipakai service)."""
+    code, out = run_sc("qc", SERVICE_NAME)
+    if code != 0:
+        return ""
+    for line in out.splitlines():
+        if "BINARY_PATH_NAME" in line.upper():
+            return line.split(":", 1)[-1].strip()
+    return ""
+
+
+def service_path_stale() -> bool:
+    """Service menunjuk .exe yang sudah tidak ada (folder dipindah)."""
+    if not service_status()["exists"]:
+        return False
+    import re
+
+    paths = re.findall(r'"([^"]+)"', service_bin_path())
+    return bool(paths) and any(not Path(p).exists() for p in paths)
+
+
+def repair(project: Path | None, progress=None) -> dict[str, Any]:
+    """Perbaiki venv + arahkan service ke folder baru (tipe startup dipertahankan)."""
+    if project is None:
+        raise RuntimeError("Folder Clipper belum dipilih.")
+    result: dict[str, Any] = {"steps": []}
+
+    healthy, reason = venv_healthy(project)
+    if healthy:
+        result["steps"].append("venv sehat")
+    else:
+        result["steps"].append(f"venv bermasalah ({reason}) → dibangun ulang")
+        ok, message = rebuild_venv(project, progress)
+        result["steps"].append(message)
+        if not ok:
+            raise RuntimeError("\n".join(result["steps"]))
+
+    status = service_status()
+    if status["exists"]:
+        if service_path_stale():
+            start = status["start_type"] if status["start_type"] in START_TYPES else "auto"
+            install(project, start)
+            result["steps"].append(f"service diarahkan ke folder baru (start={start})")
+        else:
+            result["steps"].append("service sudah benar")
+    else:
+        result["steps"].append("service belum terpasang (dilewati)")
+    return result
+
+
+# --------------------------------------------------------------------------- #
 # hak akses Administrator (Windows)
 # --------------------------------------------------------------------------- #
 def is_admin() -> bool:
@@ -405,6 +514,8 @@ def cli(argv: list[str]) -> int:
     parser.add_argument("--stop", action="store_true", help="Hentikan service")
     parser.add_argument("--open", action="store_true", help="Buka Clipper di browser")
     parser.add_argument("--log", action="store_true", help="Tampilkan log service")
+    parser.add_argument("--repair", action="store_true",
+                        help="Perbaiki venv + service setelah folder dipindah")
     parser.add_argument("--start-type", choices=list(START_TYPES), help="auto | manual | disabled")
     parser.add_argument("--port", type=int, default=None, help=f"Port (default {DEFAULT_PORT})")
     parser.add_argument("--host", default=None, help=f"Host (default {DEFAULT_HOST})")
@@ -418,7 +529,7 @@ def cli(argv: list[str]) -> int:
             print("    Harus berisi run.py dan folder app/.")
             return 2
         project = find_project()
-    if project is None and (args.install or args.log):
+    if project is None and (args.install or args.log or args.repair):
         print("[!] Folder Clipper tidak ditemukan (harus ada run.py + app/).")
         print("    Letakkan ClipperService.exe di folder Clipper, atau pakai --project.")
         return 2
@@ -450,6 +561,12 @@ def cli(argv: list[str]) -> int:
             return 0
         if args.open:
             print(f"[OK] Membuka {open_app()['url']}")
+            return 0
+        if args.repair:
+            out = repair(project, progress=lambda m: print(f"  [..] {m}"))
+            for step in out["steps"]:
+                print(f"  [OK] {step}")
+            print(f"[OK] Selesai. Buka {service_url()}")
             return 0
         if args.log:
             print(read_log(project))
@@ -622,11 +739,42 @@ def gui() -> int:
 
     ttk.Button(extra, text="Lihat log", command=show_log).pack(side="left", padx=2)
 
+    def do_repair() -> None:
+        if project is None:
+            messagebox.showerror("Gagal", "Folder Clipper belum dipilih.")
+            return
+        win = tk.Toplevel(root)
+        win.title("Memperbaiki Clipper…")
+        win.geometry("520x220")
+        label = ttk.Label(win, text="Memeriksa…", wraplength=480, justify="left")
+        label.pack(padx=14, pady=14, anchor="w")
+        bar = ttk.Progressbar(win, mode="indeterminate")
+        bar.pack(fill="x", padx=14)
+        bar.start(12)
+
+        def worker() -> None:
+            try:
+                out = repair(project, progress=lambda m: label.config(text=m))
+                text = "\n".join(f"✓ {x}" for x in out["steps"])
+                label.config(text=text)
+            except Exception as exc:  # noqa: BLE001
+                label.config(text=f"Dari sebagian:\n{exc}")
+            finally:
+                bar.stop()
+                refresh()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    ttk.Button(extra, text="Perbaiki", command=do_repair).pack(side="left", padx=2)
+
     def refresh() -> None:
         status = service_status()
         if not status["exists"]:
             status_var.set("Belum terpasang.\nPilih tipe startup, lalu klik "
                            "'Pasang / Update service'.")
+        elif service_path_stale():
+            status_var.set("PERLU DIPERBAIKI: service masih menunjuk folder lama "
+                           "(folder Clipper dipindah?).\nKlik tombol 'Perbaiki'.")
         else:
             label = {"auto": "Automatic (nyala saat boot)",
                      "manual": "Manual (start sendiri)",

@@ -72,9 +72,10 @@ echo   7.  Lihat log service
 echo   8.  Buat shortcut Clipper di Desktop
 echo   9.  Alternatif tanpa service: autostart Task Scheduler
 echo   10. Buat ClipperService.exe ^(manajer service versi .exe^)
+echo   11. Perbaiki setelah folder dipindah ^(jalankan repair.bat^)
 echo   0.  Keluar
 echo.
-set /p "CHOICE=  Pilih menu (0-10): "
+set /p "CHOICE=  Pilih menu (0-11): "
 if "%CHOICE%"=="1" set "ACTION=install"
 if "%CHOICE%"=="2" set "ACTION=start"
 if "%CHOICE%"=="3" set "ACTION=stop"
@@ -85,6 +86,7 @@ if "%CHOICE%"=="7" set "ACTION=log"
 if "%CHOICE%"=="8" set "ACTION=shortcut"
 if "%CHOICE%"=="9" set "ACTION=autostart"
 if "%CHOICE%"=="10" set "ACTION=build"
+if "%CHOICE%"=="11" set "ACTION=repair"
 if "%CHOICE%"=="0" exit /b 0
 if not defined ACTION goto menu
 
@@ -99,6 +101,7 @@ if /i "%ACTION%"=="log"        goto do_log
 if /i "%ACTION%"=="shortcut"   goto do_shortcut
 if /i "%ACTION%"=="autostart"  goto do_autostart
 if /i "%ACTION%"=="build"      goto do_build
+if /i "%ACTION%"=="repair"     goto do_repair
 echo   [!] Menu tidak dikenal: %ACTION%
 goto end
 
@@ -152,6 +155,15 @@ goto end
 :do_build
 REM build .exe butuh internet sekali (PyInstaller) dan beberapa menit
 start "" cmd /c "%~dp0build_service_exe.bat"
+goto end
+
+:do_repair
+"%VENV_PY%" run.py --repair --no-pause
+if errorlevel 1 (
+  echo.
+  echo   [!] Perbaikan service butuh Administrator.
+  echo       Tutup jendela ini, klik kanan repair.bat - Run as administrator.
+)
 goto end
 
 :end
