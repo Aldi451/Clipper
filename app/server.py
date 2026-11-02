@@ -14,7 +14,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analyze, db, discover, editor, ingest, media, pipeline, transcribe, youtube
+from . import analyze, db, discover, editor, ingest, media, paths, pipeline, transcribe, youtube
 from .config import (
     APP_NAME, ASSET_DIR, MAX_UPLOAD_BYTES, VERSION, WEB_DIR, WORK_DIR,
     ensure_dirs, ffmpeg_exe, ffmpeg_for_ytdlp, load_settings, update_settings,
@@ -32,6 +32,20 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ #
     # info & settings
     # ------------------------------------------------------------------ #
+    _data_cache: dict[str, Any] = {"at": 0.0, "value": None}
+
+    def _data_report() -> dict[str, Any]:
+        from . import repair
+
+        now = time.time()
+        if _data_cache["value"] is None or now - _data_cache["at"] > 10:
+            try:
+                _data_cache["value"] = repair.data_folder_report()
+            except Exception:  # noqa: BLE001
+                _data_cache["value"] = {"stored_paths": 0, "broken_paths": 0}
+            _data_cache["at"] = now
+        return _data_cache["value"]
+
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         ffmpeg_ok, ffmpeg_path, ffmpeg_ytdlp = True, "", ""
@@ -84,9 +98,34 @@ def create_app() -> FastAPI:
             "whisper": whisper_ok,
             "youtube": youtube.is_connected(),
             "cookies": ingest.cookie_summary().get("configured", False),
+            # ringkasan folder data: memudahkan memastikan Clipper melihat data yang benar
+            "data": paths.data_summary(),
+            # berapa path media di DB yang masih menunjuk folder lama
+            "paths": {
+                "stored": _data_report()["stored_paths"],
+                "broken": _data_report()["broken_paths"],
+            },
+            "jobs": len(db.list_jobs(limit=100000)),
+            "clips": len(db.list_clips()),
             "cpu": os.cpu_count() or 1,
             "busy": pipeline.busy_state(),
         }
+
+    @app.get("/api/data")
+    def get_data_info() -> dict[str, Any]:
+        """Info folder data + berapa path media yang masih menunjuk folder lama."""
+        from . import repair
+
+        return {"ok": True, **repair.data_folder_report(), "summary": paths.data_summary()}
+
+    @app.post("/api/data/repair")
+    def repair_data_paths() -> dict[str, Any]:
+        """Tulis ulang path absolut lama di database ke folder data sekarang."""
+        from . import repair
+
+        ok, message = repair.relocate_paths()
+        _data_cache["value"] = None  # paksa /api/health menghitung ulang
+        return {"ok": ok, "message": message, "report": repair.data_folder_report()}
 
     @app.get("/api/settings")
     def get_settings() -> dict[str, Any]:
@@ -218,11 +257,14 @@ def create_app() -> FastAPI:
         for clip in db.list_clips(job_id):
             for key in ("file", "thumb"):
                 if clip.get(key):
-                    safe_unlink(clip[key])
+                    safe_unlink(paths.resolve_media_path(clip[key], (WORK_DIR / job_id,))
+                                or clip[key])
             srt = (clip.get("meta") or {}).get("srt")
             if srt:
-                safe_unlink(srt)
-        source_path = job.get("source_path")
+                safe_unlink(paths.resolve_media_path(srt, (WORK_DIR / job_id,)) or srt)
+        # path sumber bisa menunjuk folder/berkas di lokasi lama → cari yang sekarang
+        source_path = paths.resolve_media_path(job.get("source_path"), (WORK_DIR / job_id,)) \
+            or job.get("source_path")
         db.delete_job(job_id)
         safe_rmtree(WORK_DIR / job_id)
         if source_path:
@@ -247,7 +289,7 @@ def create_app() -> FastAPI:
     def all_clips(job_id: str | None = None) -> list[dict[str, Any]]:
         clips = db.list_clips(job_id)
         for clip in clips:
-            clip["has_file"] = bool(clip.get("file")) and Path(clip["file"]).exists()
+            clip["has_file"] = bool(clip.get("file")) and paths.media_exists(clip["file"])
         return clips
 
     @app.post("/api/jobs/{job_id}/clips")
@@ -274,7 +316,7 @@ def create_app() -> FastAPI:
         clip = db.get_clip(clip_id)
         if not clip:
             raise HTTPException(404, "Clip tidak ditemukan")
-        clip["has_file"] = bool(clip.get("file")) and Path(clip["file"]).exists()
+        clip["has_file"] = bool(clip.get("file")) and paths.media_exists(clip["file"])
         return clip
 
     @app.patch("/api/clips/{clip_id}")
@@ -320,10 +362,11 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Clip tidak ditemukan")
         for key in ("file", "thumb"):
             if clip.get(key):
-                safe_unlink(clip[key])
+                safe_unlink(paths.resolve_media_path(clip[key], (WORK_DIR / clip["job_id"],))
+                            or clip[key])
         srt = (clip.get("meta") or {}).get("srt")
         if srt:
-            safe_unlink(srt)
+            safe_unlink(paths.resolve_media_path(srt, (WORK_DIR / clip["job_id"],)) or srt)
         db.delete_clip(clip_id)
         return {"ok": True}
 
@@ -342,7 +385,9 @@ def create_app() -> FastAPI:
         clip = db.get_clip(clip_id)
         if not clip:
             raise HTTPException(404, "Clip tidak ditemukan")
-        if not clip.get("file") or not Path(clip["file"]).exists():
+        if not clip.get("file") or not paths.media_exists(
+            clip["file"], (WORK_DIR / clip.get("job_id", ""),)
+        ):
             raise HTTPException(400, "Render clip dulu sebelum upload")
         if not youtube.is_connected():
             raise HTTPException(400, "Hubungkan akun YouTube dulu di tab YouTube")
@@ -359,7 +404,7 @@ def create_app() -> FastAPI:
         clips = db.list_clips(job_id)
         queued = 0
         for clip in clips:
-            if clip.get("file") and Path(clip["file"]).exists() and clip["status"] != "uploaded":
+            if clip.get("file") and paths.media_exists(clip["file"]) and clip["status"] != "uploaded":
                 pipeline.start_upload(clip["id"])
                 queued += 1
         return {"ok": True, "queued": queued}
@@ -413,7 +458,11 @@ def create_app() -> FastAPI:
         clip = db.get_clip(clip_id)
         if not clip or not clip.get("file"):
             raise HTTPException(404, "Video belum dirender")
-        return _stream(Path(clip["file"]), request)
+        resolved = paths.resolve_media_path(clip["file"], (WORK_DIR / clip.get("job_id", ""),))
+        if resolved is None:
+            raise HTTPException(404, "File video clip tidak ditemukan (folder data mungkin dipindah — "
+                                     "jalankan repair.bat)")
+        return _stream(resolved, request)
 
     @app.get("/api/clips/{clip_id}/download")
     def clip_download(clip_id: str) -> Response:
@@ -421,22 +470,31 @@ def create_app() -> FastAPI:
         if not clip or not clip.get("file"):
             raise HTTPException(404, "Video belum dirender")
         safe = re.sub(r"[^\w\-. ]+", "_", clip.get("title") or "clip")
-        return FileResponse(clip["file"], media_type="video/mp4",
+        resolved = paths.resolve_media_path(clip["file"], (WORK_DIR / clip.get("job_id", ""),))
+        if resolved is None:
+            raise HTTPException(404, "File video clip tidak ditemukan — jalankan repair.bat")
+        return FileResponse(resolved, media_type="video/mp4",
                             filename=f"{safe[:60] or 'clip'}.mp4")
 
     @app.get("/api/clips/{clip_id}/thumb")
     def clip_thumb(clip_id: str) -> Response:
         clip = db.get_clip(clip_id)
-        if not clip or not clip.get("thumb") or not Path(clip["thumb"]).exists():
+        thumb = paths.resolve_media_path(clip.get("thumb") if clip else None,
+                                         (WORK_DIR / (clip or {}).get("job_id", ""),))
+        if not clip or thumb is None:
             raise HTTPException(404, "Thumbnail belum ada")
-        return FileResponse(clip["thumb"], media_type="image/jpeg")
+        return FileResponse(thumb, media_type="image/jpeg")
 
     @app.get("/api/jobs/{job_id}/source")
     def job_source(job_id: str, request: Request) -> Response:
         job = db.get_job(job_id)
         if not job or not job.get("source_path"):
             raise HTTPException(404, "Sumber tidak ditemukan")
-        return _stream(Path(job["source_path"]), request)
+        resolved = paths.resolve_media_path(job["source_path"], (WORK_DIR / job_id,))
+        if resolved is None:
+            raise HTTPException(404, "File sumber tidak ditemukan (folder data mungkin dipindah — "
+                                     "jalankan repair.bat)")
+        return _stream(resolved, request)
 
     # ------------------------------------------------------------------ #
     # video editor (timeline, teks, subtitle, template, export 4K)
@@ -459,9 +517,10 @@ def create_app() -> FastAPI:
         if not job:
             raise HTTPException(404, "Project tidak ditemukan")
         settings = load_settings()
-        source_path = Path(job.get("source_path") or "")
-        if not source_path.exists():
-            raise HTTPException(400, "File sumber sudah tidak ada — jalankan ulang analisis project")
+        source_path = paths.resolve_media_path(job.get("source_path"), (WORK_DIR / job["id"],))
+        if source_path is None:
+            raise HTTPException(400, "File sumber sudah tidak ada — jalankan repair.bat atau "
+                                     "analisis ulang project")
         info = media.probe(source_path)
         transcript = transcribe.load_transcript(job["id"])
         spec = editor.load_or_create_spec(clip, transcript, float(info.duration or 0), settings)
@@ -490,9 +549,9 @@ def create_app() -> FastAPI:
         job = db.get_job(clip["job_id"])
         if not job:
             raise HTTPException(404, "Project tidak ditemukan")
-        source_path = Path(job.get("source_path") or "")
+        source_path = paths.resolve_media_path(job.get("source_path"), (WORK_DIR / job["id"],))
         duration = float(job.get("duration") or 0)
-        if source_path.exists():
+        if source_path is not None:
             try:
                 duration = media.probe(source_path).duration or duration
             except Exception:
@@ -519,9 +578,10 @@ def create_app() -> FastAPI:
         if not editor.template_by_id(template_id):
             raise HTTPException(400, "Template tidak dikenal")
         job = db.get_job(clip["job_id"]) or {}
-        source_path = Path(job.get("source_path") or "")
+        source_path = paths.resolve_media_path(job.get("source_path"),
+                                               (WORK_DIR / clip["job_id"],))
         duration = 0.0
-        if source_path.exists():
+        if source_path is not None:
             try:
                 duration = media.probe(source_path).duration
             except Exception:
@@ -539,9 +599,10 @@ def create_app() -> FastAPI:
         if not clip:
             raise HTTPException(404, "Clip tidak ditemukan")
         job = db.get_job(clip["job_id"]) or {}
-        source_path = Path(job.get("source_path") or "")
+        source_path = paths.resolve_media_path(job.get("source_path"),
+                                               (WORK_DIR / clip["job_id"],))
         duration = 0.0
-        if source_path.exists():
+        if source_path is not None:
             try:
                 duration = media.probe(source_path).duration
             except Exception:

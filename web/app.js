@@ -1567,6 +1567,18 @@ async function renderSettings() {
   if (viralConfig) state.viral.config = viralConfig;
   if (editorMeta) state.editorMeta = editorMeta;
   const s = settings;
+  const raw = health.data || {};
+  const pinfo = health.paths || {};
+  const data = {
+    dir: raw.data_dir || "",
+    env: !!raw.env_override,
+    uploads: raw.uploads || 0,
+    clips: raw.clips || 0,
+    models: raw.models || 0,
+    stored: pinfo.stored || 0,
+    broken: pinfo.broken || 0,
+    ok: !pinfo.broken,
+  };
 
   view.innerHTML = `
     <div class="page-head">
@@ -1575,6 +1587,31 @@ async function renderSettings() {
         <p class="sub">Semua proses jalan lokal. Perubahan langsung dipakai untuk clip berikutnya.</p>
       </div>
       <span class="tag ${health.whisper ? "done" : "err"}">${health.whisper ? "Whisper siap" : "Whisper belum ada"}</span>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <h2>Folder data</h2>
+        <span class="tag ${data.ok ? "done" : "err"}">${data.ok ? "terbaca" : "perlu diperbaiki"}</span>
+      </div>
+      <div class="kv-list">
+        <div class="kv"><span>Lokasi data</span><b class="mono">${esc(data.dir || "-")}</b></div>
+        <div class="kv"><span>Sumber lokasi</span><b>${data.env ? "CLIPPER_DATA_DIR" : "folder Clipper/data"}</b></div>
+        <div class="kv"><span>Isi folder</span><b>${data.uploads} upload · ${data.clips} clip · ${data.models} model</b></div>
+        <div class="kv"><span>Path di database</span><b>${data.stored ? `${data.stored - data.broken}/${data.stored} file ketemu` : "belum ada data"}</b></div>
+      </div>
+      ${
+        data.broken
+          ? `<p class="hint" style="margin-top:12px">
+               ${data.broken} path di database masih menunjuk folder lama (mis. setelah pindah C: ke D:).
+               File-nya biasanya sudah ikut tersalin — klik <b>Perbaiki path</b> agar Clipper menemukannya.
+             </p>
+             <button class="btn ghost" data-action="fix-paths">Perbaiki path</button>`
+          : `<p class="hint" style="margin-top:12px">
+               Clipper membaca semua media dari folder ini. Kalau folder data ada di tempat lain,
+               jalankan <span class="mono">run.bat --data-dir D:\Clipper\data</span>.
+             </p>`
+      }
     </div>
 
     <div class="card">
@@ -2036,6 +2073,13 @@ document.addEventListener("click", async (e) => {
       });
       toast("Clip manual ditambahkan", "ok");
       renderProject(state.job.id);
+    } else if (action === "fix-paths") {
+      target.disabled = true;
+      target.innerHTML = `<span class="spinner"></span>`;
+      const res = await api("/api/data/repair", { method: "POST" });
+      if (res.ok && !res.report.broken_paths) toast("Semua file ketemu: " + res.message, "ok");
+      else toast(res.message || "Sebagian file belum ketemu", res.ok ? "warn" : "err");
+      await renderSettings();
     } else if (action === "save-clip") {
       await saveEditor(true);
     } else if (action === "save-only") {

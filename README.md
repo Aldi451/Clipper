@@ -91,7 +91,8 @@ Opsi launcher:
 python run.py                 # start + buka browser
 python run.py --no-browser    # jangan buka browser
 python run.py --port 9000     # ganti port (otomatis pindah kalau bentrok)
-python run.py --doctor        # cek lingkungan: paket, ffmpeg, port, folder data
+python run.py --doctor        # cek lingkungan: paket, ffmpeg, port, folder data, path DB
+python run.py --data-dir D:\Clipper\data   # pakai folder data lain
 python run.py --reload        # mode development
 CLIPPER_DATA_DIR=D:\video-clipper python run.py   # simpan video di disk lain
 ```
@@ -357,9 +358,42 @@ Yang dikerjakan `repair.bat`:
 | 2 | menghentikan Clipper/service yang masih jalan |
 | 3 | mendeteksi `.venv` rusak → menghapus dan **membuat ulang** + memasang dependensi |
 | 4 | menjalankan `python run.py --repair` → mengarahkan **Windows service** & **autostart** ke folder baru (tipe startup dipertahankan) |
-| 5 | `--doctor` untuk verifikasi akhir |
+| 5 | **menulis ulang path lama di database** (`jobs.source_path`, `clips.file`, `clips.thumb`) ke folder data sekarang |
+| 6 | `--doctor` untuk verifikasi akhir |
 
 **Data aman:** `data/` (video, klip, cookies, token YouTube, DB) tidak dihapus.
+
+### Aplikasi terbuka tapi project/klip lama kosong ("file tidak ditemukan")
+
+Kalau folder sudah dipindah **dan isinya ikut tersalin**, tapi daftar project kosong, thumbnail
+hilang, atau video tidak mau diputar, penyebabnya **path absolut di database**: `data/clipper.db`
+menyimpan lokasi file (`C:\Clipper\data\clips\clip_x.mp4`). Setelah pindah ke `D:`, path itu
+tidak ada lagi — walau file-nya ada di `D:\Clipper\data\clips\`.
+
+Clipper sekarang menangani ini otomatis:
+
+- saat memutar/membuka clip, file dicari berdasarkan **nama file** di folder data yang aktif
+  (`clips/`, `uploads/`, `work/`, `assets/`) → klip lama tetap bisa diputar tanpa analisis ulang;
+- `repair.bat` **menulis ulang path lama** di database ke folder baru (berlaku permanen);
+- di **Pengaturan → Folder data** ada lokasi data aktif, jumlah file yang ketemu, dan tombol
+  **Perbaiki path** (bisa diklik kapan saja tanpa menutup aplikasi).
+
+Cek manual kalau masih kosong:
+
+```bat
+.venv\Scripts\python run.py --doctor
+```
+
+Bagian `folder data:` menunjukkan folder yang dipakai, dan baris berikutnya menunjukkan berapa path
+di database yang masih menunjuk lokasi lama. Kalau angka kedua muncul, jalankan `repair.bat`.
+
+Kalau folder data sengaja ditaruh di luar folder Clipper:
+
+```bat
+run.bat --data-dir D:\Clipper\data
+```
+
+atau set permanen `CLIPPER_DATA_DIR=D:\Clipper\data` (System Properties → Environment Variables).
 
 Alternatif per langkah:
 
