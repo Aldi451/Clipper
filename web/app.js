@@ -1293,6 +1293,12 @@ async function renderYouTube() {
                   klik <b>Publish app</b> (untuk akun sendiri cukup lewati layar peringatan;
                   verifikasi hanya perlu kalau dipakai orang lain).
                 </div>
+                <div style="margin-top:6px">
+                  Akun pemilik project <b>tidak otomatis</b> jadi test user — tetap harus
+                  ditambahkan sendiri. Login via browser menunggu maksimal <b>5 menit</b>; halaman
+                  <i>Access blocked</i> tidak pernah mengirim balik apa pun ke Clipper, jadi
+                  pakai tombol <b>Login dengan kode</b> kalau browser bermasalah.
+                </div>
               </div>
             </details>
             <div class="field">
