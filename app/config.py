@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "Clipper"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -106,8 +106,8 @@ def ffprobe_exe() -> str | None:
 # --------------------------------------------------------------------------- #
 DEFAULT_SETTINGS: dict[str, Any] = {
     # analisis
-    "min_clip_seconds": 20,
-    "max_clip_seconds": 60,
+    "min_clip_seconds": 60,      # paling pendek 1 menit
+    "max_clip_seconds": 180,     # paling panjang 3 menit
     "target_clips": 5,
     "language": "auto",          # auto | id | en | ...
     "whisper_model": "small",    # tiny | base | small | medium | large-v3
@@ -127,7 +127,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "caption_font": "Inter",
     "caption_color": "#FFFFFF",
     "caption_highlight": "#FFE02B",
-    "hook_overlay": True,        # tampilkan judul hook di atas video
+    "hook_overlay": False,       # judul TIDAK ditulis di dalam video (default mati)
     "normalize_audio": True,
     "fps": 30,
     "crf": 20,
@@ -194,6 +194,7 @@ def load_settings() -> dict[str, Any]:
                             data[key] = value
             except Exception:
                 pass
+        normalize_clip_lengths(data)
         _settings_cache = data
         return dict(data)
 
@@ -206,10 +207,34 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
             if key not in DEFAULT_SETTINGS:
                 continue
             current[key] = _coerce(DEFAULT_SETTINGS[key], value)
+        normalize_clip_lengths(current)
         ensure_dirs()
         SETTINGS_FILE.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
         _settings_cache = current
         return dict(current)
+
+
+CLIP_MIN_SECONDS = 60      # paling pendek 1 menit
+CLIP_MAX_SECONDS = 180     # batas atas keras: 3 menit
+
+
+def normalize_clip_lengths(data: dict[str, Any]) -> dict[str, Any]:
+    """Jaga durasi clip tetap wajar: 60–180 detik (1–3 menit) dan min tidak melebihi max."""
+    try:
+        low = int(float(data.get("min_clip_seconds") or 60))
+    except (TypeError, ValueError):
+        low = 60
+    try:
+        high = int(float(data.get("max_clip_seconds") or 180))
+    except (TypeError, ValueError):
+        high = 180
+    low = max(CLIP_MIN_SECONDS, min(CLIP_MAX_SECONDS, low))
+    high = max(CLIP_MIN_SECONDS, min(CLIP_MAX_SECONDS, high))
+    if high < low:
+        high = low
+    data["min_clip_seconds"] = low
+    data["max_clip_seconds"] = high
+    return data
 
 
 def _coerce(default: Any, value: Any) -> Any:

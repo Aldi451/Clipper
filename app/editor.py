@@ -691,6 +691,31 @@ def apply_template(spec: dict[str, Any], template_id: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # ASS: subtitle & overlay teks
 # --------------------------------------------------------------------------- #
+def _snap_word_times(words: list[dict[str, Any]], start: float, end: float) -> list[tuple[float, float]]:
+    """Timing kata yang rapat & berurutan supaya caption tidak hilang-muncul.
+
+    - setiap kata dibatasi ke rentang barisnya,
+    - akhir kata = awal kata berikutnya (tanpa celah),
+    - kata terakhir berakhir di akhir baris,
+    - overlap 30 ms supaya pergantian kata mulus (tidak ada frame kosong).
+    """
+    starts: list[float] = []
+    for word in words:
+        value = _f(word.get("start"), start)
+        starts.append(min(max(value, start), end))
+    for i in range(1, len(starts)):
+        starts[i] = max(starts[i], starts[i - 1])
+    result: list[tuple[float, float]] = []
+    for i, wstart in enumerate(starts):
+        wend = starts[i + 1] if i + 1 < len(starts) else end
+        if wend <= wstart:
+            wend = min(end, wstart + 0.12)
+        if wend <= wstart:
+            continue
+        result.append((wstart, min(end + 0.5, wend + 0.03)))
+    return result
+
+
 def build_captions_ass(
     subtitles: list[dict[str, Any]],
     captions: dict[str, Any],
@@ -727,7 +752,10 @@ def build_captions_ass(
         start = max(0.0, _f(line.get("start")))
         end = max(start + 0.15, _f(line.get("end"), start + 1.0))
         words = line.get("words") or []
-        head = f"{{\\an2\\pos({CANVAS_W // 2},{pos_y})\\fad(40,0)}}"
+        # posisi selalu sama; fade HANYA di awal baris supaya caption tidak
+        # berkedip setiap kali kata berganti.
+        head = f"{{\\an2\\pos({CANVAS_W // 2},{pos_y})\\fad(70,0)}}"
+        head_plain = f"{{\\an2\\pos({CANVAS_W // 2},{pos_y})}}"
 
         if not word_level or not words:
             text = _escape(line.get("text") or "")
@@ -736,17 +764,11 @@ def build_captions_ass(
             if not text:
                 continue
             lines.append(
-                f"Dialogue: 0,{ass_ts(start)},{ass_ts(end)},Cap,,0,0,0,,{head}{{\\c{highlight}}}{text}"
+                f"Dialogue: 0,{ass_ts(start)},{ass_ts(end)},Cap,,0,0,0,,{head}{{\\c{color}}}{text}"
             )
             continue
 
-        for idx, word in enumerate(words):
-            wstart = max(start, _f(word.get("start"), start))
-            wend = min(end, _f(word.get("end"), wstart + 0.25))
-            if idx + 1 < len(words):
-                wend = max(wend, _f(words[idx + 1].get("start"), wend))
-            if wend <= wstart:
-                wend = wstart + 0.12
+        for idx, (wstart, wend) in enumerate(_snap_word_times(words, start, end)):
             parts: list[str] = []
             for j, other in enumerate(words):
                 chunk = _escape(other.get("text") or "")
@@ -755,13 +777,19 @@ def build_captions_ass(
                 if not chunk:
                     continue
                 if j == idx:
-                    parts.append(f"{{\\c{highlight}\\fscx104\\fscy104}}{chunk}{{\\r}}")
+                    # kata yang sedang diucapkan: warna highlight + sedikit lebih besar
+                    parts.append(
+                        f"{{\\c{highlight}\\fscx106\\fscy106}}{chunk}{{\\fscx100\\fscy100}}"
+                    )
                 else:
-                    parts.append(chunk)
+                    # kata lain memakai warna dasar eksplisit; jangan pakai \\r karena
+                    # itu membuang \\pos sehingga caption melompat/berkedip
+                    parts.append(f"{{\\c{color}}}{chunk}")
             if not parts:
                 continue
+            prefix = head if idx == 0 else head_plain
             lines.append(
-                f"Dialogue: 0,{ass_ts(wstart)},{ass_ts(wend)},Cap,,0,0,0,,{head}" + " ".join(parts)
+                f"Dialogue: 0,{ass_ts(wstart)},{ass_ts(wend)},Cap,,0,0,0,,{prefix}" + " ".join(parts)
             )
 
     Path(out_path).write_text(
@@ -1235,6 +1263,37 @@ def load_or_create_spec(
         except (json.JSONDecodeError, TypeError):
             pass
     return default_spec(clip, settings, transcript, source_duration)
+
+
+def strip_hook_overlays(spec: dict[str, Any], hook_text: str = "") -> tuple[dict[str, Any], int]:
+    """Buang teks judul/hook dari dalam video (untuk spec yang dibuat versi lama).
+
+    Kembalikan (spec_baru, jumlah_teks_yang_dibuang).
+    """
+    texts = spec.get("texts")
+    if not isinstance(texts, list):
+        return spec, 0
+    target = (hook_text or "").strip().lower()
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for item in texts:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if str(item.get("id") or "") == "hook" or (target and text.lower() == target):
+            removed += 1
+            continue
+        kept.append(item)
+    if removed:
+        spec = {**spec, "texts": kept}
+    return spec, removed
+
+
+def has_hook_overlay(spec: dict[str, Any]) -> bool:
+    return any(
+        isinstance(item, dict) and str(item.get("id") or "") == "hook"
+        for item in (spec.get("texts") or [])
+    )
 
 
 def summarize(spec: dict[str, Any]) -> dict[str, Any]:

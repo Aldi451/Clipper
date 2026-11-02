@@ -286,11 +286,12 @@ def find_candidates(
     on_progress: Callable[[float, str], None] | None = None,
 ) -> list[Candidate]:
     settings = settings or load_settings()
-    min_len = float(settings.get("min_clip_seconds") or 20)
-    max_len = float(settings.get("max_clip_seconds") or 60)
+    min_len = float(settings.get("min_clip_seconds") or 60)
+    max_len = float(settings.get("max_clip_seconds") or 180)
     target = int(settings.get("target_clips") or 5)
-    if max_len < min_len:
-        max_len = min_len + 10
+    # 1 menit .. 3 menit (batas keras, walau settings diubah manual)
+    min_len = max(60.0, min(180.0, min_len))
+    max_len = max(min_len, min(180.0, max_len))
     target = max(1, min(20, target))
 
     sentences = build_sentences(transcript)
@@ -402,12 +403,14 @@ def _build_description(cand: Candidate, keywords: list[str]) -> str:
 # --------------------------------------------------------------------------- #
 def fixed_windows(duration: float, settings: dict[str, Any] | None = None) -> list[Candidate]:
     settings = settings or load_settings()
-    min_len = float(settings.get("min_clip_seconds") or 20)
-    max_len = float(settings.get("max_clip_seconds") or 60)
+    min_len = float(settings.get("min_clip_seconds") or 60)
+    max_len = float(settings.get("max_clip_seconds") or 180)
     target = max(1, min(20, int(settings.get("target_clips") or 5)))
     if duration <= 0:
         return []
-    length = max(min_len, min(max_len, 45.0))
+    # tanpa transkrip: pakai panjang ideal di antara min–max, tidak pernah di bawah min
+    length = max(min_len, min(max_len, (min_len + max_len) / 2))
+    length = min(length, max(min_len, duration))
     results: list[Candidate] = []
     step = max(length * 0.9, 5.0)
     start = 0.0
