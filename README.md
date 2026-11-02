@@ -334,6 +334,61 @@ Clipper versi ini menampilkan panduan di atas langsung di tab **YouTube** (blok
 *"Muncul Error 403: access_denied?"*) dan menerjemahkan error OAuth mentah jadi langkah perbaikan
 di kotak login.
 
+## Jalankan sebagai Windows service (tanpa jendela Command Prompt)
+
+Kalau tidak mau ada jendela cmd yang harus dibiarkan terbuka, jalankan Clipper sebagai
+**Windows service**: hidup di latar belakang, start otomatis saat Windows menyala, dan muncul
+di `services.msc` sebagai **Clipper**.
+
+**Cara tercepat:**
+
+1. Double-click **`service.bat`** (minta izin Administrator sekali).
+2. Pilih **1 — Pasang service**.
+
+Selesai. Buka `http://localhost:8420` di browser kapan saja, tanpa cmd.
+
+**Menu `service.bat`:**
+
+| Pilihan | Fungsi |
+|---|---|
+| 1 | Pasang service (auto-start saat Windows nyala) |
+| 2 / 3 | Mulai / hentikan service |
+| 4 | Status (lihat juga `sc query Clipper`) |
+| 5 | Hapus service |
+| 6 | Buka Clipper di browser |
+| 7 | Lihat 40 baris terakhir log service |
+| 8 | Buat shortcut **Clipper** di Desktop |
+| 9 | Alternatif **tanpa Administrator**: autostart lewat Task Scheduler |
+
+Bisa juga tanpa menu: `service.bat install`, `service.bat status`, `service.bat log`, dst.
+
+**Lewat terminal** (PowerShell/CMD **as Administrator**):
+
+```bat
+.venv\Scripts\python run.py --install-service      :: pasang + auto-start
+.venv\Scripts\python run.py --start-service        :: mulai sekarang
+.venv\Scripts\python run.py --service-status        :: cek status
+.venv\Scripts\python run.py --service-log           :: lihat log
+.venv\Scripts\python run.py --stop-service          :: hentikan
+.venv\Scripts\python run.py --remove-service        :: hapus
+.venv\Scripts\python run.py --shortcut              :: shortcut Desktop
+```
+
+**Yang perlu diketahui:**
+
+| Hal | Penjelasan |
+|---|---|
+| Butuh `pywin32` | Terpasang otomatis oleh `service.bat` (`pip install pywin32`). Sudah ditambahkan ke `requirements.txt` untuk Windows. |
+| Port & host | Disimpan di `data/service.json` (default `127.0.0.1:8420`), dipakai ulang setiap service start. Ubah dengan `--service-port 9000 --install-service`. |
+| Log | `data/logs/clipper-service.log` (rotasi 2 MB × 3). Service tidak punya jendela, jadi error tercatat di sini. |
+| Restart otomatis | Service dikonfigurasi `sc failure` → Windows menjalankannya ulang kalau berhenti karena error. |
+| Tanpa Administrator | Pilih menu **9** (Task Scheduler + `pythonw.exe`) — jalan otomatis saat login, tetap tanpa jendela cmd. |
+| Kembali ke mode manual | `service.bat remove`, lalu pakai `run.bat` seperti biasa. |
+| Tidak bisa pasang service? | Pastikan `pywin32` terpasang dan jendela dijalankan sebagai Administrator. Pesan errornya sudah menjelaskan langkah perbaikannya. |
+
+> Upah: kalau `service.bat` dipakai saat Clipper sedang jalan lewat `run.bat`, hentikan dulu
+> jendela itu (`Ctrl+C`) supaya port 8420 tidak bentrok.
+
 ## Cari video viral (buat bahan clip / re-upload)
 
 Buka tab **🔥 Viral**. Ada dua cara:
