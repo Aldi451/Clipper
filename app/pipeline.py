@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-from . import analyze, db, editor, ingest, media, subs, transcribe, youtube
+from . import analyze, db, editor, ingest, media, subs, tiktok, transcribe, youtube
 from .config import WORK_DIR, load_settings
 from .fsutil import safe_unlink
 from .paths import resolve_media_path
@@ -298,8 +298,11 @@ def _run_render(clip_id: str) -> None:
         )
         editor.cleanup_workdir(job["id"], clip_id)
 
-        if settings.get("auto_pipeline") and settings.get("yt_auto_upload") and youtube.is_connected():
-            start_upload(clip_id)
+        if settings.get("auto_pipeline"):
+            if settings.get("yt_auto_upload") and youtube.is_connected():
+                start_upload(clip_id, "youtube")
+            elif settings.get("tt_enabled") and settings.get("tt_auto_upload") and tiktok.ready():
+                start_upload(clip_id, "tiktok")
     except Exception as exc:
         traceback.print_exc()
         db.update_clip(clip_id, status="error", message="Render gagal", error=friendly_error(exc))
@@ -310,54 +313,114 @@ def _run_render(clip_id: str) -> None:
 # --------------------------------------------------------------------------- #
 # upload
 # --------------------------------------------------------------------------- #
-def start_upload(clip_id: str) -> None:
-    if not _claim(f"upload:{clip_id}"):
+def start_upload(clip_id: str, target: str = "youtube") -> None:
+    """Antre upload. `target`: youtube | tiktok | both."""
+    target = (target or "youtube").lower()
+    if target == "both":
+        start_upload(clip_id, "youtube")
+        start_upload(clip_id, "tiktok")
         return
-    upload_pool.submit(_run_upload, clip_id)
+    if not _claim(f"upload:{target}:{clip_id}"):
+        return
+    upload_pool.submit(_run_upload, clip_id, target)
 
 
-def _run_upload(clip_id: str) -> None:
+def _run_upload(clip_id: str, target: str = "youtube") -> None:
+    key = f"upload:{target}:{clip_id}"
     clip = db.get_clip(clip_id)
     if not clip:
-        _release(f"upload:{clip_id}")
+        _release(key)
         return
     try:
         settings = load_settings()
         clip_file = resolve_media_path(clip.get("file"), (WORK_DIR / clip["job_id"],))
         if clip_file is None:
             raise RuntimeError("Render clip dulu sebelum upload")
-        if not youtube.is_connected():
-            raise RuntimeError("Belum login YouTube")
-        db.update_clip(clip_id, status="uploading", progress=0.01, message="Mulai upload…", error="")
-
-        def on_progress(fraction: float, message: str) -> None:
-            db.update_clip(clip_id, progress=round(fraction, 4), message=message)
-
-        srt = (clip.get("meta") or {}).get("srt") or ""
-        result = youtube.upload_video(
-            str(clip_file),
-            title=clip.get("title") or "Clip",
-            description=clip.get("description") or "",
-            hashtags=clip.get("hashtags") or settings.get("yt_hashtags") or "#Shorts",
-            privacy=settings.get("yt_privacy") or "public",
-            on_progress=on_progress,
-            srt_path=srt if srt and Path(srt).exists() else None,
-            category_id=str(settings.get("yt_category") or "24"),
-            notify_subscribers=bool(settings.get("yt_notify_subscribers")),
-        )
-        db.update_clip(
-            clip_id, status="uploaded", progress=1.0, message="Terkirim ke YouTube",
-            yt_id=result["id"], yt_url=result["url"],
-            yt_privacy=result["privacy"], error="",
-        )
+        if target == "tiktok":
+            _upload_tiktok(clip, clip_file, settings)
+        else:
+            _upload_youtube(clip, clip_file, settings)
     except Exception as exc:
-        traceback.print_exc()
-        # error OAuth (token kedaluwarsa / app belum verified) dijelaskan dalam Bahasa Indonesia
+        if not isinstance(exc, tiktok.TikTokError):
+            traceback.print_exc()
+        # error OAuth / browser dijelaskan dalam Bahasa Indonesia
         detail = youtube.friendly_error(str(exc), "Upload gagal")
+        if target == "tiktok":
+            detail = str(exc)[:700]
         db.update_clip(clip_id, status="rendered" if clip.get("file") else "suggested",
-                       message="Upload gagal", error=detail[:700])
+                       message=f"Upload {_target_label(target)} gagal", error=detail[:700])
     finally:
-        _release(f"upload:{clip_id}")
+        _release(key)
+
+
+def _target_label(target: str) -> str:
+    return "TikTok" if target == "tiktok" else "YouTube"
+
+
+def _upload_youtube(clip: dict[str, Any], clip_file: Path, settings: dict[str, Any]) -> None:
+    clip_id = clip["id"]
+    if not youtube.is_connected():
+        raise RuntimeError("Belum login YouTube")
+    db.update_clip(clip_id, status="uploading", progress=0.01, message="Mulai upload ke YouTube…",
+                   error="")
+
+    def on_progress(fraction: float, message: str) -> None:
+        db.update_clip(clip_id, progress=round(fraction, 4), message=message)
+
+    srt = (clip.get("meta") or {}).get("srt") or ""
+    result = youtube.upload_video(
+        str(clip_file),
+        title=clip.get("title") or "Clip",
+        description=clip.get("description") or "",
+        hashtags=clip.get("hashtags") or settings.get("yt_hashtags") or "#Shorts",
+        privacy=settings.get("yt_privacy") or "public",
+        on_progress=on_progress,
+        srt_path=srt if srt and Path(srt).exists() else None,
+        category_id=str(settings.get("yt_category") or "24"),
+        notify_subscribers=bool(settings.get("yt_notify_subscribers")),
+    )
+    db.update_clip(
+        clip_id, status="uploaded", progress=1.0, message="Terkirim ke YouTube",
+        yt_id=result["id"], yt_url=result["url"],
+        yt_privacy=result["privacy"], error="",
+    )
+    if settings.get("tt_enabled") and settings.get("tt_auto_upload"):
+        start_upload(clip_id, "tiktok")
+
+
+def _upload_tiktok(clip: dict[str, Any], clip_file: Path, settings: dict[str, Any]) -> None:
+    clip_id = clip["id"]
+    db.update_clip(clip_id, status="uploading", progress=0.02, message="Menyiapkan upload TikTok…",
+                   error="")
+
+    def on_progress(fraction: float, message: str) -> None:
+        db.update_clip(clip_id, progress=round(fraction, 4), message=message)
+
+    caption = tiktok.build_caption(
+        clip.get("title") or "Clip",
+        clip.get("description") or "",
+        clip.get("hashtags") or settings.get("tt_hashtags") or "#fyp",
+    )
+    result = tiktok.upload_video(
+        str(clip_file),
+        caption=caption,
+        hashtags="",
+        privacy=str(settings.get("tt_privacy") or "public"),
+        auto_post=bool(settings.get("tt_auto_post", True)),
+        on_progress=on_progress,
+        wait_seconds=float(settings.get("tt_login_wait") or 300) + 300,
+    )
+    already = bool(clip.get("yt_url"))
+    db.update_clip(
+        clip_id,
+        status="uploaded" if (result["posted"] or already) else "rendered",
+        progress=1.0,
+        message="Terkirim ke TikTok" if result["posted"] else "TikTok: cek jendela browser",
+        tk_id=(result["url"].rsplit("/", 1)[-1] if result.get("url") else ""),
+        tk_url=result.get("url") or "",
+        meta={**(clip.get("meta") or {}), "tk_posted": bool(result.get("posted"))},
+        error="",
+    )
 
 
 # --------------------------------------------------------------------------- #

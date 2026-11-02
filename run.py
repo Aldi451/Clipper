@@ -247,6 +247,23 @@ def doctor(host: str, port: int) -> int:
     except Exception:  # noqa: BLE001
         pass
 
+    # tiktok opsional
+    try:
+        from app import tiktok as _tt
+
+        info_data_tt = _tt.status()
+        if info_data_tt["installed"]:
+            label = "siap" if info_data_tt["ready"] else "browser belum ada"
+            ok(f"upload TikTok (opsional): {label}"
+               + (f" · login {'tersimpan' if info_data_tt['logged_in'] else 'belum'}"
+                  if info_data_tt["ready"] else ""))
+            if not info_data_tt["ready"]:
+                info("Pasang Chrome/Edge, atau klik \"Unduh browser\" di halaman TikTok")
+        else:
+            info("upload TikTok (opsional): belum dipasang — pasang dari halaman TikTok")
+    except Exception:  # noqa: BLE001
+        pass
+
     say("")
     if port_free(host, port):
         ok(f"port {port} bebas")

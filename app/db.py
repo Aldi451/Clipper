@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS clips (
     yt_id         TEXT NOT NULL DEFAULT '',
     yt_url        TEXT NOT NULL DEFAULT '',
     yt_privacy    TEXT NOT NULL DEFAULT '',
+    tk_id         TEXT NOT NULL DEFAULT '',
+    tk_url        TEXT NOT NULL DEFAULT '',
     error         TEXT NOT NULL DEFAULT '',
     meta          TEXT NOT NULL DEFAULT '{}',
     created_at    REAL NOT NULL,
@@ -102,7 +104,7 @@ JOB_FIELDS = {
 CLIP_FIELDS = {
     "idx", "start", "duration", "score", "title", "hook", "description", "hashtags",
     "status", "progress", "message", "file", "thumb", "spec", "yt_id", "yt_url", "yt_privacy",
-    "error", "meta", "updated_at",
+    "tk_id", "tk_url", "error", "meta", "updated_at",
 }
 
 
@@ -137,6 +139,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         return
     if "spec" not in columns:
         conn.execute("ALTER TABLE clips ADD COLUMN spec TEXT NOT NULL DEFAULT ''")
+    for column in ("tk_id", "tk_url"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE clips ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
 
 def init_db() -> None:

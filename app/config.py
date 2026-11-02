@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "Clipper"
-VERSION = "1.0.15"
+VERSION = "1.1.0"
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -140,6 +140,13 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "yt_category": "24",         # 24 = Entertainment
     "yt_hashtags": "#Shorts #ShortsIndonesia #fyp",
     "yt_notify_subscribers": True,
+    # tiktok (upload lewat browser sendiri, gratis tanpa API)
+    "tt_enabled": True,           # tampilkan tombol upload TikTok
+    "tt_auto_upload": False,      # ikut upload ke TikTok setelah upload YouTube
+    "tt_hashtags": "#fyp #foryou #viral #ShortsIndonesia",
+    "tt_privacy": "public",       # public | friends | private (best effort)
+    "tt_auto_post": True,         # False = isi form saja, tombol Post ditekan manual
+    "tt_login_wait": 300,         # detik menunggu user login di jendela browser
     # otomatisasi
     "auto_render": False,        # render semua clip setelah analisis
     "auto_pipeline": True,       # analisis -> render -> upload (kalau login) tanpa klik

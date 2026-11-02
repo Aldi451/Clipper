@@ -14,7 +14,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analyze, db, discover, editor, ingest, media, paths, pipeline, transcribe, youtube
+from . import analyze, db, discover, editor, ingest, media, paths, pipeline, tiktok, transcribe, youtube
 from .config import (
     APP_NAME, ASSET_DIR, MAX_UPLOAD_BYTES, VERSION, WEB_DIR, WORK_DIR,
     ensure_dirs, ffmpeg_exe, ffmpeg_for_ytdlp, load_settings, update_settings,
@@ -98,6 +98,8 @@ def create_app() -> FastAPI:
             "whisper": whisper_ok,
             "youtube": youtube.is_connected(),
             "cookies": ingest.cookie_summary().get("configured", False),
+            "tiktok": tiktok.ready(),
+            "tiktok_login": tiktok.logged_in(),
             # ringkasan folder data: memudahkan memastikan Clipper melihat data yang benar
             "data": paths.data_summary(),
             # berapa path media di DB yang masih menunjuk folder lama
@@ -389,25 +391,42 @@ def create_app() -> FastAPI:
             clip["file"], (WORK_DIR / clip.get("job_id", ""),)
         ):
             raise HTTPException(400, "Render clip dulu sebelum upload")
-        if not youtube.is_connected():
+        target = str(payload.get("target") or "youtube").lower()
+        if target not in ("youtube", "tiktok", "both"):
+            raise HTTPException(400, "Target upload tidak dikenal")
+        if target in ("youtube", "both") and not youtube.is_connected():
             raise HTTPException(400, "Hubungkan akun YouTube dulu di tab YouTube")
+        if target in ("tiktok", "both") and not tiktok.ready():
+            raise HTTPException(
+                400, "Dukungan TikTok belum siap — buka halaman TikTok di Clipper lalu pasang dulu"
+            )
         if payload.get("privacy"):
             update_settings({"yt_privacy": str(payload["privacy"])})
-        pipeline.start_upload(clip_id)
-        return {"ok": True}
+        pipeline.start_upload(clip_id, target)
+        return {"ok": True, "target": target}
 
     @app.post("/api/clips/upload-all")
     def upload_all(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         job_id = payload.get("job_id")
-        if not youtube.is_connected():
+        target = str(payload.get("target") or "youtube").lower()
+        if target not in ("youtube", "tiktok", "both"):
+            raise HTTPException(400, "Target upload tidak dikenal")
+        if target in ("youtube", "both") and not youtube.is_connected():
             raise HTTPException(400, "Hubungkan akun YouTube dulu di tab YouTube")
+        if target in ("tiktok", "both") and not tiktok.ready():
+            raise HTTPException(400, "Dukungan TikTok belum siap — pasang dulu di halaman TikTok")
         clips = db.list_clips(job_id)
         queued = 0
         for clip in clips:
-            if clip.get("file") and paths.media_exists(clip["file"]) and clip["status"] != "uploaded":
-                pipeline.start_upload(clip["id"])
-                queued += 1
-        return {"ok": True, "queued": queued}
+            if not clip.get("file") or not paths.media_exists(clip["file"]):
+                continue
+            done = clip.get("yt_id") if target == "youtube" else clip.get("tk_id") if target == "tiktok" else (
+                clip.get("yt_id") and clip.get("tk_id"))
+            if done:
+                continue
+            pipeline.start_upload(clip["id"], target)
+            queued += 1
+        return {"ok": True, "queued": queued, "target": target}
 
     # ------------------------------------------------------------------ #
     # media streaming (support Range supaya bisa di-seek di browser)
@@ -736,6 +755,45 @@ def create_app() -> FastAPI:
     def yt_disconnect() -> dict[str, Any]:
         youtube.disconnect()
         return {"ok": True}
+
+    # ------------------------------------------------------------------ #
+    # tiktok (upload lewat browser sendiri — gratis, tanpa API)
+    # ------------------------------------------------------------------ #
+    def _tt_guard(fn) -> Any:
+        try:
+            return fn()
+        except tiktok.TikTokError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.get("/api/tiktok/status")
+    def tt_status() -> dict[str, Any]:
+        info = tiktok.status()
+        info["enabled"] = bool(load_settings().get("tt_enabled"))
+        return info
+
+    @app.post("/api/tiktok/setup")
+    def tt_setup(payload: dict[str, Any] = Body(default={})) -> Any:
+        with_browser = bool(payload.get("browser", True))
+        return _tt_guard(lambda: tiktok.install(with_browser=with_browser))
+
+    @app.post("/api/tiktok/browser")
+    def tt_browser() -> Any:
+        return _tt_guard(tiktok.install_browser)
+
+    @app.post("/api/tiktok/login")
+    def tt_login() -> Any:
+        return _tt_guard(tiktok.open_login_window)
+
+    @app.post("/api/tiktok/logout")
+    def tt_logout() -> dict[str, Any]:
+        tiktok.logout()
+        return {"ok": True}
+
+    @app.get("/api/tiktok/last-shot")
+    def tt_last_shot() -> Response:
+        if not tiktok.SCREENSHOT_FILE.exists():
+            raise HTTPException(404, "Belum ada tangkapan layar")
+        return FileResponse(tiktok.SCREENSHOT_FILE, media_type="image/png")
 
     # ------------------------------------------------------------------ #
     # video viral (buat bahan clip / re-upload)

@@ -19,5 +19,8 @@ google-auth>=2.28.0
 google-auth-oauthlib>=1.2.0
 google-auth-httplib2>=0.2.0
 
+# --- upload TikTok (opsional, dipasang dari halaman TikTok di aplikasi) ---
+# playwright>=1.44   (tidak wajib: hanya dipakai kalau kamu upload ke TikTok)
+
 # --- Windows service (Clipper jalan tanpa jendela cmd, muncul di services.msc) ---
 pywin32>=306; sys_platform == "win32"
