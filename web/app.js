@@ -1004,6 +1004,7 @@ async function renderProject(jobId) {
   state.clips = clips;
   const running = job.status === "running" || job.status === "queued";
   const pct = Math.round((job.progress || 0) * 100);
+  const dirtyCount = clips.filter((c) => c.meta && c.meta.dirty && c.status !== "uploaded").length;
   let ttOn = true;
   if (!state.settings || Object.keys(state.settings).length === 0) {
     state.settings = await api("/api/settings").catch(() => ({}));
@@ -1027,6 +1028,7 @@ async function renderProject(jobId) {
       </div>
       <div class="row">
         <button class="btn" data-action="render-all" ${!clips.length || running ? "disabled" : ""}>Render semua</button>
+        ${dirtyCount ? `<button class="btn ghost" data-action="render-dirty" ${running ? "disabled" : ""}>Render ulang ${dirtyCount} clip berubah</button>` : ""}
         <button class="btn yt" data-action="upload-all" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload YT</button>
         ${ttOn ? `<button class="btn tt" data-action="upload-all-tt" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload TikTok</button>` : ""}
         <button class="btn ghost danger" data-action="delete-job" data-id="${esc(job.id)}">Hapus project</button>
@@ -2375,6 +2377,13 @@ document.addEventListener("click", async (e) => {
       await api("/api/jobs/" + id + "/retry", { method: "POST" });
       toast("Mencoba ulang analisis…", "ok");
       renderProject(id);
+    } else if (action === "render-dirty") {
+      const res = await api("/api/jobs/" + state.job.id + "/render", {
+        method: "POST",
+        body: { only_dirty: true },
+      });
+      toast(res.queued + " clip masuk antrean render ulang", "ok");
+      renderProject(state.job.id);
     } else if (action === "render-all") {
       await api("/api/jobs/" + state.job.id + "/render", { method: "POST" });
       toast("Semua clip masuk antrean render", "ok");

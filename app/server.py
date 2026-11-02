@@ -246,12 +246,13 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/render")
-    def render_all(job_id: str) -> dict[str, Any]:
+    def render_all(job_id: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         job = db.get_job(job_id)
         if not job:
             raise HTTPException(404, "Project tidak ditemukan")
-        pipeline.render_job_all(job_id)
-        return {"ok": True, "clips": len(db.list_clips(job_id))}
+        only_dirty = bool(payload.get("only_dirty"))
+        queued = pipeline.render_job_all(job_id, only_dirty=only_dirty)
+        return {"ok": True, "queued": queued, "clips": len(db.list_clips(job_id))}
 
     @app.delete("/api/jobs/{job_id}")
     def delete_job(job_id: str) -> dict[str, Any]:
