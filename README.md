@@ -555,7 +555,21 @@ dibersihkan sekali: **Pengaturan → Hapus teks judul dari semua clip lama**
 
 **Caption tidak berkedip & sinkron.** Setiap kata kini punya event ASS sendiri dengan timing yang
 disambung (akhir kata = awal kata berikutnya, overlap 30 ms) dan `ade` hanya muncul di awal baris.
-Sebelumnya tiap kata membawa `` yang menghapus `\pos` sehingga teks melompat dan berkedip.
+Sebelumnya tiap kata membawa `
+` yang menghapus `\pos` sehingga teks melompat dan berkedip.
+
+**Preview editor = hasil render.** Preview caption memakai timing kata yang sama dengan render
+(`edSnapWordTimes()` di `web/editor.js` ≡ `_snap_word_times()` di `app/editor.py`), jadi tidak ada
+kata yang "hilang" di tengah dan tidak ada kejutan saat export.
+
+**Editor menjaga durasi 1–3 menit.** Di bawah timeline ada penanda durasi clip:
+kalau kurang dari 1 menit muncul tombol **Panjangkan ke 1 menit**, kalau lebih dari 3 menit muncul
+**Pendekkan ke 3 menit** (memotong/menambah segmen terakhir). Kalau video sumbernya sendiri lebih
+pendek dari 1 menit, Clipper memberi tahu bahwa target tidak bisa dicapai.
+
+**Render ulang hanya yang berubah.** Di halaman Project ada tombol
+**Render ulang N clip berubah** → `POST /api/jobs/{id}/render` dengan `{"only_dirty": true}`,
+hanya mengantre clip yang spesifikasinya berubah (mis. setelah membersihkan teks judul).
 
 **Whisper: library vs model.** Sidebar membedakan dua hal:
 - `Whisper ✓` = library `faster-whisper` terpasang (ikut saat instalasi Clipper),

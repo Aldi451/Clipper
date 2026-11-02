@@ -183,6 +183,7 @@ async function renderEditor(clipId) {
           <div class="tiny dim" style="margin-top:6px">
             Timeline = potongan video sumber yang dipakai. Klik segmen untuk mengatur, atau pakai tombol ⇤ ⇥ saat video diputar.
           </div>
+          <div id="ed-duration-gate"></div>
         </div>
 
         <div class="ed-right">
@@ -222,7 +223,26 @@ function refreshChrome() {
   }
   const timeLabel = edEl("ed-time");
   if (timeLabel) timeLabel.textContent = `${edFmt(ED.time)} / ${edFmt(dur)}`;
+  const gate = edEl("ed-duration-gate");
+  if (gate) gate.innerHTML = durationGateHtml(dur);
   updateSaveBadge();
+}
+
+/* Clipper memakai clip 1–3 menit; beri tahu kalau di luar itu + jalan pintas. */
+function durationGateHtml(dur) {
+  if (!(dur > 0)) return "";
+  const low = 60;
+  const high = 180;
+  if (dur >= low && dur <= high) {
+    return `<div class="tiny dim" style="margin-top:6px">Durasi clip ${edFmt(dur)} — pas untuk Shorts / Reels / TikTok (1–3 menit).</div>`;
+  }
+  const short = dur < low;
+  return `<div class="ed-warn" style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span>⚠ Durasi ${edFmt(dur)} ${short ? "kurang dari 1 menit" : "lebih dari 3 menit"} — Clipper memakai clip 1–3 menit.</span>
+      <button class="btn small" data-ed="fix-duration" data-target="${short ? low : high}">
+        ${short ? "Panjangkan ke 1 menit" : "Pendekkan ke 3 menit"}
+      </button>
+    </div>`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -282,6 +302,22 @@ function updatePlayhead() {
   if (timeLabel) timeLabel.textContent = `${edFmt(ED.time)} / ${edFmt(dur)}`;
 }
 
+/* timing kata yang rapat & berurutan — harus sama dengan _snap_word_times() di
+   app/editor.py supaya preview == hasil render (tidak ada frame kosong). */
+function edSnapWordTimes(words, start, end) {
+  const lo = Number(start) || 0;
+  const hi = Math.max(lo, Number(end) || lo);
+  const starts = words.map((w) => Math.min(Math.max(Number(w.start) || lo, lo), hi));
+  for (let i = 1; i < starts.length; i += 1) {
+    if (starts[i] < starts[i - 1]) starts[i] = starts[i - 1];
+  }
+  return words.map((w, i) => {
+    let wEnd = i + 1 < starts.length ? starts[i + 1] : hi;
+    if (wEnd <= starts[i]) wEnd = Math.min(hi, starts[i] + 0.12);
+    return { text: w.text, start: starts[i], end: Math.min(hi + 0.5, wEnd + 0.03) };
+  });
+}
+
 function renderOverlay() {
   if (!ED.spec) return;
   const t = ED.time;
@@ -297,9 +333,11 @@ function renderOverlay() {
     activeLine = (ED.spec.subtitles || []).find((line) => !line.hidden && t >= line.start && t <= line.end);
   }
   if (activeLine) {
-    const words = activeLine.words && activeLine.words.length
+    const rawWords = activeLine.words && activeLine.words.length
       ? activeLine.words
       : [{ text: activeLine.text, start: activeLine.start, end: activeLine.end }];
+    // samakan dengan hasil render: timing tiap kata disambung supaya tidak berkedip
+    const words = edSnapWordTimes(rawWords, activeLine.start, activeLine.end);
     capBox.innerHTML = words
       .map((w) => {
         const isActive = caps.word_level !== false && t >= w.start && t <= w.end;
@@ -957,6 +995,65 @@ async function editorAction(action, target) {
     else seg.end = Math.max(Number(srcTime.toFixed(2)), seg.start + 0.3);
     scheduleSave();
     renderTimeline();
+  } else if (action === "fix-duration") {
+    const wanted = Number(target.dataset.target) || 60;
+    const sourceDur = Number(ED.source && ED.source.duration) || 0;
+    let dur = specDuration(spec);
+    if (dur < wanted) {
+      // panjangkan dari segmen terakhir (atau tambah segmen baru kalau sudah mentok)
+      let guard = 0;
+      while (dur < wanted - 0.05 && guard < 40) {
+        guard += 1;
+        const seg = spec.segments[spec.segments.length - 1];
+        const speed = Math.max(0.5, Number(seg.speed) || 1);
+        const need = (wanted - dur) * speed;
+        const room = sourceDur ? sourceDur - Number(seg.end) : need;
+        if (room > 0.2) {
+          seg.end = Number((Number(seg.end) + Math.min(need, room)).toFixed(2));
+        } else if (sourceDur) {
+          // mulai segmen baru sesudah segmen terakhir (kalau masih ada sisa video)
+          const nextStart = Number(seg.end);
+          if (nextStart >= sourceDur - 0.2) break;
+          const nextEnd = Math.min(sourceDur, nextStart + need);
+          spec.segments.push({ start: Number(nextStart.toFixed(2)), end: Number(nextEnd.toFixed(2)), speed: 1 });
+        } else {
+          break;
+        }
+        dur = specDuration(spec);
+      }
+    } else {
+      // pendekkan: potong dari segmen terakhir, buang segmen yang habis
+      let guard = 0;
+      while (dur > wanted + 0.05 && guard < 60) {
+        guard += 1;
+        const seg = spec.segments[spec.segments.length - 1];
+        if (!seg) break;
+        const speed = Math.max(0.5, Number(seg.speed) || 1);
+        const over = (dur - wanted) * speed;
+        const length = Number(seg.end) - Number(seg.start);
+        if (length - over >= 0.5) {
+          seg.end = Number((Number(seg.end) - over).toFixed(2));
+        } else if (spec.segments.length > 1) {
+          spec.segments.pop();
+        } else {
+          seg.end = Number((Number(seg.start) + 0.5).toFixed(2));
+          break;
+        }
+        dur = specDuration(spec);
+      }
+    }
+    scheduleSave();
+    renderTimeline();
+    renderPanel();
+    refreshChrome();
+    const after = specDuration(spec);
+    if (wanted >= 60 && after < 59.5 && ED.source && ED.source.duration) {
+      toast(
+        `Video sumber cuma ${edFmt(ED.source.duration)} — tidak bisa mencapai 1 menit. ` +
+          "Pakai video yang lebih panjang atau turunkan kecepatan segmen.",
+        "bad"
+      );
+    }
   } else if (action === "seg-add") {
     const last = spec.segments[spec.segments.length - 1];
     const start = Math.min((ED.source.duration || 60) - 1, Number(last ? last.end : 0) + 0.5);

@@ -255,10 +255,17 @@ def start_render(clip_id: str) -> None:
     render_pool.submit(_run_render, clip_id)
 
 
-def render_job_all(job_id: str) -> None:
+def render_job_all(job_id: str, only_dirty: bool = False) -> int:
+    """Antre render semua clip project. `only_dirty` = hanya yang perlu render ulang."""
+    queued = 0
     for clip in db.list_clips(job_id):
-        if clip["status"] != "uploaded":
-            start_render(clip["id"])
+        if clip["status"] == "uploaded":
+            continue
+        if only_dirty and not (clip.get("meta") or {}).get("dirty"):
+            continue
+        start_render(clip["id"])
+        queued += 1
+    return queued
 
 
 def _run_render(clip_id: str) -> None:
