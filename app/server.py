@@ -96,6 +96,8 @@ def create_app() -> FastAPI:
             "ytdlp_age_days": ytdlp_age_days,
             "ytdlp_outdated": bool(ytdlp_age_days is not None and ytdlp_age_days > 45),
             "whisper": whisper_ok,
+            "whisper_model": transcribe.current_model(),
+            "whisper_model_ready": transcribe.model_downloaded(transcribe.current_model()),
             "youtube": youtube.is_connected(),
             "cookies": ingest.cookie_summary().get("configured", False),
             "tiktok": tiktok.ready(),
@@ -927,10 +929,42 @@ def create_app() -> FastAPI:
         return {"enabled": bool(settings.get("llm_enabled")),
                 "available": analyze.ollama_available(settings)}
 
+    @app.post("/api/clips/strip-hooks")
+    def strip_hooks(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        """Hapus teks judul/hook dari dalam video untuk clip yang sudah punya spec."""
+        job_id = payload.get("job_id") or None
+        clip_id = payload.get("clip_id") or None
+        clips = [db.get_clip(clip_id)] if clip_id else db.list_clips(job_id)
+        changed, texts_removed = 0, 0
+        for clip in clips:
+            if not clip or not clip.get("spec"):
+                continue
+            try:
+                spec = json.loads(clip["spec"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(spec, dict):
+                continue
+            new_spec, removed = editor.strip_hook_overlays(spec, clip.get("hook") or "")
+            if not removed:
+                continue
+            db.update_clip(
+                clip["id"],
+                spec=json.dumps(new_spec, ensure_ascii=False),
+                meta={**(clip.get("meta") or {}), "dirty": True},
+            )
+            changed += 1
+            texts_removed += removed
+        return {"ok": True, "clips": changed, "texts": texts_removed}
+
     @app.get("/api/analyze/models")
     def whisper_models() -> dict[str, Any]:
-        return {"available": transcribe.available(),
-                "models": ["tiny", "base", "small", "medium", "large-v3"]}
+        return transcribe.models_status()
+
+    @app.post("/api/analyze/models/download")
+    def whisper_download(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        model = str(payload.get("model") or transcribe.current_model())
+        return transcribe.start_download(model)
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception) -> JSONResponse:  # pragma: no cover

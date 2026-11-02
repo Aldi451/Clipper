@@ -4,7 +4,7 @@ Auto-clipper ala **OpusClip** yang jalan **sepenuhnya di komputer/server kamu se
 tanpa langganan, tanpa API berbayar, tanpa upload video ke pihak ketiga.
 
 Tempel link YouTube/TikTok/IG/X **atau** lampirkan file video → Clipper mentranskrip,
-mencari momen paling menarik, merender Shorts 9:16 dengan caption karaoke + hook,
+mencari momen paling menarik, merender Shorts 9:16 dengan caption karaoke,
 lalu **upload otomatis ke YouTube Shorts** channel kamu.
 
 <p align="center"><em>Python + FastAPI + ffmpeg + faster-whisper + yt-dlp · UI dark mode tanpa CDN (100% offline)</em></p>
@@ -25,7 +25,7 @@ lalu **upload otomatis ke YouTube Shorts** channel kamu.
 | 🎨 **Template** | 6 template siap pakai (Podcast Blur, MrBeast, Neon TikTok, Gradient Studio, Clean Vlog, Cinema) + 6 gaya caption, sekali klik langsung berubah. |
 | ✨ **Auto subtitle** | Generate caption word-by-word dari transkrip (tanpa Whisper ulang), geser timing ±0.2s, edit/sembunyikan per baris, export `.srt`. |
 | 🚀 **Export sampai 4K** | 1080p / 1440p / **2160×3840 (4K)** dengan upscale lanczos + unsharp, CRF & FPS bisa diatur. **Tanpa watermark, tanpa batas** — watermark hanya kalau kamu unggah logo sendiri. |
-| 💬 **Caption karaoke** | Word-by-word highlight (3 kata/baris, bisa diatur), warna & font custom, plus overlay judul/hook di atas video. |
+| 💬 **Caption karaoke** | Word-by-word highlight (3 kata/baris, bisa diatur), warna & font custom, **tanpa kedip**: timing kata disambung (tanpa celah), fade hanya sekali di awal baris. |
 | 🔊 **Normalisasi audio** | Loudnorm -14 LUFS, standar YouTube. |
 | ✂️ **Editor per clip** | Ubah judul/hook/deskripsi/hashtag, geser start, ubah durasi, atur fokus crop, matikan caption, preview langsung, render ulang. |
 | ♪ **Upload TikTok** | Upload clip ke TikTok langsung dari Clipper — memakai browser di komputer sendiri (gratis, tanpa API key, tanpa daftar aplikasi). Caption + hashtag terisi otomatis, tombol Post ditekan otomatis (bisa dimatikan). |
@@ -542,6 +542,32 @@ cari momen → render → upload). Bisa juga centang beberapa video lalu **Buat 
 > dan berisiko klaim/strike di channel kamu. Pakai clip sebagai bahan komentar, reaksi,
 > atau potongan transformatif, dan sebutkan sumbernya di deskripsi.
 
+## Durasi clip, caption, dan Whisper
+
+**Durasi clip = 1–3 menit.** Default `min_clip_seconds = 60`, `max_clip_seconds = 180`.
+Nilai di luar 60–180 dirapikan otomatis (juga kalau `settings.json` diedit manual), dan analisis
+tanpa transkrip memakai panjang di antara min–max (bukan 45 detik seperti versi lama).
+
+**Judul tidak ditulis di dalam video.** `hook_overlay` default **mati**. Judul/hook tetap dipakai
+untuk judul unggahan + caption. Clip lama yang masih punya teks judul menempel di gambar bisa
+dibersihkan sekali: **Pengaturan → Hapus teks judul dari semua clip lama**
+(atau `POST /api/clips/strip-hooks`). Setelah dibersihkan, clip perlu di-render ulang.
+
+**Caption tidak berkedip & sinkron.** Setiap kata kini punya event ASS sendiri dengan timing yang
+disambung (akhir kata = awal kata berikutnya, overlap 30 ms) dan `ade` hanya muncul di awal baris.
+Sebelumnya tiap kata membawa `` yang menghapus `\pos` sehingga teks melompat dan berkedip.
+
+**Whisper: library vs model.** Sidebar membedakan dua hal:
+- `Whisper ✓` = library `faster-whisper` terpasang (ikut saat instalasi Clipper),
+- tanpa tanda = library ada tapi **model** belum diunduh → transkripsi akan memakai subtitle video
+  bila ada, atau mode potong otomatis.
+
+Unduh model kapan saja di **Pengaturan → Analisis & transkripsi**: pilih `tiny` (75 MB) sampai
+`large-v3` (3,1 GB) lewat tombol **Unduh**, lengkap dengan progres. Setelah terunduh, transkripsi
+100% offline dari folder `models/`.
+
+---
+
 ## Upload ke TikTok (gratis, tanpa API)
 
 TikTok tidak memberi API upload gratis untuk perorangan (butuh aplikasi developer + review).
@@ -641,11 +667,11 @@ Clipper/
 | `whisper_model` | `tiny` (cepat) → `large-v3` (akurat). Default `small`. |
 | `language` | `auto` / `id` / `en` / dll. |
 | `prefer_whisper` | `true` = selalu transkripsi sendiri walau ada subtitle. |
-| `target_clips`, `min_clip_seconds`, `max_clip_seconds` | Berapa & sepanjang apa clip. |
+| `target_clips`, `min_clip_seconds`, `max_clip_seconds` | Berapa & sepanjang apa clip. Durasi dikunci di **60–180 detik** (1–3 menit); nilai di luar itu otomatis dirapikan. |
 | `layout` | `fit` (blur bg) atau `crop` (penuh 9:16). |
 | `crop_focus` | 0 = kiri … 1 = kanan (mode crop). |
 | `captions`, `caption_words`, `caption_color`, `caption_highlight`, `caption_font`, `caption_uppercase` | Gaya caption. |
-| `hook_overlay` | Tampilkan judul hook 5 detik pertama. |
+| `hook_overlay` | **Default mati.** Judul/hook dipakai sebagai judul unggahan & caption, *tidak* ditulis di dalam video. Nyalakan hanya kalau memang ingin teks besar di 5 detik pertama. |
 | `fps`, `crf`, `normalize_audio` | Kualitas render. |
 | `export_height`, `export_sharpen`, `default_template` | Default export editor: 1080p/2K/4K, pertajam saat upscale, template awal. |
 | `yt_privacy`, `yt_category`, `yt_hashtags`, `yt_notify_subscribers` | Default upload. |

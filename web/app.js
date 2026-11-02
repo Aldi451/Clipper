@@ -177,8 +177,16 @@ function applyHealth() {
   }
   if (wh) {
     const dot = $(".dot", wh);
-    dot.className = "dot " + (h.whisper ? "on" : "warn");
-    wh.title = h.whisper ? "faster-whisper terpasang" : "faster-whisper belum terpasang (mode potong otomatis)";
+    const lib = !!h.whisper;
+    const modelReady = !!h.whisper_model_ready;
+    dot.className = "dot " + (modelReady ? "on" : lib ? "warn" : "off");
+    wh.title = !lib
+      ? "Library faster-whisper belum terpasang (clip dipotong otomatis)"
+      : modelReady
+        ? `Whisper siap: library + model ${h.whisper_model} terunduh`
+        : `Library terpasang, model ${h.whisper_model} belum diunduh — unduh di Pengaturan`;
+    const state = $("#chip-whisper-state");
+    if (state) state.textContent = !lib ? "(tanpa library)" : modelReady ? "" : "(model belum)";
   }
   if (yt) {
     const dot = $(".dot", yt);
@@ -1648,6 +1656,42 @@ async function renderYouTube() {
   if (!yt.connected && yt.state === "waiting") pollDeviceStatus();
 }
 
+function whisperModelsHtml(m) {
+  if (!m) return `<div class="tiny dim">Status model Whisper tidak tersedia.</div>`;
+  const d = m.download || {};
+  const badge = !m.available
+    ? `<span class="tag err">library belum terpasang</span>`
+    : m.current_ready
+      ? `<span class="tag done">library ✓ · model ${esc(m.current)} siap offline</span>`
+      : `<span class="tag run">library ✓ · model ${esc(m.current)} belum diunduh</span>`;
+  const chips = (m.models || [])
+    .map(
+      (x) =>
+        `<span class="tag ${x.downloaded ? "done" : ""}" title="${x.size_mb} MB">${esc(x.name)}${x.downloaded ? " ✓" : ""}</span>`
+    )
+    .join(" ");
+  const buttons = (m.models || [])
+    .filter((x) => !x.downloaded)
+    .map(
+      (x) =>
+        `<button class="btn small ghost" data-action="whisper-download" data-model="${esc(x.name)}">Unduh ${esc(x.name)} · ${x.size_mb} MB</button>`
+    )
+    .join(" ");
+  return `
+    <div style="margin-top:10px">${badge}</div>
+    <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:10px">${chips}</div>
+    <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:10px">
+      ${buttons}
+      <button class="btn small ghost" data-action="whisper-refresh">Cek ulang</button>
+    </div>
+    ${d.running ? `<div class="bar thin" style="margin-top:10px"><i style="width:100%"></i></div>
+      <div class="tiny dim" style="margin-top:6px">${esc(d.message || "Mengunduh…")} — butuh internet sekali, setelah itu offline.</div>` : ""}
+    ${!d.running && d.error ? `<div class="tiny" style="color:#fca5a5;margin-top:6px">${esc(d.error)}</div>` : ""}
+    ${!d.running && d.done ? `<div class="tiny" style="color:#6ee7b7;margin-top:6px">${esc(d.message || "Model siap")}</div>` : ""}
+    <div class="tiny dim" style="margin-top:8px">Folder model: <span class="mono">${esc(m.models_dir || "models/")}</span></div>
+  `;
+}
+
 function bindSettingInputs() {
   $$("[data-setting]").forEach((el) => {
     el.addEventListener("change", async () => {
@@ -1779,12 +1823,13 @@ function cookiesCard(cookies, settings) {
 
 async function renderSettings() {
   const view = $("#view");
-  const [settings, health, viralConfig, editorMeta, cookies] = await Promise.all([
+  const [settings, health, viralConfig, editorMeta, cookies, models] = await Promise.all([
     api("/api/settings"),
     api("/api/health"),
     api("/api/discover/config").catch(() => null),
     api("/api/editor/meta").catch(() => null),
     api("/api/settings/cookies").catch(() => null),
+    api("/api/analyze/models").catch(() => null),
   ]);
   state.settings = settings;
   state.cookies = cookies;
@@ -1911,11 +1956,11 @@ async function renderSettings() {
         </div>
         <div class="field">
           <label>Durasi minimum (detik)</label>
-          <input class="input" type="number" min="5" max="180" data-setting="min_clip_seconds" value="${s.min_clip_seconds}" />
+          <input class="input" type="number" min="60" max="180" step="5" data-setting="min_clip_seconds" value="${s.min_clip_seconds}" />
         </div>
         <div class="field">
           <label>Durasi maksimum (detik)</label>
-          <input class="input" type="number" min="10" max="180" data-setting="max_clip_seconds" value="${s.max_clip_seconds}" />
+          <input class="input" type="number" min="60" max="180" step="5" data-setting="max_clip_seconds" value="${s.max_clip_seconds}" />
         </div>
       </div>
       <label class="switch" style="margin-top:14px">
@@ -1925,9 +1970,11 @@ async function renderSettings() {
       </label>
       <p class="hint" style="margin-top:12px">
         Kalau video punya subtitle, Clipper langsung memakainya (cepat, tanpa unduh model).
-        Model <b>${esc(s.whisper_model)}</b> diunduh sekali saat pertama dibutuhkan (butuh internet sekali),
-        setelah itu transkripsi jalan 100% offline di <span class="mono">models/</span>.
+        <b>Library</b> Whisper sudah ikut terpasang bersama Clipper; <b>model</b> bahasa diunduh
+        terpisah (sekali, butuh internet) lalu transkripsi jalan 100% offline dari
+        <span class="mono">models/</span>.
       </p>
+      <div id="whisper-models" style="margin-top:6px">${whisperModelsHtml(models)}</div>
     </div>
 
     <div class="card">
@@ -1980,13 +2027,20 @@ async function renderSettings() {
         </label>
         <label class="switch">
           <input type="checkbox" data-setting="hook_overlay" ${s.hook_overlay ? "checked" : ""} />
-          <span class="track"></span><span>Judul hook di atas video</span>
+          <span class="track"></span><span>Judul hook di dalam video (default mati)</span>
         </label>
         <label class="switch">
           <input type="checkbox" data-setting="normalize_audio" ${s.normalize_audio ? "checked" : ""} />
           <span class="track"></span><span>Normalisasi audio</span>
         </label>
       </div>
+      <p class="hint" style="margin-top:12px">
+        Judul/hook hanya dipakai sebagai caption & judul unggahan (di luar video). Kalau clip lama
+        masih punya teks judul menempel di gambar, hapus sekali di sini:
+      </p>
+      <button class="btn small ghost" data-action="strip-hooks" style="margin-top:8px">
+        Hapus teks judul dari semua clip lama
+      </button>
       <div class="grid-3" style="margin-top:14px">
         <div class="field">
           <label>Resolusi export default</label>
@@ -2181,6 +2235,19 @@ async function renderSettings() {
   `;
 
   bindSettingInputs();
+  if (models && models.download && models.download.running) {
+    startPolling(async () => {
+      try {
+        const fresh = await api("/api/analyze/models");
+        const box = $("#whisper-models");
+        if (box) box.innerHTML = whisperModelsHtml(fresh);
+        if (!fresh.download.running) {
+          stopPolling();
+          loadHealth();
+        }
+      } catch (err) {}
+    }, 2000);
+  }
 }
 
 async function handleViralAction(e, action, id, target) {
@@ -2312,6 +2379,20 @@ document.addEventListener("click", async (e) => {
       await api("/api/jobs/" + state.job.id + "/render", { method: "POST" });
       toast("Semua clip masuk antrean render", "ok");
       renderProject(state.job.id);
+    } else if (action === "whisper-download") {
+      const model = target.dataset.model || "";
+      await api("/api/analyze/models/download", { method: "POST", body: { model } });
+      toast(`Mengunduh model ${model}…`, "ok");
+      await renderSettings();
+    } else if (action === "whisper-refresh") {
+      await renderSettings();
+    } else if (action === "strip-hooks") {
+      if (!confirm("Hapus teks judul/hook dari dalam video untuk semua clip lama?")) return;
+      const res = await api("/api/clips/strip-hooks", { method: "POST", body: {} });
+      toast(
+        res.clips ? `${res.clips} clip dibersihkan (${res.texts} teks dibuang)` : "Tidak ada teks judul di dalam video",
+        "ok"
+      );
     } else if (action === "tt-setup") {
       target.disabled = true;
       target.innerHTML = `<span class="spinner"></span> Memasang…`;
