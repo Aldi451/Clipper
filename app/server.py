@@ -194,6 +194,9 @@ def create_app() -> FastAPI:
         if not job:
             raise HTTPException(404, "Project tidak ditemukan")
         job["clips"] = db.list_clips(job_id)
+        for clip in job["clips"]:
+            # tanpa ini tombol Render/Upload/TikTok di halaman Project ikut mati
+            clip["has_file"] = bool(clip.get("file")) and paths.media_exists(clip["file"])
         job["settings_snapshot"] = {
             k: load_settings().get(k) for k in ("min_clip_seconds", "max_clip_seconds", "target_clips")
         }
@@ -547,7 +550,7 @@ def create_app() -> FastAPI:
         transcript = transcribe.load_transcript(job["id"])
         spec = editor.load_or_create_spec(clip, transcript, float(info.duration or 0), settings)
         return {
-            "clip": {**clip, "has_file": bool(clip.get("file")) and Path(clip["file"]).exists()},
+            "clip": {**clip, "has_file": bool(clip.get("file")) and paths.media_exists(clip["file"])},
             "job": {"id": job["id"], "title": job.get("title"), "duration": job.get("duration")},
             "source": {
                 "duration": info.duration, "width": info.width, "height": info.height,
@@ -773,6 +776,29 @@ def create_app() -> FastAPI:
         info = tiktok.status()
         info["enabled"] = bool(load_settings().get("tt_enabled"))
         return info
+
+    @app.get("/api/tiktok/clips")
+    def tt_clips() -> dict[str, Any]:
+        """Clip yang sudah dirender dan siap dikirim ke TikTok."""
+        rows: list[dict[str, Any]] = []
+        for clip in db.list_clips():
+            if not clip.get("file") or not paths.media_exists(clip["file"]):
+                continue
+            job = db.get_job(clip["job_id"]) or {}
+            rows.append({
+                "id": clip["id"],
+                "job_id": clip["job_id"],
+                "title": clip.get("title") or "Clip",
+                "project": job.get("title") or job.get("source") or "",
+                "duration": clip.get("duration") or 0,
+                "status": clip.get("status") or "",
+                "tk_url": clip.get("tk_url") or "",
+                "yt_url": clip.get("yt_url") or "",
+                "thumb": bool(clip.get("thumb")),
+                "updated_at": clip.get("updated_at") or 0,
+            })
+        rows.sort(key=lambda r: r["updated_at"], reverse=True)
+        return {"ok": True, "clips": rows[:60], "total": len(rows)}
 
     @app.post("/api/tiktok/setup")
     def tt_setup(payload: dict[str, Any] = Body(default={})) -> Any:
