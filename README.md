@@ -305,6 +305,17 @@ Kalau masih mengalaminya: klik **“Sudah disetujui di browser? Cek sekarang”*
 `POST /api/youtube/login/device/check`) untuk memeriksa sekali lagi tanpa mengulang dari awal,
 atau ulangi **Login dengan kode**.
 
+**Notifikasi “YouTube terhubung 🎉” muncul berulang di pojok kanan bawah**
+
+Bug yang diperbaiki di v1.0.11. `renderYouTube()` memanggil `pollDeviceStatus()` saat status
+sudah **connected**, lalu `pollDeviceStatus()` memanggil `renderYouTube()` lagi → loop tanpa
+henti, satu toast per putaran. Sekarang:
+
+- polling hanya jalan saat status **waiting** (tidak ada yang perlu ditanya kalau sudah terhubung),
+- toast “terhubung” hanya muncul **sekali** per sesi login,
+- hanya **satu** loop polling bisa aktif (panggilan baru membatalkan loop lama),
+- toast kembar (pesan sama dalam 1,2 detik) dibuang, dan maksimal **3** notifikasi tampil bersamaan.
+
 **Catatan penting:**
 
 | Hal | Penjelasan |

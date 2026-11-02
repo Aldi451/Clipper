@@ -81,8 +81,18 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+let _lastToast = { msg: "", kind: "", at: 0 };
+
 function toast(message, kind = "") {
   const root = $("#toasts");
+  if (!root) return;
+  // buang toast kembar (mis. beberapa polling melaporkan hal yang sama) supaya
+  // notifikasi tidak membanjiri pojok kanan bawah
+  const now = Date.now();
+  if (_lastToast.msg === message && _lastToast.kind === kind && now - _lastToast.at < 1200) return;
+  _lastToast = { msg: message, kind, at: now };
+  // maksimal 3 notifikasi tampil bersamaan
+  while (root.children.length >= 3) root.firstElementChild.remove();
   const el = document.createElement("div");
   el.className = "toast " + kind;
   el.textContent = message;
@@ -1409,7 +1419,9 @@ async function renderYouTube() {
   `;
 
   bindSettingInputs();
-  if (yt.connected || (yt.state && yt.state !== "idle" && yt.state !== "connected")) pollDeviceStatus();
+  // Polling hanya perlu saat menunggu persetujuan. Kalau sudah terhubung atau
+  // idle, tidak ada yang perlu ditanya — dulu ini memicu loop toast tanpa henti.
+  if (!yt.connected && yt.state === "waiting") pollDeviceStatus();
 }
 
 function bindSettingInputs() {
@@ -1439,10 +1451,26 @@ function ytErrorBox(status) {
     </div>`;
 }
 
+let _ytPollSeq = 0;
+let _ytConnectedNotified = false;
+
+const ytSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function pollDeviceStatus() {
-  const box = $("#yt-device-box");
-  try {
-    const status = await api("/api/youtube/status");
+  // Setiap panggilan membatalkan loop sebelumnya → dijamin hanya satu loop aktif.
+  const myToken = ++_ytPollSeq;
+  while (myToken === _ytPollSeq) {
+    const box = $("#yt-device-box");
+    if (!box) return; // pengguna sudah pindah halaman
+    let status;
+    try {
+      status = await api("/api/youtube/status");
+    } catch (err) {
+      /* jaringan putus sesaat: coba lagi */
+      await ytSleep(4000);
+      continue;
+    }
+    if (myToken !== _ytPollSeq) return;
     state.yt = status;
     if (status.state === "waiting") {
       if (box) {
@@ -1456,16 +1484,22 @@ async function pollDeviceStatus() {
             <button class="btn small ghost" data-action="yt-device-check">Cek status login sekarang</button>
           </div>`;
       }
-      setTimeout(pollDeviceStatus, 4000);
+      await ytSleep(4000);
     } else if (status.state === "connected" || status.connected) {
-      toast("YouTube terhubung 🎉", "ok");
+      // notifikasi cukup SEKALI per sesi login
+      if (!_ytConnectedNotified) {
+        _ytConnectedNotified = true;
+        toast("YouTube terhubung 🎉", "ok");
+      }
       await renderYouTube();
       loadHealth();
+      return;
     } else if (status.state === "error" || status.state === "expired") {
       if (box) box.innerHTML = ytErrorBox(status);
+      return;
+    } else {
+      return; // idle: tidak ada yang perlu dipantau
     }
-  } catch (err) {
-    /* diamkan, coba lagi nanti */
   }
 }
 
@@ -2057,6 +2091,7 @@ document.addEventListener("click", async (e) => {
       }
       state.yt = status;
       if (status.connected) {
+        _ytConnectedNotified = true;
         toast("Sudah terhubung", "ok");
         await renderYouTube();
       } else {
@@ -2076,6 +2111,8 @@ document.addEventListener("click", async (e) => {
       const status = await api("/api/youtube/login/device/check", { method: "POST" });
       state.yt = status;
       if (status.connected || status.state === "connected") {
+        _ytConnectedNotified = true; // jangan sampai polling memberi toast yang sama
+        _ytPollSeq++;                // hentikan loop polling yang masih jalan
         toast("YouTube terhubung 🎉", "ok");
         await renderYouTube();
         loadHealth();
@@ -2093,6 +2130,8 @@ document.addEventListener("click", async (e) => {
     } else if (action === "yt-disconnect") {
       if (!confirm("Putuskan akun YouTube?")) return;
       await api("/api/youtube/disconnect", { method: "POST" });
+      _ytConnectedNotified = false; // login berikutnya boleh memberi notifikasi lagi
+      _ytPollSeq++;                 // hentikan loop polling yang mungkin masih jalan
       toast("Akun diputuskan", "ok");
       await renderYouTube();
       loadHealth();
