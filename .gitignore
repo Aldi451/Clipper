@@ -8,3 +8,8 @@ __pycache__/
 .DS_Store
 *.log
 .env
+
+# hasil build .exe (PyInstaller)
+build/
+dist/
+*.spec

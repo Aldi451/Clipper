@@ -340,6 +340,55 @@ Kalau tidak mau ada jendela cmd yang harus dibiarkan terbuka, jalankan Clipper s
 **Windows service**: hidup di latar belakang, start otomatis saat Windows menyala, dan muncul
 di `services.msc` sebagai **Clipper**.
 
+### Versi .exe — install & atur sendiri (manual / auto / disable)
+
+Kalau lebih suka klik-klik daripada menu cmd, buat **`ClipperService.exe`** sekali lalu pakai
+selamanya:
+
+```bat
+build_service_exe.bat
+```
+
+Hasilnya `ClipperService.exe` di folder Clipper. **Double-click file itu** → muncul jendela kecil
+berisi:
+
+| Kontrol | Fungsi |
+|---|---|
+| Status | terpasang / berjalan + tipe startup sekarang |
+| **Tipe startup** | **Automatic** (nyala saat Windows boot) · **Manual** (start sendiri) · **Disabled** (dimatikan total) |
+| **Pasang / Update service** | daftarkan service memakai tipe startup yang dipilih |
+| **Start / Stop** | nyalakan atau hentikan sekarang |
+| **Terapkan tipe startup** | ubah auto ⇄ manual ⇄ disabled tanpa pasang ulang |
+| **Hapus service** | bersihkan dari `services.msc` |
+| **Buka Clipper** · **Lihat log** | buka aplikasi di browser · cek log service |
+| Pilih folder… | kalau .exe ditaruh di luar folder Clipper |
+
+Aksi yang butuh izin akan menawarkan **Run as administrator** otomatis (UAC sekali klik).
+
+Bisa juga lewat terminal tanpa GUI:
+
+```bat
+ClipperService.exe --status
+ClipperService.exe --install --start-type manual --port 8420
+ClipperService.exe --start-type auto
+ClipperService.exe --start
+ClipperService.exe --stop
+ClipperService.exe --remove
+ClipperService.exe --log
+```
+
+**Penting — .exe ini hanya *manajer*.** Service-nya tetap dijalankan oleh
+`.venv\Scripts\python.exe run.py --run-service`, jadi:
+
+- `git pull` **langsung berlaku** tanpa perlu build ulang .exe,
+- ukuran .exe kecil (± 10 MB) dan tidak menyimpan kode aplikasi,
+- yang perlu ada di folder Clipper: `.venv` (dari `run.bat`) + `run.py`.
+
+Kalau `pywin32`/PyInstaller belum ada, `build_service_exe.bat` memasangnya otomatis (butuh
+internet sekali).
+
+Jalankan juga langsung tanpa build: `python service_manager.py` (GUI yang sama).
+
 **Cara tercepat:**
 
 1. Double-click **`service.bat`** (minta izin Administrator sekali).

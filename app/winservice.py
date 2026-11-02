@@ -373,6 +373,28 @@ def stop_service() -> dict[str, Any]:
     return {"stopped": True}
 
 
+START_TYPES = {"auto": "auto", "manual": "demand", "disabled": "disabled"}
+
+
+def set_start_type(kind: str) -> dict[str, Any]:
+    """Ubah tipe startup service: auto | manual | disabled."""
+    key = (kind or "").lower()
+    _require(key in START_TYPES, "Tipe startup harus: auto, manual, atau disabled.")
+    _require(is_windows(), "Fitur service hanya tersedia di Windows.")
+    if not is_installed():
+        raise ServiceError("Service belum terpasang. Jalankan: python run.py --install-service")
+    proc = subprocess.run(
+        ["sc.exe", "config", SERVICE_NAME, "start=", START_TYPES[key]],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise ServiceError(
+            "Gagal mengubah tipe startup (butuh Administrator).\n"
+            f"Detail: {(proc.stderr or proc.stdout).strip()[:300]}"
+        )
+    return {"start_type": key}
+
+
 def run_service() -> None:
     """Dipanggil SCM: sambungkan proses ini ke Service Control Manager."""
     _require_pywin32()

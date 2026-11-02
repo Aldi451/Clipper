@@ -71,9 +71,10 @@ echo   6.  Buka Clipper di browser
 echo   7.  Lihat log service
 echo   8.  Buat shortcut Clipper di Desktop
 echo   9.  Alternatif tanpa service: autostart Task Scheduler
+echo   10. Buat ClipperService.exe ^(manajer service versi .exe^)
 echo   0.  Keluar
 echo.
-set /p "CHOICE=  Pilih menu (0-9): "
+set /p "CHOICE=  Pilih menu (0-10): "
 if "%CHOICE%"=="1" set "ACTION=install"
 if "%CHOICE%"=="2" set "ACTION=start"
 if "%CHOICE%"=="3" set "ACTION=stop"
@@ -83,6 +84,7 @@ if "%CHOICE%"=="6" set "ACTION=open"
 if "%CHOICE%"=="7" set "ACTION=log"
 if "%CHOICE%"=="8" set "ACTION=shortcut"
 if "%CHOICE%"=="9" set "ACTION=autostart"
+if "%CHOICE%"=="10" set "ACTION=build"
 if "%CHOICE%"=="0" exit /b 0
 if not defined ACTION goto menu
 
@@ -96,6 +98,7 @@ if /i "%ACTION%"=="open"       goto do_open
 if /i "%ACTION%"=="log"        goto do_log
 if /i "%ACTION%"=="shortcut"   goto do_shortcut
 if /i "%ACTION%"=="autostart"  goto do_autostart
+if /i "%ACTION%"=="build"      goto do_build
 echo   [!] Menu tidak dikenal: %ACTION%
 goto end
 
@@ -144,6 +147,11 @@ goto end
 
 :do_autostart
 "%VENV_PY%" run.py --autostart --no-pause
+goto end
+
+:do_build
+REM build .exe butuh internet sekali (PyInstaller) dan beberapa menit
+start "" cmd /c "%~dp0build_service_exe.bat"
 goto end
 
 :end

@@ -262,7 +262,7 @@ def handle_service_command(args) -> int | None:
     wants = any([
         args.install_service, args.remove_service, args.start_service, args.stop_service,
         args.service_status, args.service_log, args.run_service, args.autostart, args.no_autostart,
-        args.shortcut,
+        args.shortcut, args.service_start_type,
     ])
     if not wants:
         return None
@@ -276,11 +276,22 @@ def handle_service_command(args) -> int | None:
 
         if args.install_service:
             head("Memasang service Clipper")
+            start_kind = args.service_start_type or ("manual" if args.no_autostart else "auto")
             result = ws.install_service(host=args.service_host, port=args.service_port,
-                                        autostart=not args.no_autostart)
+                                        autostart=start_kind != "manual")
+            if start_kind != "auto":
+                ws.set_start_type(start_kind)
+            ok(f"Tipe startup: {start_kind}")
             ok(f"Service '{ws.SERVICE_NAME}' terpasang"
                + (" (mengganti versi lama)" if result.get("replaced") else ""))
-            info(f"Mulai otomatis saat Windows menyala · alamat: {ws.service_url()}")
+            hint = {
+                "auto": "Mulai otomatis saat Windows menyala",
+                "manual": "Tipe Manual: nyalakan sendiri lewat 'Start' (services.msc atau --start-service)",
+                "disabled": "Tipe Disabled: tidak akan menyala sampai tipenya diubah",
+            }.get(start_kind, "")
+            info(f"{hint} · alamat: {ws.service_url()}")
+            if start_kind == "disabled":
+                info("Ubah tipenya dengan: python run.py --service-start-type auto")
             info("Buka dengan: services.msc → cari 'Clipper'")
             if ws.service_state() != "running":
                 info("Mulai sekarang? Jalankan:  python run.py --start-service")
@@ -308,6 +319,11 @@ def handle_service_command(args) -> int | None:
                 info(result.get("reason") or "Service tidak berjalan.")
             return 0
 
+        if args.service_start_type and not args.install_service:
+            result = ws.set_start_type(args.service_start_type)
+            ok(f"Tipe startup diubah ke: {result['start_type']}")
+            return 0
+
         if args.service_status:
             head("Status Clipper")
             state = ws.service_state()
@@ -318,6 +334,12 @@ def handle_service_command(args) -> int | None:
                 say(f"  Alamat  : {ws.service_url()}")
                 say(f"  Log     : {ws.LOG_FILE}")
             say(f"  pywin32 : {'terpasang' if ws.HAS_PYWIN32 else 'belum terpasang'}")
+            if state != "not-installed":
+                proc = __import__("subprocess").run(
+                    ["sc.exe", "qc", ws.SERVICE_NAME], capture_output=True, text=True)
+                for line in (proc.stdout or "").splitlines():
+                    if "START_TYPE" in line.upper():
+                        say(f"  Startup : {line.split(':', 1)[-1].strip()}")
             return 0
 
         if args.service_log:
@@ -382,6 +404,8 @@ def main() -> int:
     svc.add_argument("--service-log", action="store_true", help="Tampilkan log service")
     svc.add_argument("--service-host", default=None, help="Host untuk service (default 127.0.0.1)")
     svc.add_argument("--service-port", type=int, default=None, help="Port untuk service (default 8420)")
+    svc.add_argument("--service-start-type", choices=["auto", "manual", "disabled"], default=None,
+                     help="Tipe startup service: auto (boot) | manual | disabled")
     svc.add_argument("--autostart", action="store_true",
                      help="Alternatif tanpa pywin32: autostart lewat Task Scheduler")
     svc.add_argument("--no-autostart", action="store_true", help="Hapus autostart Task Scheduler")
