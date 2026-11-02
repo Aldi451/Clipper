@@ -205,6 +205,23 @@ def doctor(host: str, port: int) -> int:
     problems += 0 if check_ytdlp_ffmpeg() else 1
     say("")
     problems += 0 if check_files() else 1
+    # venv yang ikut dipindah: python.exe ada tapi dibuat di folder lain
+    try:
+        from app import repair as repairer
+
+        if repairer.venv_moved(ROOT):
+            bad("venv dibuat di folder lain (folder Clipper pernah dipindah)")
+            info(f"  asal: {repairer.venv_origin(ROOT)[:110]}")
+            info("Perbaiki: jalankan repair.bat  (atau python run.py --repair)")
+            problems += 1
+        else:
+            healthy, reason = repairer.venv_healthy(None)
+            if not healthy:
+                bad(f"venv bermasalah: {reason}")
+                info("Perbaiki: jalankan repair.bat  (atau python run.py --repair)")
+                problems += 1
+    except Exception:  # noqa: BLE001 - doctor tidak boleh ikut crash
+        pass
     say("")
     if port_free(host, port):
         ok(f"port {port} bebas")
@@ -246,6 +263,55 @@ def open_browser_later(url: str, delay: float = 1.5) -> None:
             pass
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+# --------------------------------------------------------------------------- #
+# perbaikan setelah folder dipindah
+# --------------------------------------------------------------------------- #
+def handle_repair() -> int:
+    from app import repair as repairer
+
+    head("Clipper — perbaikan otomatis")
+    detected = repairer.detect(ROOT)
+    say(f"  Folder  : {detected['project']}")
+
+    if detected["missing_files"]:
+        bad("file penting hilang: " + ", ".join(detected["missing_files"]))
+        info("Folder belum tersalin lengkap atau diblokir antivirus.")
+        info("Salin ulang folder Clipper, atau: git clone <repo> Clipper")
+        return 2
+    ok("file project lengkap")
+
+    if detected["venv_moved"]:
+        bad("venv dibuat di folder lain (folder Clipper sudah dipindah)")
+        info(f"  asal: {detected['venv_origin'][:120]}")
+    if not detected["venv_healthy"]:
+        bad(f"venv bermasalah: {detected['venv_reason']}")
+    else:
+        ok("venv sehat")
+
+    if detected["service"].get("exists"):
+        if detected["service_stale"]:
+            bad("service masih menunjuk path lama")
+        else:
+            ok(f"service sudah benar (start={detected['service'].get('start_type')})")
+    if detected["task_exists"] and detected["task_stale"]:
+        bad("autostart Task Scheduler masih menunjuk path lama")
+
+    say("")
+    head("Memperbaiki")
+    report = repairer.repair(ROOT)
+    repairer.save_last_report(report, ROOT)
+    say("")
+    if report["ok"]:
+        head("Selesai")
+        say("  Jalankan: run.bat    (atau ClipperService.exe → Start)")
+        say("  Buka    : http://localhost:8420")
+        return 0
+    head("Sebagian belum beres")
+    info("Kalau soal service Windows, jalankan sebagai Administrator:")
+    info("  repair.bat  (klik kanan → Run as administrator)")
+    return 1
 
 
 # --------------------------------------------------------------------------- #
@@ -391,6 +457,8 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true", help="Jangan buka browser otomatis")
     parser.add_argument("--no-pause", action="store_true", help="Jangan tunggu Enter saat error (untuk skrip)")
     parser.add_argument("--doctor", action="store_true", help="Cek lingkungan lalu keluar")
+    parser.add_argument("--repair", action="store_true",
+                        help="Perbaiki venv/service setelah folder Clipper dipindah")
     parser.add_argument("--reload", action="store_true", help="Mode development (auto reload)")
 
     # --- Windows service: jalan tanpa jendela cmd ---
@@ -412,6 +480,9 @@ def main() -> int:
     svc.add_argument("--shortcut", action="store_true", help="Buat shortcut Clipper di Desktop")
     svc.add_argument("--run-service", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.repair:
+        return handle_repair()
 
     service_code = handle_service_command(args)
     if service_code is not None:

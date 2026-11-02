@@ -33,7 +33,15 @@ if not defined PY (
 )
 echo   [OK] Python ditemukan: %PY%
 
-REM --- virtualenv ---
+REM --- virtualenv (rusak? biasanya karena folder dipindah C: ke D:) ---
+if exist ".venv\Scripts\python.exe" (
+  ".venv\Scripts\python.exe" -c "import sys" >nul 2>nul
+  if errorlevel 1 (
+    echo   [!]  .venv rusak ^(folder Clipper tampaknya pernah dipindah^)
+    echo   [..] Menghapus dan membuat ulang .venv
+    rmdir /s /q ".venv"
+  )
+)
 if not exist ".venv\Scripts\python.exe" (
   echo   [..] Membuat virtualenv .venv ^(sekali saja^)
   %PY% -m venv .venv
@@ -58,6 +66,17 @@ if errorlevel 1 (
   )
 ) else (
   echo   [OK] Dependensi sudah terpasang
+)
+
+REM --- kalau venv tetap bermasalah, arahkan ke repair.bat ---
+python -c "import fastapi, uvicorn" >nul 2>nul
+if errorlevel 1 (
+  echo.
+  echo   [!] Lingkungan Python Clipper masih bermasalah.
+  echo       Jalankan: repair.bat   ^(memperbaiki venv + service + autostart^)
+  echo.
+  pause
+  exit /b 1
 )
 
 echo.
