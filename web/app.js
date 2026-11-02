@@ -1271,14 +1271,21 @@ async function saveEditor(renderAfter) {
 /* ------------------------------------------------------------------ */
 async function renderTikTok(quiet = false) {
   const view = $("#view");
-  const [tt, settings] = await Promise.all([api("/api/tiktok/status"), api("/api/settings")]);
+  const [tt, settings, ready] = await Promise.all([
+    api("/api/tiktok/status"),
+    api("/api/settings"),
+    api("/api/tiktok/clips").catch(() => ({ clips: [] })),
+  ]);
   state.tt = tt;
   state.settings = settings;
+  state.ttClips = (ready && ready.clips) || [];
   if (quiet) {
-    // jangan timpa seluruh halaman saat memantau pemasangan
+    // jangan timpa seluruh halaman saat memantau pemasangan / upload
     const box = $("#tt-progress");
     if (box) box.innerHTML = ttProgressHtml(tt);
-    if (!tt.installing) {
+    const card = $("#tt-upload-card");
+    if (card) card.innerHTML = ttUploadCardHtml(state.ttClips, tt, settings);
+    if (!tt.installing && !state.ttUploading) {
       await renderTikTok();
       return;
     }
@@ -1344,6 +1351,8 @@ async function renderTikTok(quiet = false) {
 
     <div id="tt-progress">${ttProgressHtml(tt)}</div>
 
+    <div id="tt-upload-card">${ttUploadCardHtml(state.ttClips, tt, settings)}</div>
+
     ${setup}
 
     <div class="card">
@@ -1405,9 +1414,59 @@ async function renderTikTok(quiet = false) {
     </div>
   `;
 
-  if (tt.installing) {
+  state.ttUploading = (state.ttClips || []).some((c) => c.status === "uploading");
+  if (tt.installing || state.ttUploading) {
     startPolling(() => renderTikTok(true), 2500);
   }
+}
+
+function ttUploadCardHtml(clips, tt, settings) {
+  const off = settings.tt_enabled === false;
+  const blocked = !tt.ready || off;
+  const rows = (clips || [])
+    .map(
+      (c) => `<div class="tt-row" data-clip-row="${esc(c.id)}">
+        <div class="tt-row-main">
+          <b>${esc(c.title)}</b>
+          <span class="tiny dim">${esc(c.project || "")} · ${fmtDur(c.duration)}</span>
+        </div>
+        <div class="row" style="gap:6px">
+          ${c.tk_url ? `<a class="tag up" href="${esc(c.tk_url)}" target="_blank" rel="noopener">sudah di TikTok ↗</a>` : ""}
+          <button class="btn small tt" data-action="upload-tt" data-id="${esc(c.id)}"
+            ${blocked ? "disabled" : ""}>Upload ke TikTok</button>
+        </div>
+      </div>`
+    )
+    .join("");
+
+  let note;
+  if (off) {
+    note = `<p class="hint">Tombol TikTok sedang dimatikan di Pengaturan.</p>
+      <button class="btn small" data-action="tt-enable">Nyalakan sekarang</button>`;
+  } else if (!tt.ready) {
+    note = `<p class="hint">Dukungan TikTok belum siap: pasang dulu di kartu <b>1 · Pasang dukungan TikTok</b>
+      di bawah, lalu login. Setelah itu tombol di daftar ini aktif.</p>`;
+  } else if (!tt.logged_in) {
+    note = `<p class="hint">Belum login TikTok. Klik <b>Buka TikTok & login</b> di kartu
+      <b>1 · Browser & sesi</b> di bawah — cukup sekali.</p>`;
+  } else if (!clips || !clips.length) {
+    note = `<p class="hint">Belum ada clip yang dirender. Buka <a href="#/projects">Project</a> → Render,
+      lalu kembali ke sini.</p>`;
+  } else {
+    note = `<p class="hint">Pilih clip hasil render di bawah, lalu kirim. Jendela browser TikTok
+      akan terbuka sendiri untuk mengunggah.</p>`;
+  }
+
+  return `<div class="card">
+    <div class="card-title">
+      <h2>Upload ke TikTok</h2>
+      <span class="tag ${tt.ready && tt.logged_in ? "done" : tt.ready ? "run" : "err"}">
+        ${tt.ready && tt.logged_in ? "siap" : tt.ready ? "belum login" : "belum dipasang"}
+      </span>
+    </div>
+    ${note}
+    ${rows ? `<div class="tt-list">${rows}</div>` : ""}
+  </div>`;
 }
 
 function ttProgressHtml(tt) {
@@ -2422,10 +2481,15 @@ document.addEventListener("click", async (e) => {
       await renderTikTok();
     } else if (action === "tt-refresh") {
       await renderTikTok();
+    } else if (action === "tt-enable") {
+      await api("/api/settings", { method: "PATCH", body: { tt_enabled: true } });
+      toast("Tombol TikTok dinyalakan", "ok");
+      await renderTikTok();
     } else if (action === "upload-tt") {
       await api("/api/clips/" + id + "/upload", { method: "POST", body: { target: "tiktok" } });
-      toast("Masuk antrean upload TikTok", "ok");
-      renderProject(state.job.id);
+      toast("Masuk antrean upload TikTok — jendela browser akan terbuka", "ok");
+      if (state.route === "tiktok") await renderTikTok();
+      else if (state.job) renderProject(state.job.id);
     } else if (action === "upload-all-tt") {
       const res = await api("/api/clips/upload-all", { method: "POST", body: { job_id: state.job.id, target: "tiktok" } });
       toast(res.queued + " clip masuk antrean TikTok", "ok");

@@ -152,6 +152,8 @@ async function renderEditor(clipId) {
           </select>
           <button class="btn small primary" data-ed="render">Render</button>
           <a class="btn small ghost" id="ed-download" href="/api/clips/${esc(clip.id)}/download" ${clip.has_file ? "" : "hidden"}>Unduh</a>
+          <button class="btn small tt" data-ed="upload-tiktok" ${clip.has_file ? "" : "disabled"}
+            title="Kirim clip hasil render ini ke TikTok">TikTok</button>
         </div>
       </div>
 
@@ -995,6 +997,14 @@ async function editorAction(action, target) {
     else seg.end = Math.max(Number(srcTime.toFixed(2)), seg.start + 0.3);
     scheduleSave();
     renderTimeline();
+  } else if (action === "upload-tiktok") {
+    if (!ED.clip || !ED.clip.has_file) {
+      toast("Render dulu clip ini, lalu kirim ke TikTok", "bad");
+      return;
+    }
+    const res = await api(`/api/clips/${ED.clipId}/upload`, { method: "POST", body: { target: "tiktok" } });
+    toast("Masuk antrean TikTok — jendela browser akan terbuka", "ok");
+    return res;
   } else if (action === "fix-duration") {
     const wanted = Number(target.dataset.target) || 60;
     const sourceDur = Number(ED.source && ED.source.duration) || 0;

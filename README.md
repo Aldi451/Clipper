@@ -597,10 +597,17 @@ browser di komputer kamu sendiri**.
 3. Klik **Buka TikTok & login** → jendela browser terbuka → login (email/kode atau scan QR).
    Cookie disimpan lokal di `data/tiktok_profile/`, jadi cukup sekali. Hapus dengan **Hapus sesi**.
 
-**Upload:**
+**Upload** (tiga pintu masuk, pilih yang paling nyaman):
 
-- Di halaman **Project**, setiap clip punya tombol **TikTok** (atau **Upload TikTok** untuk
-  semua clip sekaligus).
+1. **Tab TikTok → kartu "Upload ke TikTok"** — daftar semua clip yang sudah dirender, masing-masing
+   punya tombol **Upload ke TikTok** (`GET /api/tiktok/clips`). Ini yang paling cepat kalau clip
+   berasal dari beberapa project.
+2. **Halaman Project** — tombol **TikTok** di setiap clip, atau **Upload TikTok** di kepala project
+   untuk semua clip sekaligus.
+3. **Editor clip** — tombol **TikTok** di kanan atas, di samping tombol Render/Unduh.
+
+Tombol baru aktif setelah clip benar-benar dirender (ada file), dan setelah dukungan TikTok
+dipasang + login.
 - Clipper membuka TikTok Studio, memasukkan file, mengisi caption (judul + hashtag), memilih
   visibilitas, lalu menekan **Post**.
 - Link video muncul di kartu clip begitu TikTok selesai memproses.
