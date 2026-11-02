@@ -206,6 +206,7 @@ textarea.input { resize: vertical; min-height: 78px; line-height: 1.45; }
 .btn.small { padding: 7px 12px; font-size: 13px; border-radius: 9px; }
 .btn.danger { border-color: rgba(248, 113, 113, 0.4); color: #fca5a5; }
 .btn.yt { background: linear-gradient(120deg, #ff0033, #ff5c5c); border: none; color: #fff; }
+.btn.tt { background: linear-gradient(120deg, #00f2ea, #ff0050); border: none; color: #06121a; font-weight: 700; }
 
 .switch { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
 .switch input { display: none; }

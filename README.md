@@ -28,6 +28,7 @@ lalu **upload otomatis ke YouTube Shorts** channel kamu.
 | 💬 **Caption karaoke** | Word-by-word highlight (3 kata/baris, bisa diatur), warna & font custom, plus overlay judul/hook di atas video. |
 | 🔊 **Normalisasi audio** | Loudnorm -14 LUFS, standar YouTube. |
 | ✂️ **Editor per clip** | Ubah judul/hook/deskripsi/hashtag, geser start, ubah durasi, atur fokus crop, matikan caption, preview langsung, render ulang. |
+| ♪ **Upload TikTok** | Upload clip ke TikTok langsung dari Clipper — memakai browser di komputer sendiri (gratis, tanpa API key, tanpa daftar aplikasi). Caption + hashtag terisi otomatis, tombol Post ditekan otomatis (bisa dimatikan). |
 | ▶️ **Upload YouTube** | OAuth Google resmi (device flow — login pakai kode, tanpa buka port lokal), upload resumable, subtitle `.srt` ikut diunggah, `#Shorts` otomatis. |
 | 🤖 **Full otomatis** | Opsi "render otomatis" + "upload otomatis": tempel link → tunggu → Shorts terbit. |
 | 💾 **Data lokal** | Semua video, clip, transkrip, token disimpan di folder `data/` (bisa dihapus kapan saja). |
@@ -541,6 +542,50 @@ cari momen → render → upload). Bisa juga centang beberapa video lalu **Buat 
 > dan berisiko klaim/strike di channel kamu. Pakai clip sebagai bahan komentar, reaksi,
 > atau potongan transformatif, dan sebutkan sumbernya di deskripsi.
 
+## Upload ke TikTok (gratis, tanpa API)
+
+TikTok tidak memberi API upload gratis untuk perorangan (butuh aplikasi developer + review).
+Clipper memakai cara yang tetap gratis dan tidak butuh persetujuan siapa pun: **mengemudikan
+browser di komputer kamu sendiri**.
+
+**Setup sekali:**
+
+1. Buka tab **TikTok** di Clipper → **Pasang dukungan TikTok**
+   (memasang paket `playwright` ± 1 MB; butuh internet sekali).
+2. Clipper otomatis memakai **Chrome / Edge** yang sudah terpasang di Windows. Kalau tidak ada,
+   klik **Unduh browser Clipper** (± 130 MB).
+3. Klik **Buka TikTok & login** → jendela browser terbuka → login (email/kode atau scan QR).
+   Cookie disimpan lokal di `data/tiktok_profile/`, jadi cukup sekali. Hapus dengan **Hapus sesi**.
+
+**Upload:**
+
+- Di halaman **Project**, setiap clip punya tombol **TikTok** (atau **Upload TikTok** untuk
+  semua clip sekaligus).
+- Clipper membuka TikTok Studio, memasukkan file, mengisi caption (judul + hashtag), memilih
+  visibilitas, lalu menekan **Post**.
+- Link video muncul di kartu clip begitu TikTok selesai memproses.
+
+**Pengaturan** (tab TikTok):
+
+| Setting | Arti |
+|---|---|
+| Visibilitas | Semua orang / Teman / Hanya saya (best effort — mengikuti pilihan yang tersedia di TikTok) |
+| Hashtag default | Ditambahkan otomatis ke caption (default `#fyp #foryou #viral #ShortsIndonesia`) |
+| Tekan Post otomatis | Matikan kalau kamu mau menambahkan suara/efek dulu, lalu Post manual |
+| Upload TikTok setelah YouTube | Setelah upload YouTube sukses, clip yang sama langsung dikirim ke TikTok |
+| Waktu tunggu login | Berapa lama Clipper menunggu kamu login saat upload pertama |
+
+Catatan:
+
+- TikTok membatasi upload untuk sebagian akun baru (perlu verifikasi/usia akun). Kalau muncul
+  kendala, Clipper menyimpan **tangkapan layar terakhir** (`data/tiktok_terakhir.png`) dan
+  menampilkan pesan apa yang diminta TikTok.
+- Upload TikTok butuh **sesi desktop** (jendela browser harus bisa terbuka), jadi jalankan Clipper
+  dengan `run.bat`, bukan sebagai Windows service tanpa desktop.
+- Semua proses lokal: tidak ada kredensial yang dikirim ke server lain.
+
+---
+
 ## Upload ke YouTube Shorts (sekali setup, gratis)
 
 YouTube mewajibkan OAuth client milik kamu sendiri. Sekali setup, gratis, tanpa kartu kredit:
@@ -580,6 +625,7 @@ Clipper/
 │   ├── editor.py           # engine video editor: spec JSON → render (timeline, teks, subtitle, template, 4K)
 │   ├── discover.py        # pencarian video viral (YouTube API + yt-dlp) & skor viral
 │   ├── youtube.py          # OAuth device flow + upload resumable
+│   ├── tiktok.py           # upload TikTok lewat browser sendiri (Playwright, opsional)
 │   ├── db.py               # SQLite (jobs & clips)
 │   └── config.py           # path, settings, pencarian ffmpeg
 ├── web/                    # UI tanpa framework & tanpa CDN

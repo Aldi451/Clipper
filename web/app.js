@@ -185,6 +185,16 @@ function applyHealth() {
     dot.className = "dot " + (h.youtube ? "on" : "off");
     yt.title = h.youtube ? "YouTube terhubung" : "YouTube belum terhubung";
   }
+  const tk = $("#chip-tiktok");
+  if (tk) {
+    const dot = $(".dot", tk);
+    dot.className = "dot " + (h.tiktok_login ? "on" : h.tiktok ? "warn" : "off");
+    tk.title = h.tiktok_login
+      ? "TikTok siap upload (sudah login)"
+      : h.tiktok
+        ? "TikTok siap, belum login"
+        : "Dukungan TikTok belum dipasang";
+  }
   const version = $("#app-version");
   if (version) version.textContent = h.version || "—";
 }
@@ -218,7 +228,7 @@ function parseRoute() {
   if (!parts.length) return { route: "new", param: "" };
   if (parts[0] === "project" && parts[1]) return { route: "project", param: parts[1] };
   if (parts[0] === "editor" && parts[1]) return { route: "editor", param: parts[1] };
-  if (["new", "viral", "projects", "youtube", "settings"].includes(parts[0])) {
+  if (["new", "viral", "projects", "youtube", "tiktok", "settings"].includes(parts[0])) {
     return { route: parts[0], param: "" };
   }
   return { route: "new", param: "" };
@@ -240,6 +250,7 @@ async function renderRoute() {
     else if (route === "project") await renderProject(param);
     else if (route === "editor") await renderEditorRoute(param);
     else if (route === "youtube") await renderYouTube();
+    else if (route === "tiktok") await renderTikTok();
     else if (route === "settings") await renderSettings();
   } catch (err) {
     view.innerHTML = `<div class="card"><h2>Terjadi kesalahan</h2><p class="sub">${esc(err.message)}</p>
@@ -924,6 +935,7 @@ function clipStatusTag(clip) {
 }
 
 function clipCardHtml(clip) {
+  const ttOn = !state.settings || state.settings.tt_enabled !== false;
   const thumb = clip.thumb
     ? `<img src="/api/clips/${esc(clip.id)}/thumb?v=${Math.round(clip.updated_at)}" onerror="this.style.display='none'" />`
     : `<span>${clip.status === "rendered" || clip.status === "uploaded" ? "🎞️" : "✂️"}</span>`;
@@ -945,7 +957,7 @@ function clipCardHtml(clip) {
             <span>${fmtTime(clip.start)} → ${fmtTime(clip.start + clip.duration)}</span>
             <span>${fmtDur(clip.duration)}</span>
           </div>
-          <div class="pill-row">${clipStatusTag(clip)}${clip.meta && clip.meta.dirty ? '<span class="tag">perlu render ulang</span>' : ""}${clip.yt_url ? `<a class="tag up" href="${esc(clip.yt_url)}" target="_blank" rel="noopener">buka di YT ↗</a>` : ""}</div>
+          <div class="pill-row">${clipStatusTag(clip)}${clip.meta && clip.meta.dirty ? '<span class="tag">perlu render ulang</span>' : ""}${clip.yt_url ? `<a class="tag up" href="${esc(clip.yt_url)}" target="_blank" rel="noopener">buka di YT ↗</a>` : ""}${clip.tk_url ? `<a class="tag up" href="${esc(clip.tk_url)}" target="_blank" rel="noopener">buka di TikTok ↗</a>` : clip.meta && clip.meta.tk_posted ? '<span class="tag up">TikTok ✓</span>' : ""}</div>
           <div class="tiny dim">${esc(clip.hook || "")}</div>
         </div>
       </div>
@@ -959,7 +971,8 @@ function clipCardHtml(clip) {
           <button class="btn small" data-action="render" data-id="${esc(clip.id)}" ${active ? "disabled" : ""}>
             ${clip.has_file ? "Render ulang" : "Render"}
           </button>
-          <button class="btn small yt" data-action="upload" data-id="${esc(clip.id)}" ${!clip.has_file || active ? "disabled" : ""}>Upload</button>
+          <button class="btn small yt" data-action="upload" data-id="${esc(clip.id)}" ${!clip.has_file || active ? "disabled" : ""}>Upload YT</button>
+          ${ttOn ? `<button class="btn small tt" data-action="upload-tt" data-id="${esc(clip.id)}" ${!clip.has_file || active ? "disabled" : ""}>TikTok</button>` : ""}
           ${clip.has_file ? `<a class="btn small ghost" href="/api/clips/${esc(clip.id)}/download">Unduh</a>` : ""}
           <button class="btn small ghost danger" data-action="delete-clip" data-id="${esc(clip.id)}">Hapus</button>
         </div>
@@ -983,6 +996,11 @@ async function renderProject(jobId) {
   state.clips = clips;
   const running = job.status === "running" || job.status === "queued";
   const pct = Math.round((job.progress || 0) * 100);
+  let ttOn = true;
+  if (!state.settings || Object.keys(state.settings).length === 0) {
+    state.settings = await api("/api/settings").catch(() => ({}));
+  }
+  ttOn = state.settings.tt_enabled !== false;
 
   view.innerHTML = `
     <div class="page-head">
@@ -1001,7 +1019,8 @@ async function renderProject(jobId) {
       </div>
       <div class="row">
         <button class="btn" data-action="render-all" ${!clips.length || running ? "disabled" : ""}>Render semua</button>
-        <button class="btn yt" data-action="upload-all" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload semua</button>
+        <button class="btn yt" data-action="upload-all" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload YT</button>
+        ${ttOn ? `<button class="btn tt" data-action="upload-all-tt" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload TikTok</button>` : ""}
         <button class="btn ghost danger" data-action="delete-job" data-id="${esc(job.id)}">Hapus project</button>
       </div>
     </div>
@@ -1238,10 +1257,167 @@ async function saveEditor(renderAfter) {
 }
 
 /* ------------------------------------------------------------------ */
+/* view: tiktok                                                       */
+/* ------------------------------------------------------------------ */
+async function renderTikTok(quiet = false) {
+  const view = $("#view");
+  const [tt, settings] = await Promise.all([api("/api/tiktok/status"), api("/api/settings")]);
+  state.tt = tt;
+  state.settings = settings;
+  if (quiet) {
+    // jangan timpa seluruh halaman saat memantau pemasangan
+    const box = $("#tt-progress");
+    if (box) box.innerHTML = ttProgressHtml(tt);
+    if (!tt.installing) {
+      await renderTikTok();
+      return;
+    }
+    return;
+  }
+
+  const browserLabel = tt.browser
+    ? `${tt.browser === "msedge" ? "Microsoft Edge" : tt.browser === "chrome" ? "Google Chrome" : tt.browser} (sudah terpasang)`
+    : tt.chromium
+      ? "Chromium bawaan Playwright"
+      : "belum ada";
+
+  const setup = !tt.installed
+    ? `<div class="card">
+        <div class="card-title"><h2>1 · Pasang dukungan TikTok</h2><span class="tag">sekali saja</span></div>
+        <p class="hint">
+          Upload TikTok memakai <b>browser di komputer ini</b> (bukan server orang lain), jadi tidak perlu
+          API key, tidak perlu daftar aplikasi, dan tetap gratis. Yang dipasang hanya paket kecil
+          <span class="mono">playwright</span>.
+        </p>
+        <button class="btn tt" data-action="tt-setup">Pasang dukungan TikTok</button>
+      </div>`
+    : !tt.ready
+      ? `<div class="card">
+          <div class="card-title"><h2>1 · Pilih browser</h2><span class="tag err">belum siap</span></div>
+          <p class="hint">
+            Tidak ditemukan Chrome/Edge di komputer ini. Kamu bisa memasang Chrome/Edge, atau mengunduh
+            browser khusus Clipper (±130 MB, sekali saja).
+          </p>
+          <button class="btn tt" data-action="tt-browser" ${tt.installing ? "disabled" : ""}>Unduh browser Clipper</button>
+        </div>`
+      : `<div class="card">
+          <div class="card-title"><h2>1 · Browser & sesi</h2>
+            <span class="tag ${tt.logged_in ? "done" : ""}">${tt.logged_in ? "login tersimpan" : "belum login"}</span>
+          </div>
+          <div class="kv-list">
+            <div class="kv"><span>Browser</span><b>${esc(browserLabel)}</b></div>
+            <div class="kv"><span>Profil login</span><b class="mono">${esc(tt.profile)}</b></div>
+          </div>
+          <div class="row" style="margin-top:14px">
+            <button class="btn tt" data-action="tt-login" ${tt.login_window ? "disabled" : ""}>
+              ${tt.login_window ? "Jendela login terbuka…" : tt.logged_in ? "Buka TikTok Studio" : "Buka TikTok & login"}
+            </button>
+            <button class="btn ghost" data-action="tt-refresh">Cek status</button>
+            ${tt.logged_in ? `<button class="btn ghost danger" data-action="tt-logout">Hapus sesi</button>` : ""}
+          </div>
+          <p class="hint" style="margin-top:12px">
+            Jendela browser TikTok akan terbuka di layar kamu. Login sekali di sana (email/kode atau scan QR),
+            lalu jendela menutup sendiri. Cookie disimpan lokal di profil di atas.
+          </p>
+        </div>`;
+
+  view.innerHTML = `
+    <div class="page-head">
+      <div>
+        <h1>TikTok</h1>
+        <p class="sub">Upload clip langsung ke TikTok lewat browser di komputer ini — gratis, tanpa API berbayar.</p>
+      </div>
+      <span class="tag ${tt.ready && tt.logged_in ? "done" : tt.ready ? "run" : "err"}">
+        ${tt.ready && tt.logged_in ? "siap upload" : tt.ready ? "siap, belum login" : "belum dipasang"}
+      </span>
+    </div>
+
+    <div id="tt-progress">${ttProgressHtml(tt)}</div>
+
+    ${setup}
+
+    <div class="card">
+      <div class="card-title"><h2>2 · Default upload TikTok</h2><span class="tiny dim">berlaku untuk semua clip</span></div>
+      <div class="grid-3">
+        <div class="field">
+          <label>Visibilitas</label>
+          <select class="select" data-setting="tt_privacy">
+            <option value="public" ${settings.tt_privacy === "public" ? "selected" : ""}>Semua orang</option>
+            <option value="friends" ${settings.tt_privacy === "friends" ? "selected" : ""}>Teman</option>
+            <option value="private" ${settings.tt_privacy === "private" ? "selected" : ""}>Hanya saya</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Hashtag default</label>
+          <input class="input" data-setting="tt_hashtags" value="${esc(settings.tt_hashtags || "")}" />
+        </div>
+        <div class="field">
+          <label>Waktu tunggu login (detik)</label>
+          <input class="input" type="number" min="60" max="1800" data-setting="tt_login_wait" value="${Number(settings.tt_login_wait || 300)}" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px;gap:22px;flex-wrap:wrap">
+        <label class="switch">
+          <input type="checkbox" data-setting="tt_enabled" ${settings.tt_enabled ? "checked" : ""} />
+          <span class="track"></span>
+          <span>Aktifkan tombol TikTok</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" data-setting="tt_auto_post" ${settings.tt_auto_post ? "checked" : ""} />
+          <span class="track"></span>
+          <span>Tekan Post otomatis</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" data-setting="tt_auto_upload" ${settings.tt_auto_upload ? "checked" : ""} />
+          <span class="track"></span>
+          <span>Upload ke TikTok setelah YouTube</span>
+        </label>
+      </div>
+      <p class="hint" style="margin-top:12px">
+        Kalau <b>Tekan Post otomatis</b> dimatikan, Clipper hanya mengisi video + caption lalu kamu yang
+        menekan Post sendiri (berguna untuk menambahkan suara/efek dulu).
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><h2>Cara pakai</h2></div>
+      <ol class="tiny muted" style="padding-left:18px;line-height:1.9;margin:0">
+        <li>Login sekali di halaman ini.</li>
+        <li>Buka <b>Project</b> → pilih clip → klik <b>TikTok</b> (atau <b>Upload TikTok</b> untuk semua clip).</li>
+        <li>Jendela browser terbuka sendiri, video diunggah, caption terisi, lalu Post ditekan.</li>
+        <li>Link video muncul di kartu clip begitu TikTok selesai memproses.</li>
+      </ol>
+      <p class="hint" style="margin-top:12px">
+        Catatan: TikTok membatasi upload lewat browser untuk beberapa akun baru (perlu verifikasi).
+        Kalau itu terjadi, Clipper menampilkan pesan + tangkapan layar terakhir supaya jelas apa yang
+        diminta TikTok.
+      </p>
+    </div>
+  `;
+
+  if (tt.installing) {
+    startPolling(() => renderTikTok(true), 2500);
+  }
+}
+
+function ttProgressHtml(tt) {
+  if (!tt.installing && !tt.login_window && !(tt.log || []).length) return "";
+  const lines = (tt.log || []).map((line) => `<div class="mono tiny">${esc(line)}</div>`).join("");
+  return `<div class="card">
+    <div class="card-title"><h2>${tt.installing ? "Memasang…" : "Aktivitas"}</h2>
+      ${tt.installing ? '<span class="tag run">berjalan</span>' : ""}</div>
+    ${tt.message ? `<p class="hint">${esc(tt.message)}</p>` : ""}
+    ${tt.installing ? '<div class="bar"><i style="width:100%"></i></div>' : ""}
+    <div style="max-height:170px;overflow:auto;margin-top:10px">${lines || ""}</div>
+  </div>`;
+}
+
+/* ------------------------------------------------------------------ */
 /* view: youtube                                                      */
 /* ------------------------------------------------------------------ */
 async function renderYouTube() {
   const view = $("#view");
+  const tkHealth = state.health || {};
   const [yt, settings] = await Promise.all([api("/api/youtube/status"), api("/api/settings")]);
   state.yt = yt;
   state.settings = settings;
@@ -1414,6 +1590,54 @@ async function renderYouTube() {
       </div>
       <p class="hint" style="margin-top:12px">
         Kalau "render otomatis" + "upload otomatis" dua-duanya nyala, alurnya full otomatis: tempel link → clip → upload.
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <h2>Default upload TikTok</h2>
+        <span class="tag ${tkHealth.tiktok ? (tkHealth.tiktok_login ? "done" : "run") : ""}">
+          ${tkHealth.tiktok_login ? "siap upload" : tkHealth.tiktok ? "belum login" : "belum dipasang"}
+        </span>
+      </div>
+      <div class="grid-3">
+        <div class="field">
+          <label>Visibilitas</label>
+          <select class="select" data-setting="tt_privacy">
+            <option value="public" ${settings.tt_privacy === "public" ? "selected" : ""}>Semua orang</option>
+            <option value="friends" ${settings.tt_privacy === "friends" ? "selected" : ""}>Teman</option>
+            <option value="private" ${settings.tt_privacy === "private" ? "selected" : ""}>Hanya saya</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Hashtag default</label>
+          <input class="input" data-setting="tt_hashtags" value="${esc(settings.tt_hashtags || "")}" />
+        </div>
+        <div class="field">
+          <label>Waktu tunggu login (detik)</label>
+          <input class="input" type="number" min="60" max="1800" data-setting="tt_login_wait" value="${Number(settings.tt_login_wait || 300)}" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px;gap:22px;flex-wrap:wrap">
+        <label class="switch">
+          <input type="checkbox" data-setting="tt_enabled" ${settings.tt_enabled ? "checked" : ""} />
+          <span class="track"></span>
+          <span>Aktifkan tombol TikTok</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" data-setting="tt_auto_post" ${settings.tt_auto_post ? "checked" : ""} />
+          <span class="track"></span>
+          <span>Tekan Post otomatis</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" data-setting="tt_auto_upload" ${settings.tt_auto_upload ? "checked" : ""} />
+          <span class="track"></span>
+          <span>Upload TikTok setelah YouTube</span>
+        </label>
+      </div>
+      <p class="hint" style="margin-top:12px">
+        Upload TikTok memakai browser di komputer ini (gratis, tanpa API).
+        Pasang & login sekali di halaman <a href="#/tiktok">TikTok</a>.
       </p>
     </div>
   `;
@@ -1612,6 +1836,36 @@ async function renderSettings() {
                jalankan <span class="mono">run.bat --data-dir D:\Clipper\data</span>.
              </p>`
       }
+    </div>
+
+    <div class="card">
+      <div class="card-title">
+        <h2>Upload TikTok</h2>
+        <span class="tag ${health.tiktok ? (health.tiktok_login ? "done" : "run") : ""}">
+          ${health.tiktok_login ? "siap upload" : health.tiktok ? "belum login" : "belum dipasang"}
+        </span>
+      </div>
+      <div class="row" style="gap:22px;flex-wrap:wrap">
+        <label class="switch">
+          <input type="checkbox" data-setting="tt_enabled" ${s.tt_enabled ? "checked" : ""} />
+          <span class="track"></span>
+          <span>Aktifkan tombol TikTok</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" data-setting="tt_auto_post" ${s.tt_auto_post ? "checked" : ""} />
+          <span class="track"></span>
+          <span>Tekan Post otomatis</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" data-setting="tt_auto_upload" ${s.tt_auto_upload ? "checked" : ""} />
+          <span class="track"></span>
+          <span>Upload TikTok setelah YouTube</span>
+        </label>
+      </div>
+      <p class="hint" style="margin-top:12px">
+        Upload TikTok memakai browser di komputer ini — gratis, tanpa API.
+        Visibilitas & hashtag diatur di halaman <a href="#/tiktok">TikTok</a>.
+      </p>
     </div>
 
     <div class="card">
@@ -2057,6 +2311,34 @@ document.addEventListener("click", async (e) => {
     } else if (action === "render-all") {
       await api("/api/jobs/" + state.job.id + "/render", { method: "POST" });
       toast("Semua clip masuk antrean render", "ok");
+      renderProject(state.job.id);
+    } else if (action === "tt-setup") {
+      target.disabled = true;
+      target.innerHTML = `<span class="spinner"></span> Memasang…`;
+      await api("/api/tiktok/setup", { method: "POST", body: { browser: true } });
+      toast("Memasang dukungan TikTok…", "ok");
+      await renderTikTok();
+    } else if (action === "tt-browser") {
+      await api("/api/tiktok/browser", { method: "POST" });
+      toast("Mengunduh browser (±130 MB)…", "ok");
+      await renderTikTok();
+    } else if (action === "tt-login") {
+      await api("/api/tiktok/login", { method: "POST" });
+      toast("Jendela TikTok dibuka — login di sana", "ok");
+      await renderTikTok();
+    } else if (action === "tt-logout") {
+      await api("/api/tiktok/logout", { method: "POST" });
+      toast("Sesi TikTok dihapus", "ok");
+      await renderTikTok();
+    } else if (action === "tt-refresh") {
+      await renderTikTok();
+    } else if (action === "upload-tt") {
+      await api("/api/clips/" + id + "/upload", { method: "POST", body: { target: "tiktok" } });
+      toast("Masuk antrean upload TikTok", "ok");
+      renderProject(state.job.id);
+    } else if (action === "upload-all-tt") {
+      const res = await api("/api/clips/upload-all", { method: "POST", body: { job_id: state.job.id, target: "tiktok" } });
+      toast(res.queued + " clip masuk antrean TikTok", "ok");
       renderProject(state.job.id);
     } else if (action === "upload-all") {
       const res = await api("/api/clips/upload-all", { method: "POST", body: { job_id: state.job.id } });
