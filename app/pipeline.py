@@ -15,6 +15,7 @@ from typing import Any, Callable
 from . import analyze, db, editor, ingest, media, subs, transcribe, youtube
 from .config import WORK_DIR, load_settings
 from .fsutil import safe_unlink
+from .paths import resolve_media_path
 
 
 analysis_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="analyze")
@@ -75,7 +76,12 @@ def _run_analysis(job_id: str) -> None:
     try:
         _job_set(job_id, status="running", stage="memuat", progress=0.01, message="Menyiapkan…", error="")
 
-        source_path = Path(job["source_path"]) if job.get("source_path") else None
+        source_path = resolve_media_path(job.get("source_path"), (WORK_DIR / job_id,))
+        if source_path is None and job.get("source_path"):
+            _job_set(job_id, message="File sumber tidak ada di path lama, mencari di folder data…")
+        if source_path is not None and str(source_path) != (job.get("source_path") or ""):
+            # path tersimpan masih menunjuk folder lama → perbarui agar konsisten
+            _job_set(job_id, source_path=str(source_path))
 
         # 1) download kalau sumbernya link
         if (not source_path or not source_path.exists()) and ingest.is_url(job.get("source") or ""):
@@ -167,8 +173,9 @@ def _run_analysis(job_id: str) -> None:
         # 6) simpan clip
         existing = db.list_clips(job_id)
         for clip in existing:
-            if clip["file"]:
-                safe_unlink(clip["file"])
+            old_file = resolve_media_path(clip["file"], (WORK_DIR / clip["job_id"],))
+            if old_file is not None:
+                safe_unlink(old_file)
             db.delete_clip(clip["id"])
 
         for idx, cand in enumerate(candidates):
@@ -264,9 +271,14 @@ def _run_render(clip_id: str) -> None:
         if not job:
             raise RuntimeError("Project tidak ditemukan")
         settings = load_settings()
-        source_path = Path(job["source_path"])
-        if not source_path.exists():
-            raise RuntimeError("File sumber sudah tidak ada (mungkin dihapus)")
+        source_path = resolve_media_path(job.get("source_path"), (WORK_DIR / job["id"],))
+        if source_path is None:
+            raise RuntimeError("File sumber sudah tidak ada — jalankan repair.bat "
+                               "(atau analisis ulang project)")
+        if str(source_path) != (job.get("source_path") or ""):
+            # path tersimpan masih menunjuk folder lama → rapikan sekalian
+            db.update_job(job["id"], source_path=str(source_path))
+            job["source_path"] = str(source_path)
         info = media.probe(source_path)
         transcript = transcribe.load_transcript(job["id"])
 
@@ -311,7 +323,8 @@ def _run_upload(clip_id: str) -> None:
         return
     try:
         settings = load_settings()
-        if not clip.get("file") or not Path(clip["file"]).exists():
+        clip_file = resolve_media_path(clip.get("file"), (WORK_DIR / clip["job_id"],))
+        if clip_file is None:
             raise RuntimeError("Render clip dulu sebelum upload")
         if not youtube.is_connected():
             raise RuntimeError("Belum login YouTube")
@@ -322,7 +335,7 @@ def _run_upload(clip_id: str) -> None:
 
         srt = (clip.get("meta") or {}).get("srt") or ""
         result = youtube.upload_video(
-            clip["file"],
+            str(clip_file),
             title=clip.get("title") or "Clip",
             description=clip.get("description") or "",
             hashtags=clip.get("hashtags") or settings.get("yt_hashtags") or "#Shorts",

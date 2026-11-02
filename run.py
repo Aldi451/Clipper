@@ -223,6 +223,31 @@ def doctor(host: str, port: int) -> int:
     except Exception:  # noqa: BLE001 - doctor tidak boleh ikut crash
         pass
     say("")
+    # folder data: pastikan Clipper melihat data yang benar
+    try:
+        from app import paths as _paths
+
+        info_data = _paths.data_summary()
+        ok(f"folder data: {info_data['data_dir']}"
+           + ("  (CLIPPER_DATA_DIR)" if info_data["env_override"] else ""))
+        info(f"uploads: {info_data['uploads']} · clips: {info_data['clips']} · "
+             f"model whisper: {info_data['models']}")
+        from app import repair as repairer
+
+        report = repairer.data_folder_report(ROOT)
+        if report["broken_paths"]:
+            bad(f"{report['broken_paths']} dari {report['stored_paths']} path di database "
+                f"menunjuk lokasi lama")
+            if report["sample_broken"]:
+                info(f"  contoh: {Path(report['sample_broken'][0]).name}")
+            info("Perbaiki: repair.bat  (atau python run.py --repair)")
+            problems += 1
+        elif report["stored_paths"]:
+            ok(f"{report['stored_paths']} path media di database valid")
+    except Exception:  # noqa: BLE001
+        pass
+
+    say("")
     if port_free(host, port):
         ok(f"port {port} bebas")
     else:
@@ -273,7 +298,13 @@ def handle_repair() -> int:
 
     head("Clipper — perbaikan otomatis")
     detected = repairer.detect(ROOT)
+    data = detected.get("data") or {}
     say(f"  Folder  : {detected['project']}")
+    say(f"  Data    : {data.get('data_dir') or '-'}"
+        + ("  (dari CLIPPER_DATA_DIR)" if data.get("env_override") else ""))
+    if data.get("stored_paths"):
+        say(f"  Path DB : {data.get('stored_paths')} tersimpan, "
+            f"{data.get('broken_paths')} menunjuk lokasi lama")
 
     if detected["missing_files"]:
         bad("file penting hilang: " + ", ".join(detected["missing_files"]))
@@ -457,6 +488,8 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true", help="Jangan buka browser otomatis")
     parser.add_argument("--no-pause", action="store_true", help="Jangan tunggu Enter saat error (untuk skrip)")
     parser.add_argument("--doctor", action="store_true", help="Cek lingkungan lalu keluar")
+    parser.add_argument("--data-dir", default=None,
+                        help="Pakai folder data lain (default: <folder Clipper>/data)")
     parser.add_argument("--repair", action="store_true",
                         help="Perbaiki venv/service setelah folder Clipper dipindah")
     parser.add_argument("--reload", action="store_true", help="Mode development (auto reload)")
@@ -480,6 +513,10 @@ def main() -> int:
     svc.add_argument("--shortcut", action="store_true", help="Buat shortcut Clipper di Desktop")
     svc.add_argument("--run-service", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if getattr(args, "data_dir", None):
+        # harus diset SEBELUM modul app dimuat (config membaca env saat import)
+        os.environ["CLIPPER_DATA_DIR"] = str(Path(args.data_dir).expanduser().resolve())
 
     if args.repair:
         return handle_repair()

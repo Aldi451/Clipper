@@ -248,6 +248,131 @@ def repoint_task(project: Path = ROOT) -> tuple[bool, str]:
 
 
 # --------------------------------------------------------------------------- #
+# 3b. path lama di database & settings (folder dipindah)
+# --------------------------------------------------------------------------- #
+PATH_COLUMNS = {
+    "jobs": ("source_path",),
+    "clips": ("file", "thumb"),
+}
+
+
+def _db_path(project: Path = ROOT) -> Path:
+    data = Path(os.environ.get("CLIPPER_DATA_DIR") or (project / "data"))
+    return data / "clipper.db"
+
+
+def stored_paths(project: Path = ROOT, with_column: bool = False) -> list:
+    """Semua path absolut yang tersimpan di DB.
+
+    `with_column=True` mengembalikan `(tabel, kolom, path)` agar pemanggil bisa
+    membedakan media utama (video) dari thumbnail.
+    """
+    import sqlite3
+
+    db_file = _db_path(project)
+    if not db_file.exists():
+        return []
+    found: list = []
+    try:
+        conn = sqlite3.connect(str(db_file))
+        try:
+            for table, columns in PATH_COLUMNS.items():
+                for column in columns:
+                    try:
+                        rows = conn.execute(
+                            f"SELECT {column} FROM {table} WHERE {column} != ''"
+                        ).fetchall()
+                    except sqlite3.Error:
+                        continue
+                    for row in rows:
+                        if row and row[0]:
+                            found.append((table, column, str(row[0])) if with_column else str(row[0]))
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return []
+    return found
+
+
+def data_folder_report(project: Path = ROOT) -> dict[str, Any]:
+    """Ringkasan folder data yang dipakai Clipper + berapa path di DB yang rusak.
+
+    `broken_paths`    : semua path tersimpan yang filenya tidak ada di lokasi itu
+    `broken_media`    : dari jumlah itu, yang berupa video (paling penting)
+    `resolvable_paths`: yang filenya ternyata ADA di folder data sekarang
+                        (artinya tinggal path-nya dirapikan, bukan filenya hilang)
+    """
+    from app.paths import resolve_media_path
+
+    data_dir = Path(os.environ.get("CLIPPER_DATA_DIR") or (project / "data"))
+    rows = stored_paths(project, with_column=True)
+    stored = [item[2] for item in rows]
+    broken_rows = [item for item in rows if not Path(item[2]).expanduser().exists()]
+    broken_media = sum(1 for table, column, _ in broken_rows if column != "thumb")
+    resolvable = 0
+    for _, _, value in broken_rows[:60]:
+        if resolve_media_path(value, (data_dir / "work",)) is not None:
+            resolvable += 1
+    return {
+        "data_dir": str(data_dir),
+        "exists": data_dir.exists(),
+        "env_override": bool(os.environ.get("CLIPPER_DATA_DIR")),
+        "stored_paths": len(stored),
+        "broken_paths": len(broken_rows),
+        "broken_media": broken_media,
+        "resolvable_paths": resolvable,
+        "sample_broken": [item[2] for item in broken_rows[:3]],
+    }
+
+
+def relocate_paths(project: Path = ROOT) -> tuple[bool, str]:
+    """Tulis ulang path absolut lama di database ke folder data sekarang.
+
+    Database menyimpan path absolut (`C:\\Clipper\\data\\clips\\x.mp4`). Setelah
+    folder dipindah, path itu tidak ada walau file-nya ikut pindah. Fungsi ini
+    mengganti prefix lama dengan folder data yang sekarang.
+    """
+    import sqlite3
+
+    from app.paths import old_roots_from_paths, relocate_string
+
+    data_dir = Path(os.environ.get("CLIPPER_DATA_DIR") or (project / "data"))
+    stored = stored_paths(project)
+    roots = old_roots_from_paths(stored, data_dir)
+    if not roots:
+        return True, "path di database sudah menunjuk folder benar"
+
+    db_file = _db_path(project)
+    changed = 0
+    try:
+        conn = sqlite3.connect(str(db_file))
+        try:
+            for table, columns in PATH_COLUMNS.items():
+                for column in columns:
+                    rows = conn.execute(
+                        f"SELECT rowid, {column} FROM {table} WHERE {column} != ''"
+                    ).fetchall()
+                    for rowid, value in rows:
+                        new_value = relocate_string(str(value), roots, data_dir)
+                        if new_value != value:
+                            conn.execute(
+                                f"UPDATE {table} SET {column} = ? WHERE rowid = ?", (new_value, rowid)
+                            )
+                            changed += 1
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return False, f"gagal memperbarui database: {exc}"
+
+    if not changed:
+        return False, (f"path lama terdeteksi ({', '.join(roots[:3])}) tapi tidak ada yang "
+                       f"bisa ditulis ulang otomatis")
+    return True, (f"path di database diperbarui: {changed} baris "
+                  f"(root lama: {', '.join(roots[:3])})")
+
+
+# --------------------------------------------------------------------------- #
 # 4. orkestrasi
 # --------------------------------------------------------------------------- #
 def detect(project: Path = ROOT) -> dict[str, Any]:
@@ -268,6 +393,7 @@ def detect(project: Path = ROOT) -> dict[str, Any]:
         "task_exists": task_exists(),
         "task_stale": task_stale(),
         "needs_repair": bool(missing or not healthy or service_stale() or task_stale()),
+        "data": data_folder_report(project),
     }
 
 
@@ -331,12 +457,33 @@ def repair(project: Path = ROOT, on_step: Callable[[str], None] | None = None,
         else:
             step("autostart sudah menunjuk folder yang benar")
 
-    # 5. data folder
+    # 5. folder data + path lama di database
     try:
         from app.config import ensure_dirs
 
         ensure_dirs()
-        step("folder data siap")
+        info_data = data_folder_report(project)
+        step(f"folder data: {info_data['data_dir']}")
+        if info_data["env_override"]:
+            say("        (dipaksa oleh variabel lingkungan CLIPPER_DATA_DIR)")
+        if info_data["broken_paths"]:
+            say(f"        {info_data['broken_paths']} dari {info_data['stored_paths']} path "
+                f"di database menunjuk lokasi lama → diperbarui")
+        ok_relocate, message = relocate_paths(project)
+        step(message, ok_relocate)
+        after = data_folder_report(project)
+        if after["broken_media"]:
+            contoh = Path(after["sample_broken"][0]).name if after["sample_broken"] else "-"
+            step(f"{after['broken_media']} file video masih tidak ditemukan (contoh: {contoh})", False)
+            if after["resolvable_paths"]:
+                say(f"        {after['resolvable_paths']} file ada di folder data tapi path-nya "
+                    f"belum bisa dirapikan — jalankan repair.bat sekali lagi")
+            else:
+                say("        Cek `dir \"%s\"` — pastikan isinya ikut tersalin ke drive baru."
+                    % after["data_dir"])
+        elif after["broken_paths"]:
+            step(f"{after['broken_paths']} thumbnail hilang (tidak masalah, dibuat ulang saat render)",
+                 True)
     except Exception as exc:  # noqa: BLE001
         step(f"folder data bermasalah: {exc}", False)
 
