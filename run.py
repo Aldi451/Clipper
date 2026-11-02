@@ -248,6 +248,117 @@ def open_browser_later(url: str, delay: float = 1.5) -> None:
     threading.Thread(target=worker, daemon=True).start()
 
 
+# --------------------------------------------------------------------------- #
+# mode Windows service (tanpa jendela cmd)
+# --------------------------------------------------------------------------- #
+def _winservice():
+    from app import winservice
+
+    return winservice
+
+
+def handle_service_command(args) -> int | None:
+    """Tangani perintah service. None = bukan perintah service."""
+    wants = any([
+        args.install_service, args.remove_service, args.start_service, args.stop_service,
+        args.service_status, args.service_log, args.run_service, args.autostart, args.no_autostart,
+        args.shortcut,
+    ])
+    if not wants:
+        return None
+
+    ws = _winservice()
+    try:
+        if args.run_service:
+            # dijalankan oleh Service Control Manager: tidak ada output ke layar
+            ws.run_service()
+            return 0
+
+        if args.install_service:
+            head("Memasang service Clipper")
+            result = ws.install_service(host=args.service_host, port=args.service_port,
+                                        autostart=not args.no_autostart)
+            ok(f"Service '{ws.SERVICE_NAME}' terpasang"
+               + (" (mengganti versi lama)" if result.get("replaced") else ""))
+            info(f"Mulai otomatis saat Windows menyala · alamat: {ws.service_url()}")
+            info("Buka dengan: services.msc → cari 'Clipper'")
+            if ws.service_state() != "running":
+                info("Mulai sekarang? Jalankan:  python run.py --start-service")
+            return 0
+
+        if args.remove_service:
+            head("Menghapus service Clipper")
+            result = ws.remove_service()
+            if result.get("removed"):
+                ok("Service dihapus.")
+            else:
+                info(result.get("reason") or "Service belum terpasang.")
+            return 0
+
+        if args.start_service:
+            result = ws.start_service()
+            ok(f"Service dimulai. Buka {result['url']} di browser.")
+            return 0
+
+        if args.stop_service:
+            result = ws.stop_service()
+            if result.get("stopped"):
+                ok("Service dihentikan.")
+            else:
+                info(result.get("reason") or "Service tidak berjalan.")
+            return 0
+
+        if args.service_status:
+            head("Status Clipper")
+            state = ws.service_state()
+            label = {"running": "berjalan", "stopped": "berhenti",
+                     "not-installed": "belum terpasang", "unknown": "tidak diketahui"}[state]
+            say(f"  Service : {ws.SERVICE_NAME} — {label}")
+            if state != "not-installed":
+                say(f"  Alamat  : {ws.service_url()}")
+                say(f"  Log     : {ws.LOG_FILE}")
+            say(f"  pywin32 : {'terpasang' if ws.HAS_PYWIN32 else 'belum terpasang'}")
+            return 0
+
+        if args.service_log:
+            head("Log service (40 baris terakhir)")
+            tail = ws.read_log_tail(40)
+            say(tail or "  (belum ada log — service mungkin belum pernah jalan)")
+            say("")
+            info(f"File: {ws.LOG_FILE}")
+            return 0
+
+        if args.autostart:
+            head("Membuat autostart tanpa jendela")
+            result = ws.install_autostart_task(host=args.service_host, port=args.service_port)
+            ok(f"Terdaftar di Task Scheduler sebagai '{result['task']}'")
+            info("Clipper akan jalan otomatis setiap kamu login (tanpa jendela cmd).")
+            info("Pakai sekarang juga: jalankan lewat shortcut Clipper di Desktop.")
+            return 0
+
+        if args.no_autostart and not args.install_service:
+            result = ws.remove_autostart_task()
+            if result.get("removed"):
+                ok("Autostart dihapus.")
+            else:
+                info(f"Tidak ada autostart terdaftar. {result.get('detail') or ''}".strip())
+            return 0
+
+        if args.shortcut:
+            result = ws.create_desktop_shortcut()
+            ok(f"Shortcut dibuat: {result['path']}")
+            info(f"Klik dua kali untuk membuka {result['url']}")
+            return 0
+    except Exception as exc:  # noqa: BLE001 - pesan sudah ramah
+        head("Gagal")
+        bad(str(exc))
+        if "pywin32" in str(exc):
+            info("Perbaiki dengan:")
+            info("  .venv\\Scripts\\python -m pip install pywin32")
+        return 1
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Clipper — auto clip video jadi Shorts, offline & gratis",
@@ -259,7 +370,28 @@ def main() -> int:
     parser.add_argument("--no-pause", action="store_true", help="Jangan tunggu Enter saat error (untuk skrip)")
     parser.add_argument("--doctor", action="store_true", help="Cek lingkungan lalu keluar")
     parser.add_argument("--reload", action="store_true", help="Mode development (auto reload)")
+
+    # --- Windows service: jalan tanpa jendela cmd ---
+    svc = parser.add_argument_group("Windows service (tanpa jendela cmd)")
+    svc.add_argument("--install-service", action="store_true",
+                     help="Pasang Clipper sebagai service Windows (butuh Administrator)")
+    svc.add_argument("--remove-service", action="store_true", help="Hapus service Clipper")
+    svc.add_argument("--start-service", action="store_true", help="Mulai service Clipper")
+    svc.add_argument("--stop-service", action="store_true", help="Hentikan service Clipper")
+    svc.add_argument("--service-status", action="store_true", help="Lihat status service")
+    svc.add_argument("--service-log", action="store_true", help="Tampilkan log service")
+    svc.add_argument("--service-host", default=None, help="Host untuk service (default 127.0.0.1)")
+    svc.add_argument("--service-port", type=int, default=None, help="Port untuk service (default 8420)")
+    svc.add_argument("--autostart", action="store_true",
+                     help="Alternatif tanpa pywin32: autostart lewat Task Scheduler")
+    svc.add_argument("--no-autostart", action="store_true", help="Hapus autostart Task Scheduler")
+    svc.add_argument("--shortcut", action="store_true", help="Buat shortcut Clipper di Desktop")
+    svc.add_argument("--run-service", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    service_code = handle_service_command(args)
+    if service_code is not None:
+        return service_code
 
     if args.doctor:
         return doctor(args.host, args.port)
