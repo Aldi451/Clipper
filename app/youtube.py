@@ -161,17 +161,41 @@ def _youtube_client():
 # pesan error yang bisa ditindaklanjuti
 # --------------------------------------------------------------------------- #
 CONSOLE_AUDIENCE_URL = "https://console.cloud.google.com/apis/credentials/consent"
+# batas tunggu login via browser (detik) — cukup untuk login manual, tidak menggantung selamanya
+BROWSER_LOGIN_TIMEOUT = 300
 CONSOLE_CREDENTIALS_URL = "https://console.cloud.google.com/apis/credentials"
 
 _HELP_TESTERS = {
     "title": "Google memblokir login: akunmu belum terdaftar sebagai test user",
     "steps": [
-        "Buka Google Cloud Console → APIs & Services → OAuth consent screen (menu 'Audience').",
+        "Buka Google Cloud Console → APIs & Services → OAuth consent screen (tab 'Audience'). "
+        "Pastikan project yang dibuka SAMA dengan project pemilik Client ID di Clipper "
+        "(nama app di pesan Google, mis. 'Tester clipper', adalah nama OAuth app-nya).",
         "Pastikan Publishing status = Testing dan User type = External.",
-        "Di bagian 'Test users' klik + ADD USERS, lalu masukkan email Google yang kamu pakai "
-        "untuk channel YouTube ini (harus sama persis).",
-        "Simpan, tunggu ±1 menit, lalu ulangi login. Kalau browser masih memakai akun Google "
-        "lain, coba mode Incognito.",
+        "Di bagian 'Test users' klik + ADD USERS, masukkan email Google yang tampil di halaman "
+        "blokir Google (mis. namakamu@gmail.com). Akun project owner TIDAK otomatis jadi test user.",
+        "Simpan, tunggu ±1 menit (kadang perlu 5 menit / logout-login), lalu ulangi login. "
+        "Kalau browser masih memakai akun Google lain, pakai mode Incognito.",
+        "Alternatif permanen: klik 'Publish app' → status Production. Selama app belum "
+        "diverifikasi Google, layar peringatan 'Google belum memverifikasi aplikasi ini' tetap "
+        "muncul — klik Advanced → Continue. Verifikasi hanya wajib kalau dipakai banyak orang.",
+        "Selama masih Testing, Google mematikan refresh token setiap 7 hari, jadi sesekali perlu "
+        "login ulang (publish app menghilangkan batasan ini).",
+    ],
+    "link": CONSOLE_AUDIENCE_URL,
+    "link_label": "Buka OAuth consent screen",
+}
+
+_HELP_WAIT_TIMEOUT = {
+    "title": "Login tidak selesai — tidak ada balasan dari Google",
+    "steps": [
+        "Halaman Google tidak mengirim balik hasil login ke Clipper (biasanya karena jendela "
+        "login ditutup, atau Google menampilkan halaman 'Access blocked').",
+        "Kalau di browser muncul 'Access blocked … 403 access_denied', akunmu belum terdaftar "
+        "sebagai test user: tambahkan di OAuth consent screen → Audience → Test users → "
+        "+ ADD USERS, lalu login lagi.",
+        "Kalau browser tidak terbuka otomatis, salin URL login yang tercetak di jendela Clipper "
+        "ke browser, atau pakai tombol 'Login dengan kode' yang tidak butuh localhost.",
     ],
     "link": CONSOLE_AUDIENCE_URL,
     "link_label": "Buka OAuth consent screen",
@@ -206,13 +230,19 @@ _HELP_EXPIRED = {
 def help_for(raw: str) -> dict[str, Any] | None:
     """Petunjuk langkah-demi-langkah untuk error OAuth yang sering muncul."""
     low = (raw or "").lower()
-    if "verification process" in low or "developer-approved testers" in low:
+    if any(k in low for k in ("timed out", "timeout", "tidak ada balasan", "tidak menerima balasan",
+                              "login tidak selesai")):
+        return _HELP_WAIT_TIMEOUT
+    # cocokkan juga pesan ramah hasil friendly_error(), bukan hanya teks mentah Google
+    if any(k in low for k in ("verification process", "developer-approved testers", "test user",
+                              "berstatus testing", "belum terdaftar")):
         return _HELP_TESTERS
     if "access_denied" in low or "access blocked" in low or "403" in low:
         return _HELP_TESTERS
-    if "invalid_client" in low or "unauthorized_client" in low or "client_secret" in low:
+    if any(k in low for k in ("invalid_client", "unauthorized_client", "client_secret",
+                              "client secret", "client id", "tipe oauth client", "tidak dikenali google")):
         return _HELP_INVALID_CLIENT
-    if "invalid_grant" in low or "expired" in low or "revoked" in low:
+    if any(k in low for k in ("invalid_grant", "expired", "revoked", "kedaluwarsa", "dicabut")):
         return _HELP_EXPIRED
     return None
 
@@ -236,6 +266,14 @@ def friendly_error(raw: str, default: str = "Gagal login ke YouTube") -> str:
             "Tambahkan email Google kamu di Google Cloud Console → APIs & Services → "
             "OAuth consent screen → Audience → Test users → + ADD USERS (pakai akun yang sama "
             "dengan channel YouTube-nya), simpan, lalu ulangi login."
+        )
+    if "timed out" in low or "tidak ada balasan" in low:
+        return (
+            "Login tidak selesai: Clipper tidak menerima balasan dari Google. Kalau di browser "
+            "muncul 'Access blocked … 403 access_denied', akunmu belum terdaftar sebagai test "
+            "user — tambahkan email tersebut di OAuth consent screen → Audience → Test users → "
+            "+ ADD USERS, lalu ulangi login. Kalau browser tidak terbuka, salin URL login dari "
+            "jendela Clipper ke browser, atau pakai 'Login dengan kode'."
         )
     if "access_denied" in low:
         return (
@@ -396,9 +434,21 @@ def local_browser_auth() -> dict[str, Any]:
     }
     flow = InstalledAppFlow.from_client_config(config, SCOPES)
     try:
-        creds = flow.run_local_server(port=0, prompt="consent", open_browser=True)
-    except Exception as exc:  # access_denied / invalid_client / port sibuk
-        raise YouTubeError(friendly_error(str(exc), "Login lewat browser gagal")) from exc
+        # Tanpa timeout_seconds, run_local_server menunggu selamanya. Kalau Google
+        # menampilkan "Access blocked" (app masih Testing & akun bukan test user),
+        # browser tidak pernah redirect balik → login menggantung tanpa pesan.
+        creds = flow.run_local_server(
+            port=0, prompt="consent", open_browser=True, timeout_seconds=BROWSER_LOGIN_TIMEOUT
+        )
+    except Exception as exc:  # access_denied / invalid_client / port sibuk / timeout
+        raw = str(exc)
+        if not raw.strip() or "timed out" in raw.lower():
+            raw = (
+                "Timed out waiting for response from authorization server. "
+                "Kalau di browser muncul 'Access blocked' / '403 access_denied', akun Google "
+                "yang dipakai belum terdaftar sebagai test user di OAuth consent screen."
+            )
+        raise YouTubeError(friendly_error(raw, "Login lewat browser gagal")) from exc
     save_token({
         "token": creds.token,
         "refresh_token": creds.refresh_token,

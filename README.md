@@ -301,6 +301,9 @@ belum diverifikasi.
 | Token mati tiap 7 hari | Selama app berstatus **Testing**, Google mematikan refresh token setelah 7 hari. Cukup klik **Login dengan kode** lagi. |
 | Mau tanpa login ulang? | Klik **Publish app** di OAuth consent screen. Untuk dipakai sendiri, verifikasi tidak wajib — cukup lewati layar peringatan. Verifikasi (bisa berhari-hari) hanya perlu kalau app dipakai banyak orang. |
 | Batas 100 test user | Status Testing maksimal 100 akun test user. |
+| Akun owner bukan otomatis tester | Akun yang membuat project Google Cloud **tetap** harus ditambahkan sendiri ke daftar *Test users*, kalau tidak akan kena blokir yang sama. |
+| Email harus sama persis | Yang login di browser harus akun yang didaftarkan. Kalau ada beberapa akun Google aktif, pakai Incognito. |
+| Login browser menggantung | Sejak v1.0.9, login via browser menunggu maksimal **5 menit** lalu berhenti dengan pesan jelas (dulu bisa menunggu selamanya). Halaman *Access blocked* tidak pernah mengirim balik hasilnya ke Clipper. |
 | `invalid_client` | Tipe OAuth client salah. Login pakai **kode** → tipe *TVs and Limited Input devices*; login via **browser** → tipe *Desktop app*. |
 | `invalid_grant` | Token sudah kedaluwarsa/dicabut → login ulang. |
 | API belum aktif | Kalau upload gagal `accessNotConfigured`, aktifkan **YouTube Data API v3** di Library. |
