@@ -648,6 +648,29 @@ sendiri, menambahkannya ke jalur pencarian, dan memakai folder yang sama untuk p
 3. Klik **Buka TikTok & login** → jendela browser terbuka → login (email/kode atau scan QR).
    Cookie disimpan lokal di `data/tiktok_profile/`, jadi cukup sekali. Hapus dengan **Hapus sesi**.
 
+**Kalau TikTok masih "belum terpasang" — pakai diagnosa (`tools/doctor.py`)**
+
+Daripada menebak, jalankan diagnosa. Ia memakai **modul deteksi yang sama** dengan aplikasi
+(`app/tiktok.py`), jadi hasilnya tidak pernah berbeda dengan yang dilihat Clipper.
+
+| Cara | Perintah | Yang dilakukan |
+|---|---|---|
+| Double-click | **`diagnosa_tiktok.bat`** | hanya membaca & melaporkan (tidak mengubah apa pun) |
+| Double-click | **`perbaiki_tiktok.bat`** | pasang `playwright` ke `.venv` + unduh browser bila perlu, lalu uji buka browser |
+| Terminal | `".venv\Scripts\python.exe" tools\doctor.py` | diagnosa |
+| Terminal | `".venv\Scripts\python.exe" tools\doctor.py --fix --verify` | perbaiki lalu uji |
+| Terminal | `".venv\Scripts\python.exe" tools\doctor.py --check-update` | bandingkan versi folder ini dengan versi terbaru di GitHub |
+| Otomatisasi | `... tools\doctor.py --json` | keluaran JSON (exit code 0 = siap, 2 = belum) |
+
+Yang dilaporkan: versi Clipper di folder **dan** versi server yang sedang jalan, lokasi
+`playwright` (di dalam `.venv` atau di folder user-site — sumber bug v1.1.4), browser yang
+terdeteksi beserta path-nya, Chromium Playwright, dan status siap/belum. Semua langkah juga ditulis
+ke `logs\tiktok-doctor-<waktu>.log`.
+
+Batas aman script ini: **default read-only**. `--fix` hanya memasang paket Python ke `.venv` dan
+mengunduh browser Chromium ke `%LOCALAPPDATA%\ms-playwright`; folder `data\` (video, klip, cookies,
+token YouTube, profil TikTok) tidak pernah disentuh, dan tidak butuh Administrator.
+
 **Upload** (tiga pintu masuk, pilih yang paling nyaman):
 
 1. **Tab TikTok → kartu "Upload ke TikTok"** — daftar semua clip yang sudah dirender, masing-masing

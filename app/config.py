@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "Clipper"
-VERSION = "1.1.5"
+VERSION = "1.1.6"
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
