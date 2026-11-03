@@ -1306,16 +1306,26 @@ async function renderTikTok(quiet = false) {
           API key, tidak perlu daftar aplikasi, dan tetap gratis. Yang dipasang hanya paket kecil
           <span class="mono">playwright</span>.
         </p>
-        <button class="btn tt" data-action="tt-setup">Pasang dukungan TikTok</button>
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          <button class="btn tt" data-action="tt-setup">Pasang dukungan TikTok</button>
+          <button class="btn ghost" data-action="tt-recheck">Periksa ulang</button>
+        </div>
+        ${ttDiagHtml(tt)}
       </div>`
     : !tt.ready
       ? `<div class="card">
           <div class="card-title"><h2>1 · Pilih browser</h2><span class="tag err">belum siap</span></div>
           <p class="hint">
-            Tidak ditemukan Chrome/Edge di komputer ini. Kamu bisa memasang Chrome/Edge, atau mengunduh
-            browser khusus Clipper (±130 MB, sekali saja).
+            Playwright sudah terpasang, tapi Clipper belum menemukan browser yang bisa dipakai.
+            Kalau komputer ini punya <b>Microsoft Edge</b> (semua Windows 10/11 punya), tekan
+            <b>Periksa ulang</b>. Kalau tidak ada, unduh browser khusus Clipper (±130 MB, sekali saja).
           </p>
-          <button class="btn tt" data-action="tt-browser" ${tt.installing ? "disabled" : ""}>Unduh browser Clipper</button>
+          <div class="row" style="gap:8px;flex-wrap:wrap">
+            <button class="btn tt" data-action="tt-browser" ${tt.installing ? "disabled" : ""}>
+              Unduh browser Clipper</button>
+            <button class="btn ghost" data-action="tt-recheck" ${tt.installing ? "disabled" : ""}>Periksa ulang</button>
+          </div>
+          ${ttDiagHtml(tt)}
         </div>`
       : `<div class="card">
           <div class="card-title"><h2>1 · Browser & sesi</h2>
@@ -1329,7 +1339,7 @@ async function renderTikTok(quiet = false) {
             <button class="btn tt" data-action="tt-login" ${tt.login_window ? "disabled" : ""}>
               ${tt.login_window ? "Jendela login terbuka…" : tt.logged_in ? "Buka TikTok Studio" : "Buka TikTok & login"}
             </button>
-            <button class="btn ghost" data-action="tt-refresh">Cek status</button>
+            <button class="btn ghost" data-action="tt-recheck">Periksa ulang</button>
             ${tt.logged_in ? `<button class="btn ghost danger" data-action="tt-logout">Hapus sesi</button>` : ""}
           </div>
           <p class="hint" style="margin-top:12px">
@@ -1467,6 +1477,31 @@ function ttUploadCardHtml(clips, tt, settings) {
     ${note}
     ${rows ? `<div class="tt-list">${rows}</div>` : ""}
   </div>`;
+}
+
+function ttDiagHtml(tt) {
+  const d = (tt && tt.diag) || {};
+  if (tt && tt.ready) return "";
+  const row = (label, value, mono) =>
+    `<div class="kv"><span>${label}</span><b class="${mono ? "mono" : ""}" style="word-break:break-all">${esc(
+      value || "—"
+    )}</b></div>`;
+  const browsers = (d.browsers || []).map((b) => `${b.channel}: ${b.path}`).join("\n");
+  return `<details class="diag">
+    <summary>Kenapa belum siap? (detail teknis)</summary>
+    <div class="kv-list" style="margin-top:10px">
+      ${row("Paket Playwright", d.playwright_ok ? "terpasang" : "tidak bisa dipakai")}
+      ${row("Pesan error", d.playwright_error || "—", true)}
+      ${row("Browser ditemukan", browsers || "tidak ada")}
+      ${row("Chromium Clipper", d.chromium ? "ada" : "belum diunduh")}
+      ${row("Python", `${d.python_version || "?"} · ${d.python || "?"}`, true)}
+      ${row("Folder paket", d.user_site || "—", true)}
+    </div>
+    <p class="hint" style="margin-top:10px">
+      Kalau mau coba manual, buka Command Prompt lalu jalankan perintah ini (sekali saja):
+    </p>
+    <pre class="mono diag-cmd">${esc(d.install_command || "")}</pre>
+  </details>`;
 }
 
 function ttProgressHtml(tt) {
@@ -2466,6 +2501,13 @@ document.addEventListener("click", async (e) => {
       target.innerHTML = `<span class="spinner"></span> Memasang…`;
       await api("/api/tiktok/setup", { method: "POST", body: { browser: true } });
       toast("Memasang dukungan TikTok…", "ok");
+      await renderTikTok();
+    } else if (action === "tt-recheck") {
+      const res = await api("/api/tiktok/recheck", { method: "POST" });
+      toast(
+        res && res.ready ? "Siap! Browser ditemukan." : "Masih belum siap — lihat detail teknis di kartu 1.",
+        res && res.ready ? "ok" : "bad"
+      );
       await renderTikTok();
     } else if (action === "tt-browser") {
       await api("/api/tiktok/browser", { method: "POST" });

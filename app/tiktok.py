@@ -71,13 +71,168 @@ def _say(message: str) -> None:
 # --------------------------------------------------------------------------- #
 # deteksi lingkungan
 # --------------------------------------------------------------------------- #
-def playwright_available() -> bool:
-    try:
-        from playwright.sync_api import sync_playwright  # type: ignore  # noqa: F401
+# --------------------------------------------------------------------------- #
+# impor Playwright (tahan kasus "pip bilang terpasang, tapi app tidak bisa impor")
+# --------------------------------------------------------------------------- #
+_import_state: dict[str, Any] = {"ok": False, "error": "", "path": ""}
 
-        return True
+
+def _site_dirs() -> list[Path]:
+    """Semua folder site-packages yang mungkin berisi Playwright."""
+    dirs: list[Path] = []
+    try:
+        import site
+
+        candidates = [site.getusersitepackages()]
+        try:
+            candidates.extend(site.getsitepackages())
+        except Exception:
+            pass
+        for item in candidates:
+            if item:
+                path = Path(item)
+                if path not in dirs:
+                    dirs.append(path)
     except Exception:
+        pass
+    ver = f"Python{sys.version_info.major}{sys.version_info.minor}"
+    for root in (
+        os.environ.get("APPDATA", ""),
+        os.environ.get("LOCALAPPDATA", ""),
+        str(Path.home() / "AppData" / "Roaming"),
+    ):
+        if root:
+            path = Path(root) / "Python" / ver / "site-packages"
+            if path not in dirs:
+                dirs.append(path)
+    return dirs
+
+
+def playwright_available(refresh: bool = False) -> bool:
+    """Playwright bisa diimpor oleh proses ini?"""
+    if refresh:
+        for name in [m for m in list(sys.modules) if m == "playwright" or m.startswith("playwright.")]:
+            sys.modules.pop(name, None)
+        _import_state.update({"ok": False, "error": ""})
+    if _import_state["ok"]:
+        return True
+    try:
+        import playwright.sync_api  # noqa: F401
+
+        _import_state.update({"ok": True, "error": "", "path": str(Path(playwright.__file__))})
+        return True
+    except Exception as exc:  # noqa: BLE001 - pesan aslinya penting untuk diagnosa
+        _import_state.update({"ok": False, "error": f"{type(exc).__name__}: {exc}".strip()})
         return False
+
+
+def import_error() -> str:
+    playwright_available()
+    return str(_import_state.get("error") or "")
+
+
+def _probe_playwright() -> tuple[str, str]:
+    """Tanya proses Python terpisah: di mana Playwright berada / kenapa gagal.
+
+    Dijalankan dengan lingkungan "bersih" (PYTHONNOUSERSITE dibuang) dan semua
+    folder site-packages ditambahkan, jadi tetap bisa menemukan Playwright walau
+    proses utama tidak bisa mengimpornya.
+    """
+    import json
+
+    dirs = [str(path) for path in _site_dirs()]
+    code = (
+        "import json, sys\n"
+        "for p in json.loads(sys.argv[1]):\n"
+        "    if p not in sys.path: sys.path.append(p)\n"
+        "try:\n"
+        "    import playwright, playwright.sync_api\n"
+        "    print(playwright.__file__)\n"
+        "except Exception as exc:\n"
+        "    print('ERR ' + type(exc).__name__ + ': ' + str(exc))\n"
+        "    sys.exit(3)\n"
+    )
+    env = dict(os.environ)
+    for key in ("PYTHONNOUSERSITE", "PYTHONHOME", "PYTHONPATH"):
+        env.pop(key, None)
+    try:
+        flags: dict[str, Any] = {}
+        if os.name == "nt":
+            flags["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(
+            [sys.executable, "-c", code, json.dumps(dirs)],
+            capture_output=True, text=True, errors="replace", timeout=180, env=env, **flags,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return "", f"tidak bisa menjalankan Python: {exc}"
+    out = (proc.stdout or "").strip()
+    if proc.returncode == 0 and out:
+        return out.splitlines()[-1].strip(), ""
+    err = (out or (proc.stderr or "").strip()).splitlines()
+    message = err[-1].strip() if err else f"kode keluar {proc.returncode}"
+    return "", message[4:] if message.startswith("ERR ") else message
+
+
+def _ensure_importable() -> tuple[bool, str]:
+    """Pastikan Playwright bisa dipakai proses ini — perbaiki sys.path kalau perlu."""
+    if playwright_available(refresh=True):
+        return True, ""
+    found, detail = _probe_playwright()
+    added: list[str] = []
+    candidates: list[Path] = [Path(found).parent.parent] if found else []
+    candidates += _site_dirs()
+    for candidate in candidates:
+        text = str(candidate)
+        if text and text not in sys.path:
+            sys.path.append(text)
+            added.append(text)
+    if added and playwright_available(refresh=True):
+        return True, ""
+    return False, detail or import_error() or "playwright tidak ditemukan"
+
+
+_ensure_cache: dict[str, Any] = {"at": 0.0, "ok": False}
+
+
+def ensure_playwright(max_age: float = 15.0) -> bool:
+    """Coba pakai Playwright, lengkapi sys.path kalau perlu (hasil di-cache sebentar)."""
+    if playwright_available():
+        return True
+    if time.time() - float(_ensure_cache.get("at") or 0) < max_age:
+        return bool(_ensure_cache.get("ok"))
+    ok, _why = _ensure_importable()
+    _ensure_cache.update({"at": time.time(), "ok": ok})
+    return ok
+
+
+# --------------------------------------------------------------------------- #
+# deteksi browser
+# --------------------------------------------------------------------------- #
+def _registry_browsers() -> list[tuple[str, Path]]:
+    """Browser resmi yang terdaftar di Windows (App Paths)."""
+    if os.name != "nt":
+        return []
+    found: list[tuple[str, Path]] = []
+    try:
+        import winreg
+    except Exception:
+        return found
+    names = {"msedge.exe": "msedge", "chrome.exe": "chrome", "brave.exe": "brave", "vivaldi.exe": "vivaldi"}
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for exe, channel in names.items():
+            try:
+                with winreg.OpenKey(
+                    hive, rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}"
+                ) as key:
+                    value, _ = winreg.QueryValueEx(key, "")
+                path = Path(str(value).strip('"'))
+                if path.exists() and path.is_file():
+                    found.append((channel, path))
+            except OSError:
+                continue
+            except Exception:
+                continue
+    return found
 
 
 def _browser_paths() -> list[tuple[str, Path]]:
@@ -87,12 +242,21 @@ def _browser_paths() -> list[tuple[str, Path]]:
         roots = [
             os.environ.get("PROGRAMFILES", r"C:\Program Files"),
             os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+            os.environ.get("PROGRAMW6432", r"C:\Program Files"),
             os.environ.get("LOCALAPPDATA", ""),
         ]
         relative = {
-            "msedge": [r"Microsoft\Edge\Application\msedge.exe"],
-            "chrome": [r"Google\Chrome\Application\chrome.exe"],
+            "msedge": [
+                r"Microsoft\Edge\Application\msedge.exe",
+                r"Microsoft\Edge Beta\Application\msedge.exe",
+            ],
+            "chrome": [
+                r"Google\Chrome\Application\chrome.exe",
+                r"Google\Chrome Beta\Application\chrome.exe",
+                r"Chromium\Application\chrome.exe",
+            ],
             "brave": [r"BraveSoftware\Brave-Browser\Application\brave.exe"],
+            "vivaldi": [r"Vivaldi\Application\vivaldi.exe"],
         }
     else:
         roots = ["/usr/bin", "/usr/local/bin", "/opt/google/chrome", "/snap/bin"]
@@ -107,19 +271,33 @@ def _browser_paths() -> list[tuple[str, Path]]:
                 continue
             for name in names:
                 candidate = Path(root) / name
-                if candidate.exists() and candidate.is_file():
-                    found.append((channel, candidate))
+                try:
+                    if candidate.exists() and candidate.is_file():
+                        found.append((channel, candidate))
+                except OSError:
+                    continue
+    found.extend(_registry_browsers())
     if not found:
         for binary, channel in (
             ("google-chrome", "chrome"),
             ("chromium", "chrome"),
             ("microsoft-edge", "msedge"),
+            ("msedge", "msedge"),
+            ("chrome", "chrome"),
             ("brave-browser", "brave"),
         ):
             path = shutil.which(binary)
             if path:
                 found.append((channel, Path(path)))
-    return found
+    unique: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for channel, path in found:
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((channel, path))
+    return unique
 
 
 def browser_channel() -> str:
@@ -128,19 +306,32 @@ def browser_channel() -> str:
     return browsers[0][0] if browsers else ""
 
 
-def chromium_downloaded() -> bool:
-    roots = []
-    if os.name == "nt":
-        local = os.environ.get("LOCALAPPDATA", "")
-        if local:
-            roots.append(Path(local) / "ms-playwright")
+def _chromium_roots() -> list[Path]:
+    roots: list[Path] = []
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        roots.append(Path(local) / "ms-playwright")
     roots.append(Path.home() / ".cache" / "ms-playwright")
-    for root in roots:
+    return roots
+
+
+def chromium_downloaded() -> bool:
+    """Chromium bawaan Playwright benar-benar ada (folder + file exe-nya)."""
+    for root in _chromium_roots():
         try:
-            if root.exists() and any(root.glob("chromium-*")):
-                return True
+            if not root.exists():
+                continue
+            entries = [p for p in root.glob("chromium-*") if p.is_dir()]
         except OSError:
             continue
+        for entry in entries:
+            for exe in ("chrome.exe", "chrome", "headless_shell.exe"):
+                for candidate in (entry / exe, entry / "chrome-win" / exe, entry / "chrome-linux" / exe):
+                    try:
+                        if candidate.exists() and candidate.is_file():
+                            return True
+                    except OSError:
+                        continue
     return False
 
 
@@ -170,9 +361,35 @@ def _mark_logged_in(value: bool = True) -> None:
 
 def ready() -> bool:
     """Siap dipakai: Playwright terpasang dan ada browser yang bisa dijalankan."""
-    if not playwright_available():
+    if not ensure_playwright():
         return False
     return bool(browser_channel()) or chromium_downloaded()
+
+
+def install_command() -> str:
+    """Perintah manual kalau pemasangan otomatis gagal (bisa disalin user)."""
+    return f'"{sys.executable}" -m playwright install chromium'
+
+
+def diag() -> dict[str, Any]:
+    """Alasan teknis kenapa belum siap — ditampilkan di halaman TikTok."""
+    browsers = _browser_paths()
+    dirs = _site_dirs()
+    return {
+        "python": sys.executable,
+        "python_version": sys.version.split()[0],
+        "user_site": str(dirs[0]) if dirs else "",
+        "user_site_in_path": bool(dirs and str(dirs[0]) in sys.path),
+        "no_user_site": os.environ.get("PYTHONNOUSERSITE", ""),
+        "playwright_ok": ensure_playwright(),
+        "playwright_error": import_error(),
+        "playwright_path": str(_import_state.get("path") or ""),
+        "browsers": [{"channel": c, "path": str(p)} for c, p in browsers],
+        "chromium": chromium_downloaded(),
+        "chromium_dirs": [str(p) for p in _chromium_roots()],
+        "install_command": install_command(),
+        "os": f"{os.name} {sys.platform}",
+    }
 
 
 def status() -> dict[str, Any]:
@@ -180,7 +397,7 @@ def status() -> dict[str, Any]:
         state = dict(_state)
     browsers = _browser_paths()
     return {
-        "installed": playwright_available(),
+        "installed": ensure_playwright(),
         "ready": ready(),
         "browser": browsers[0][0] if browsers else "",
         "browser_path": str(browsers[0][1]) if browsers else "",
@@ -192,12 +409,33 @@ def status() -> dict[str, Any]:
         "installing": bool(state.get("installing") or state.get("installing_browser")),
         "message": state.get("message") or "",
         "log": state.get("log", [])[-12:],
+        "diag": diag(),
     }
 
 
 # --------------------------------------------------------------------------- #
 # pemasangan (sekali klik dari UI)
 # --------------------------------------------------------------------------- #
+def _sub_env() -> dict[str, str]:
+    """Lingkungan untuk subprocess: user-site jangan dimatikan, path paket ikut."""
+    env = dict(os.environ)
+    for key in ("PYTHONNOUSERSITE", "PYTHONHOME"):
+        env.pop(key, None)
+    extra: list[str] = []
+    found = str(_import_state.get("path") or "")
+    if found:
+        extra.append(str(Path(found).parent.parent))
+    extra.extend(str(path) for path in _site_dirs() if path.exists())
+    current = env.get("PYTHONPATH", "")
+    have = current.split(os.pathsep) if current else []
+    ordered: list[str] = []
+    for item in extra:
+        if item and item not in ordered and item not in have:
+            ordered.append(item)
+    env["PYTHONPATH"] = os.pathsep.join(ordered + have)
+    return env
+
+
 def _run(cmd: list[str], label: str) -> bool:
     _say(label)
     try:
@@ -205,19 +443,67 @@ def _run(cmd: list[str], label: str) -> bool:
         if os.name == "nt":
             flags["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, errors="replace", timeout=1800, **flags
+            cmd, capture_output=True, text=True, errors="replace", timeout=1800,
+            env=_sub_env(), **flags,
         )
     except Exception as exc:  # noqa: BLE001
         _say(f"Gagal: {exc}")
         return False
-    tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-15:]
+    raw = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip().splitlines()
+    clean = [line.strip() for line in raw if line.strip() and line.strip() not in ("{", "}")]
+    if proc.returncode != 0:
+        hits = [line for line in clean
+                if re.search(r"error|gagal|failed|denied|timeout|refused|resolve|not found", line, re.I)]
+        tail = hits[-3:] if hits else clean[-3:]
+    else:
+        tail = clean[-6:]
+    seen: set[str] = set()
     for line in tail:
-        if line.strip():
-            _say(line.strip())
+        text = line[:220]
+        if text in seen:
+            continue
+        seen.add(text)
+        _say(text)
     if proc.returncode != 0:
         _say(f"{label} gagal (kode {proc.returncode})")
         return False
     return True
+
+
+def _pip_install() -> bool:
+    """Pasang Playwright — coba --user dulu, lalu biasa."""
+    attempts = (
+        ([sys.executable, "-m", "pip", "install", "--upgrade", "--user", "playwright"],
+         "pip install playwright (--user)"),
+        ([sys.executable, "-m", "pip", "install", "--upgrade", "playwright"],
+         "pip install playwright"),
+    )
+    for cmd, label in attempts:
+        if _run(cmd, label):
+            return True
+    return False
+
+
+def _install_browser_sync() -> bool:
+    with _state_lock:
+        _state["installing_browser"] = True
+    try:
+        ok = _run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            "Mengunduh browser Chromium (±130 MB, sekali saja)…",
+        )
+        if ok and chromium_downloaded():
+            _say("Browser Clipper siap dipakai.")
+            return True
+        if ok:
+            _say("Unduhan selesai, tapi file browser tidak ditemukan — coba lagi.")
+        else:
+            _say("Unduhan browser gagal. Periksa koneksi internet, lalu coba lagi.")
+            _say(f"Perintah manual: {install_command()}")
+        return False
+    finally:
+        with _state_lock:
+            _state["installing_browser"] = False
 
 
 def install(with_browser: bool = True) -> dict[str, Any]:
@@ -227,35 +513,38 @@ def install(with_browser: bool = True) -> dict[str, Any]:
             return status()
         _state["installing"] = True
         _state["log"] = []
-    _say("Memasang Playwright (paket kecil, sekali saja)…")
+    _say("Memasang dukungan TikTok (sekali saja)…")
 
     def worker() -> None:
         try:
-            ok = _run([sys.executable, "-m", "pip", "install", "--upgrade", "playwright"],
-                      "pip install playwright")
+            ok, why = _ensure_importable()
             if not ok:
-                _say("Pemasangan gagal. Periksa koneksi internet, lalu coba lagi.")
+                _say("Playwright belum bisa dipakai — memasang paketnya…")
+                _pip_install()
+                ok, why = _ensure_importable()
+            if not ok:
+                _say(f"Paket Playwright belum bisa dipakai: {why}")
+                _say(f"Coba jalankan manual: \"{sys.executable}\" -m pip install --user playwright")
                 return
-            if with_browser and not browser_channel() and not chromium_downloaded():
-                with _state_lock:
-                    _state["installing_browser"] = True
-                try:
-                    got_browser = _run(
-                        [sys.executable, "-m", "playwright", "install", "chromium"],
-                        "Mengunduh browser Chromium (±130 MB)…",
-                    )
-                finally:
-                    with _state_lock:
-                        _state["installing_browser"] = False
-                if not got_browser:
-                    _say("Paket Playwright siap, tapi browser belum ada. Pasang Google Chrome/Edge, "
-                         "atau klik \"Unduh browser Clipper\".")
+            _say("Paket Playwright siap.")
+
+            if browser_channel():
+                _say(f"Memakai browser yang sudah terpasang: {_browser_paths()[0][1]}")
+            elif chromium_downloaded():
+                _say("Memakai Chromium bawaan Playwright yang sudah ada.")
+            elif with_browser:
+                if not _install_browser_sync():
                     return
+
             if ready():
                 _say("Selesai. Tekan \"Buka TikTok & login\" untuk mulai.")
+            elif not browser_channel() and not chromium_downloaded():
+                _say(
+                    "Paket Playwright terpasang, tapi belum ada browser. Pasang Google Chrome/Edge, "
+                    "atau klik \"Unduh browser Clipper\"."
+                )
             else:
-                _say("Paket terpasang, tapi browser belum ditemukan. Pasang Chrome/Edge atau klik "
-                     "\"Unduh browser Clipper\".")
+                _say(f"Browser ada, tapi Playwright gagal dipakai: {import_error() or why}")
         finally:
             with _state_lock:
                 _state["installing"] = False
@@ -270,18 +559,43 @@ def install_browser() -> dict[str, Any]:
     with _state_lock:
         if _state["installing_browser"]:
             return status()
-        _state["installing_browser"] = True
     _say("Mengunduh Chromium untuk Playwright (±130 MB)…")
 
     def worker() -> None:
         try:
-            _run([sys.executable, "-m", "playwright", "install", "chromium"],
-                 "playwright install chromium")
+            ok, why = _ensure_importable()
+            if not ok:
+                _say("Playwright belum bisa dipakai — memasang paketnya dulu…")
+                _pip_install()
+                ok, why = _ensure_importable()
+            if not ok:
+                _say(f"Paket Playwright belum bisa dipakai: {why}")
+                return
+            _install_browser_sync()
         finally:
             with _state_lock:
                 _state["installing_browser"] = False
 
     threading.Thread(target=worker, daemon=True).start()
+    return status()
+
+
+def recheck() -> dict[str, Any]:
+    """Periksa ulang tanpa memasang apa pun (untuk tombol "Periksa ulang")."""
+    _ensure_cache.update({"at": 0.0, "ok": False})
+    ok, why = _ensure_importable()
+    _ensure_cache.update({"at": time.time(), "ok": ok})
+    if ok:
+        _say("Playwright siap dipakai.")
+    else:
+        _say(f"Playwright belum siap: {why}")
+    browsers = _browser_paths()
+    if browsers:
+        _say(f"Browser ditemukan: {browsers[0][1]}")
+    elif chromium_downloaded():
+        _say("Chromium bawaan Playwright ditemukan.")
+    else:
+        _say("Belum ada browser yang bisa dipakai.")
     return status()
 
 
@@ -304,17 +618,27 @@ def _launch(playwright: Any, headless: bool = False) -> Any:
         ],
         ignore_default_args=["--enable-automation"],
     )
-    channel = browser_channel()
-    try:
-        if channel:
-            return playwright.chromium.launch_persistent_context(channel=channel, **options)
-        return playwright.chromium.launch_persistent_context(**options)
-    except Exception as exc:  # noqa: BLE001
-        raise TikTokError(
-            "Browser tidak bisa dibuka. Pastikan Chrome atau Edge terpasang, "
-            "atau klik \"Unduh browser\" di halaman TikTok. "
-            f"Detail: {str(exc).splitlines()[0][:180]}"
-        ) from exc
+    browsers = _browser_paths()
+    attempts: list[dict[str, Any]] = []
+    if browsers:
+        channel, path = browsers[0]
+        attempts.append({"executable_path": str(path)})
+        if channel in ("chrome", "msedge"):
+            attempts.append({"channel": channel})
+    attempts.append({})
+    last_error: Exception | None = None
+    for extra in attempts:
+        try:
+            return playwright.chromium.launch_persistent_context(**options, **extra)
+        except Exception as exc:  # noqa: BLE001 - coba cara lain dulu
+            last_error = exc
+            continue
+    detail = str(last_error).splitlines()[0][:180] if last_error else "tidak diketahui"
+    raise TikTokError(
+        "Browser tidak bisa dibuka. Pastikan Chrome atau Edge terpasang, "
+        "atau klik \"Unduh browser\" di halaman TikTok. "
+        f"Detail: {detail}"
+    )
 
 
 def _page(context: Any) -> Any:
@@ -453,8 +777,11 @@ def _wait_published(page: Any, timeout: float) -> str:
 # --------------------------------------------------------------------------- #
 def open_login_window(wait_seconds: float = 900) -> dict[str, Any]:
     """Buka jendela browser TikTok supaya user bisa login sekali."""
-    if not playwright_available():
-        raise TikTokError("Playwright belum terpasang. Klik \"Pasang dukungan TikTok\" dulu.")
+    if not _ensure_importable()[0]:
+        raise TikTokError(
+            "Playwright belum bisa dipakai. Buka halaman TikTok di Clipper → "
+            "klik \"Pasang dukungan TikTok\" (sekali saja), lalu \"Periksa ulang\"."
+        )
     with _state_lock:
         if _state["login_window"]:
             return status()
@@ -548,9 +875,9 @@ def upload_video(
     path = Path(file_path)
     if not path.exists():
         raise TikTokError("File clip belum ada — render dulu")
-    if not playwright_available():
+    if not _ensure_importable()[0]:
         raise TikTokError(
-            "Dukungan TikTok belum terpasang. Buka halaman TikTok di Clipper → "
+            "Dukungan TikTok belum bisa dipakai. Buka halaman TikTok di Clipper → "
             "klik \"Pasang dukungan TikTok\" (sekali saja, butuh internet)."
         )
     progress = on_progress or (lambda fraction, message: None)
