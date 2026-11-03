@@ -588,12 +588,23 @@ TikTok tidak memberi API upload gratis untuk perorangan (butuh aplikasi develope
 Clipper memakai cara yang tetap gratis dan tidak butuh persetujuan siapa pun: **mengemudikan
 browser di komputer kamu sendiri**.
 
+Kalau pernah muncul pesan **"Paket terpasang, tapi browser belum ditemukan"** padahal Chrome/Edge ada,
+itu bug lama yang sudah diperbaiki di **v1.1.4**: pip memasang `playwright` ke folder *user site*
+(`%APPDATA%\Python\Python312\site-packages`) yang kadang tidak ikut terbaca oleh Clipper, sehingga
+paketnya dianggap belum ada dan unduhan browser ikut gagal. Sekarang Clipper mencari lokasi paket itu
+sendiri, menambahkannya ke jalur pencarian, dan memakai folder yang sama untuk perintah
+`playwright install`. Tidak ada yang perlu dipasang ulang.
+
 **Setup sekali:**
 
 1. Buka tab **TikTok** di Clipper → **Pasang dukungan TikTok**
    (memasang paket `playwright` ± 1 MB; butuh internet sekali).
-2. Clipper otomatis memakai **Chrome / Edge** yang sudah terpasang di Windows. Kalau tidak ada,
+2. Clipper otomatis memakai **Chrome / Edge / Brave / Vivaldi** yang sudah terpasang di Windows
+   (dicari di Program Files, AppData, dan registry `App Paths`). Kalau tidak ada,
    klik **Unduh browser Clipper** (± 130 MB).
+   Kalau status masih "belum siap", tekan **Periksa ulang** — di kartu 1 ada panel
+   **"Kenapa belum siap?"** yang menampilkan pesan error asli, lokasi Python, dan perintah manual
+   yang bisa disalin.
 3. Klik **Buka TikTok & login** → jendela browser terbuka → login (email/kode atau scan QR).
    Cookie disimpan lokal di `data/tiktok_profile/`, jadi cukup sekali. Hapus dengan **Hapus sesi**.
 

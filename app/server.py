@@ -805,6 +805,11 @@ def create_app() -> FastAPI:
         with_browser = bool(payload.get("browser", True))
         return _tt_guard(lambda: tiktok.install(with_browser=with_browser))
 
+    @app.post("/api/tiktok/recheck")
+    def tt_recheck() -> Any:
+        """Periksa ulang Playwright/browser tanpa memasang apa pun."""
+        return _tt_guard(tiktok.recheck)
+
     @app.post("/api/tiktok/browser")
     def tt_browser() -> Any:
         return _tt_guard(tiktok.install_browser)
