@@ -1482,6 +1482,22 @@ function ttUploadCardHtml(clips, tt, settings) {
 function ttDiagHtml(tt) {
   const d = (tt && tt.diag) || {};
   if (tt && tt.ready) return "";
+  if (!tt.diag) {
+    // backend masih versi lama: tampilan baru tapi kode server belum diperbarui
+    return `<div class="notice-warn">
+      <b>Kode Clipper masih versi lama.</b>
+      <p class="hint" style="margin:6px 0 0">
+        Halaman ini sudah versi baru, tapi server Clipper yang jalan masih versi lama.
+        Perbaikan pemasangan TikTok ikut di versi baru, jadi ini harus diperbarui dulu:
+      </p>
+      <ol class="hint" style="margin:8px 0 0 18px;line-height:1.9">
+        <li>Tutup jendela Clipper (dan jendela hitam yang ikut terbuka).</li>
+        <li>Double-click <b>update.bat</b> di folder Clipper (kalau belum ada, lihat README bagian <b>Memperbarui Clipper</b>).</li>
+        <li>Setelah selesai, jalankan <b>run.bat</b> lagi, lalu tekan <b>Periksa ulang</b>.</li>
+      </ol>
+      <p class="hint" style="margin-top:10px">Versi server yang sedang jalan: <b>${esc((state.health && state.health.version) || "?")}</b></p>
+    </div>`;
+  }
   const row = (label, value, mono) =>
     `<div class="kv"><span>${label}</span><b class="${mono ? "mono" : ""}" style="word-break:break-all">${esc(
       value || "—"
