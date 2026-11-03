@@ -617,6 +617,12 @@ def main() -> int:
     url = f"http://{host_label}:{args.port}"
 
     head("Clipper siap")
+    try:
+        from app.config import VERSION as _VERSION
+
+        say(f"  Versi           : {_VERSION}")
+    except Exception:
+        pass
     say(f"  Buka di browser : {url}")
     say(f"  Data lokal      : {(ROOT / 'data')}")
     say(f"  Python          : {sys.executable}")

@@ -470,14 +470,19 @@ def _run(cmd: list[str], label: str) -> bool:
     return True
 
 
+def _in_venv() -> bool:
+    return sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+
+
 def _pip_install() -> bool:
-    """Pasang Playwright — coba --user dulu, lalu biasa."""
-    attempts = (
-        ([sys.executable, "-m", "pip", "install", "--upgrade", "--user", "playwright"],
-         "pip install playwright (--user)"),
-        ([sys.executable, "-m", "pip", "install", "--upgrade", "playwright"],
-         "pip install playwright"),
-    )
+    """Pasang Playwright — di venv langsung biasa, di Python sistem coba --user dulu."""
+    base = [sys.executable, "-m", "pip", "install", "--upgrade"]
+    attempts: list[tuple[list[str], str]] = []
+    if _in_venv():
+        attempts.append((base + ["playwright"], "pip install playwright"))
+    else:
+        attempts.append((base + ["--user", "playwright"], "pip install playwright (--user)"))
+        attempts.append((base + ["playwright"], "pip install playwright"))
     for cmd, label in attempts:
         if _run(cmd, label):
             return True

@@ -120,6 +120,46 @@ Menutup jendela = mematikan Clipper.
 
 ---
 
+## Memperbarui Clipper (setelah dapat perbaikan)
+
+Perbaikan baru **tidak akan terpakai** kalau hanya menutup lalu membuka Clipper — kode di folder
+harus diperbarui dulu. Versi yang sedang jalan selalu terlihat di **kiri bawah layar** (`v1.1.5`)
+dan di baris **`Versi`** saat Clipper start di terminal.
+
+**Cara termudah (Windows):**
+
+1. Tutup jendela Clipper (dan jendela hitam yang ikut terbuka).
+2. Double-click **`update.bat`** — skrip ini otomatis:
+   - menghentikan Clipper yang masih jalan (termasuk `ClipperService.exe`),
+   - mengambil kode terbaru (`git pull` kalau folder ini repo git, kalau tidak mengunduh
+     `main` dari GitHub),
+   - memasang dependensi baru kalau ada,
+   - menampilkan **versi sebelum → sesudah**.
+3. Jalankan **`run.bat`** lagi → buka tab TikTok → **Periksa ulang**.
+
+Data Bang **tidak disentuh**: `data\` (video, klip, cookies, token YouTube, profil TikTok),
+`.env`, dan `logs\` tidak pernah ditimpa update.
+
+**Kalau `update.bat` belum ada** (folder masih sangat lama), unduh dulu satu file ini:
+
+```powershell
+powershell -NoProfile -Command "Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/Aldi451/Clipper/main/update.bat -OutFile update.bat"
+```
+
+Atau unduh seluruh kode: <https://github.com/Aldi451/Clipper/archive/refs/heads/main.zip>,
+extract, lalu salin `app\`, `web\`, `run.py`, `requirements.txt`, dan `*.bat` ke folder Clipper
+(**jangan** salin/menimpa folder `data\`).
+
+**Kalau folder ini repo git**, cukup:
+
+```bat
+git pull
+```
+lalu jalankan `run.bat` lagi.
+
+> UI Clipper sekarang dikirim dengan `Cache-Control: no-cache`, jadi setelah update browser
+> langsung memakai `app.js` baru — cukup refresh biasa (F5), tidak perlu Ctrl+F5.
+
 ## Cara pakai (3 langkah)
 
 1. **Buat Clip** → tempel link atau drop file. Atur jumlah clip, durasi min/maks, gaya video.

@@ -146,6 +146,12 @@ h3 { font-size: 15px; margin: 0 0 4px; }
 .card-title h2, .card-title h3 { margin: 0; }
 
 /* daftar kunci–nilai (info folder data) */
+.notice-warn {
+  margin-top: 14px; padding: 12px 14px; border-radius: 10px; font-size: 12.5px;
+  background: rgba(255, 138, 128, 0.08); border: 1px solid rgba(255, 138, 128, 0.35);
+}
+.notice-warn b { color: #ffb4a8; }
+
 .diag {
   margin-top: 14px; padding: 10px 12px; border-radius: 10px;
   background: rgba(255, 255, 255, 0.03); border: 1px solid var(--line, rgba(255, 255, 255, 0.07));

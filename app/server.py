@@ -998,6 +998,19 @@ def create_app() -> FastAPI:
         model = str(payload.get("model") or transcribe.current_model())
         return transcribe.start_download(model)
 
+    @app.middleware("http")
+    async def no_stale_ui(request: Request, call_next):
+        """UI (html/js/css) harus selalu dicek ulang, supaya setelah update Clipper
+        browser tidak memakai app.js lama yang membuat halaman terlihat "tidak berubah"."""
+        response = await call_next(request)
+        path = request.url.path
+        if not path.startswith("/api/") and (
+            path in ("/", "/index.html")
+            or path.endswith((".js", ".css", ".html"))
+        ):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
     @app.exception_handler(Exception)
     async def unhandled(request: Request, exc: Exception) -> JSONResponse:  # pragma: no cover
         return JSONResponse(status_code=500, content={"detail": str(exc)[:500]})
