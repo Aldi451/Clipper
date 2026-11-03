@@ -707,6 +707,30 @@ Catatan:
 
 ---
 
+## Backup: bisa dialihkan ke YouTube? (sebagian)
+
+**Yang bisa:** file **clip hasil render** (`data\clips\*.mp4`) → diunggah ke channel Bang sebagai
+video **private** (= arsip offsite gratis, tidak muncul di channel maupun pencarian).
+
+**Yang tidak bisa:** database `clipper.db`, `settings.json`, `.env`, cookies, dan token YouTube.
+YouTube hanya menerima berkas video — bukan zip/arsip, jadi bukan tempat menyimpan data Clipper.
+Untuk data non-video, opsi yang benar adalah **Google Drive** (15 GB gratis, butuh izin/scope
+tambahan) atau tetap di folder lokal.
+
+**Batas keras kuota YouTube:** 10.000 unit/hari per project, 1 unggahan video = 1.600 unit →
+**maksimal 6 video per hari**. Script mengirim 5 per jalan dan melanjutkan sisanya besok; berkas
+yang sudah pernah dikirim tidak dikirim ulang (ada buku besar `data\backup_youtube.json`).
+
+```bat
+backup_youtube.bat                  REM rencana saja (tidak mengunggah)
+backup_youtube.bat --upload         REM kirim, maksimal 5 berkas
+backup_youtube.bat --upload --limit 2 --privacy unlisted
+backup_youtube.bat --show           REM daftar yang sudah di-backup
+```
+
+Atau lewat terminal: `.venv\Scripts\python.exe tools\backup_youtube.py --upload`.
+Butuh akun YouTube yang sudah terhubung (tab **YouTube** → Hubungkan akun).
+
 ## Upload ke YouTube Shorts (sekali setup, gratis)
 
 YouTube mewajibkan OAuth client milik kamu sendiri. Sekali setup, gratis, tanpa kartu kredit:

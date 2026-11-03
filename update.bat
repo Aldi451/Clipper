@@ -86,7 +86,7 @@ if "!GOT!"=="0" (
   for %%D in (app web tools assets) do (
     if exist "!SRC!\%%D" robocopy "!SRC!\%%D" "%%D" /e /nfl /ndl /njh /njs /nc /ns >nul
   )
-  for %%F in (run.py requirements.txt README.md run.bat repair.bat update.bat service.bat build_service_exe.bat diagnosa_tiktok.bat perbaiki_tiktok.bat) do (
+  for %%F in (run.py requirements.txt README.md run.bat repair.bat update.bat service.bat build_service_exe.bat diagnosa_tiktok.bat perbaiki_tiktok.bat backup_youtube.bat) do (
     if exist "!SRC!\%%F" copy /y "!SRC!\%%F" "%%F" >nul
   )
   echo        [OK] kode diperbarui dari unduhan.
