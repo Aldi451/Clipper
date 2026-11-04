@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-from . import analyze, db, editor, ingest, media, subs, tiktok, transcribe, youtube
+from . import analyze, db, editor, ingest, media, speech, subs, tiktok, transcribe, youtube
 from .config import WORK_DIR, load_settings
 from .fsutil import safe_unlink
 from .paths import resolve_media_path
@@ -199,6 +199,26 @@ def _run_analysis(job_id: str) -> None:
                 safe_unlink(old_file)
             db.delete_clip(clip["id"])
 
+        # 5c) hook vs ucapan: kalau hook hasil parafrase tidak ada di ucapan,
+        # tandai supaya UI bisa menawarkan versi verbatim (teks == suara).
+        hook_speech: dict[str, dict[str, Any]] = {}
+        for idx, cand in enumerate(candidates):
+            if not transcript:
+                continue
+            try:
+                segs = editor.normalize_segments(
+                    [{"start": cand.start, "end": cand.start + cand.duration, "speed": 1.0}],
+                    {"start": cand.start, "duration": cand.duration}, float((job or {}).get("duration") or 0),
+                )
+                spoken = speech.words_in_output(transcript, segs)
+                check = speech.verify_text(cand.hook, spoken)
+                hook_speech[idx] = {
+                    "ok": check["ok"], "ratio": check["ratio"],
+                    "speech_text": speech.hook_from_speech(spoken)["text"],
+                }
+            except Exception:
+                continue
+
         for idx, cand in enumerate(candidates):
             db.create_clip(
                 job_id,
@@ -214,6 +234,7 @@ def _run_analysis(job_id: str) -> None:
                 meta={
                     "features": cand.features,
                     "hook": getattr(cand, "hook_info", {}) or {},
+                    "hook_speech": hook_speech.get(idx, {}),
                     "framing": framing_results.get(idx, {}),
                     "transcript": cand.text[:4000],
                     "language": (transcript or {}).get("language", ""),

@@ -76,6 +76,7 @@ async function loadEditor(clipId) {
   ED.source = data.source;
   ED.spec = data.spec;
   ED.meta = data.meta;
+  ED.hookReport = data.hook_report || null;
   ED.summary = data.summary;
   ED.dirty = false;
   ED.time = 0;
@@ -546,10 +547,46 @@ function panelTextHtml() {
   `;
 }
 
+function hookStylePickerHtml(item) {
+  const styles = (ED.meta && ED.meta.hook_styles) || [];
+  const current = item.hook_style || "highlight";
+  const report = ED.hookReport || {};
+  const speech = report.speech_text || "";
+  const mismatch = report.match && report.match.ok === false;
+  return `
+    <div class="ed-hook-box">
+      <div class="tiny dim" style="margin-bottom:6px">Gaya hook di video</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">
+        ${styles
+          .map(
+            (st) => `<button class="btn small ${st.id === current ? "primary" : "ghost"}"
+              data-ed="hook-style" data-style="${esc(st.id)}"
+              title="${esc(st.desc)}">${esc(st.label)}</button>`
+          )
+          .join("")}
+      </div>
+      ${
+        speech
+          ? `<div class="tiny" style="margin-bottom:6px">
+               Diucapkan: “${esc(speech)}”
+               ${mismatch ? '<span class="tag err">teks ≠ ucapan</span>' : '<span class="tag up">teks = ucapan ✓</span>'}
+             </div>`
+          : `<div class="tiny dim" style="margin-bottom:6px">Belum ada transkrip — teks tidak bisa disinkronkan.</div>`
+      }
+      <button class="btn small ghost" data-ed="hook-from-speech">Ambil teks dari ucapan</button>
+      <div class="tiny dim" style="margin-top:6px">
+        3 gaya di atas semuanya memakai kata yang diucapkan; tiap kata menyala tepat saat diucapkan.
+      </div>
+    </div>
+  `;
+}
+
 function textEditorHtml(item) {
   const t = ED.time;
+  const isHook = item.id === "hook";
   return `
     <div class="ed-item-body">
+      ${isHook ? hookStylePickerHtml(item) : ""}
       ${fieldRow("Isi teks", `<textarea class="input" rows="2" data-text-field="text">${esc(item.text)}</textarea>`)}
       <div class="ed-two">
         ${fieldRow("Mulai (detik)", `<input class="input" type="number" step="0.1" min="0" data-text-field="start" value="${Number(item.start).toFixed(2)}" />`)}
@@ -596,6 +633,28 @@ function textEditorHtml(item) {
   `;
 }
 
+function subEditorHtml(line, idx) {
+  return `
+    <div class="ed-sub-edit">
+      ${fieldRow("Teks baris ini (koreksi kalau salah dengar)",
+        `<input class="input" data-sub-field="text" data-idx="${idx}" value="${esc(line.text)}" />`)}
+      <div class="ed-two">
+        ${fieldRow("Mulai", `<input class="input" type="number" step="0.05" min="0" data-sub-field="start" data-idx="${idx}" value="${Number(line.start).toFixed(2)}" />`)}
+        ${fieldRow("Selesai", `<input class="input" type="number" step="0.05" min="0" data-sub-field="end" data-idx="${idx}" value="${Number(line.end).toFixed(2)}" />`)}
+      </div>
+      <div class="row" style="gap:6px;flex-wrap:wrap">
+        <button class="btn small ghost" data-ed="sub-nudge" data-idx="${idx}" data-delta="-0.1">−0.1s</button>
+        <button class="btn small ghost" data-ed="sub-nudge" data-idx="${idx}" data-delta="0.1">+0.1s</button>
+        <button class="btn small ghost" data-ed="sub-nudge" data-idx="${idx}" data-delta="-0.5">−0.5s</button>
+        <button class="btn small ghost" data-ed="sub-nudge" data-idx="${idx}" data-delta="0.5">+0.5s</button>
+      </div>
+      <div class="tiny dim" style="margin-top:4px">
+        Kata karaoke di baris ini ikut dibagi ulang saat teks diubah, jadi highlight tetap jalan.
+      </div>
+    </div>
+  `;
+}
+
 function panelCaptionHtml() {
   const caps = ED.spec.captions || {};
   const lines = ED.spec.subtitles || [];
@@ -638,14 +697,19 @@ function panelCaptionHtml() {
     </div>
     <div class="ed-subs" id="ed-subs">
       ${lines
-        .map(
-          (line, idx) => `
-        <div class="ed-sub ${line.hidden ? "hidden" : ""}" data-sub="${idx}">
-          <span class="ed-sub-time mono tiny">${edFmt(line.start, true)}</span>
-          <span class="ed-sub-text">${esc(line.text)}</span>
+        .map((line, idx) => {
+          const open = ED.selectedSub === idx;
+          const low = Number(line.conf || 1) < 0.55;
+          return `
+        <div class="ed-sub ${line.hidden ? "hidden" : ""} ${open ? "open" : ""}">
+          <span class="ed-sub-time mono tiny" data-ed="sub-open" data-idx="${idx}">${edFmt(line.start, true)}</span>
+          <span class="ed-sub-text" data-ed="sub-open" data-idx="${idx}">${esc(line.text)}
+            ${low ? '<span class="tag err" title="Whisper kurang yakin dengan kata di baris ini — koreksi di sini">ragu</span>' : ""}
+          </span>
           <button class="ed-sub-btn" data-ed="sub-toggle" data-idx="${idx}" title="Sembunyikan">${line.hidden ? "◌" : "◉"}</button>
-        </div>`
-        )
+          ${open ? subEditorHtml(line, idx) : ""}
+        </div>`;
+        })
         .join("") || `<div class="empty tiny">Belum ada caption. Klik “Generate dari transkrip”.</div>`}
     </div>
   `;
@@ -880,6 +944,28 @@ function bindEditorEvents() {
   });
 }
 
+async function applySubEdit(el) {
+  const idx = Number(el.dataset.idx);
+  const field = el.dataset.subField;
+  const line = (ED.spec.subtitles || [])[idx];
+  if (!line) return;
+  const body = { action: "edit", index: idx };
+  if (field === "text") body.text = el.value;
+  else body[field] = Number(el.value);
+  try {
+    const res = await api(`/api/clips/${ED.clipId}/subtitles`, { method: "POST", body });
+    ED.spec = res.spec;
+    ED.summary = res.summary;
+    ED.dirty = false;
+    renderPanel();
+    renderOverlay();
+    refreshChrome();
+    toast("Caption diperbarui", "ok");
+  } catch (err) {
+    toast("Gagal menyimpan caption: " + err.message, "bad");
+  }
+}
+
 function bindPanelEvents() {
   // teks
   $$("[data-ed-text]").forEach((el) => {
@@ -918,6 +1004,14 @@ function bindPanelEvents() {
       renderOverlay();
     });
   }
+  // editor baris caption (koreksi salah dengar)
+  $$("[data-sub-field]").forEach((el) => {
+    const commit = () => applySubEdit(el);
+    el.addEventListener("change", commit);
+    if (el.dataset.subField === "text") el.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); commit(); }
+    });
+  });
   // layout/spec
   $$("[data-spec]").forEach((el) => {
     el.addEventListener("input", () => {
@@ -1175,6 +1269,29 @@ async function editorAction(action, target) {
     scheduleSave();
     renderTimeline();
     renderPanel();
+  } else if (action === "hook-style" || action === "hook-from-speech") {
+    const style = action === "hook-from-speech"
+      ? ((ED.spec.texts.find((t) => t.id === "hook") || {}).hook_style || "highlight")
+      : (target && target.dataset ? target.dataset.style : "highlight");
+    try {
+      const res = await api(`/api/clips/${ED.clipId}/hook-overlay`, {
+        method: "POST",
+        body: { style, source: "speech", enabled: true },
+      });
+      ED.spec = res.spec;
+      ED.summary = res.summary;
+      ED.hookReport = res.report || ED.hookReport;
+      ED.clip = { ...ED.clip, meta: { ...(ED.clip.meta || {}), dirty: true } };
+      ED.dirty = false;
+      ED.selectedText = "hook";
+      renderOverlay();
+      renderPanel();
+      await refreshChrome();
+      const words = (res.hook && res.hook.words ? res.hook.words.length : 0);
+      toast(`Hook "${(res.hook && res.hook.text) || ""}" · ${style} · ${words} kata sinkron`, "ok");
+    } catch (err) {
+      toast("Gagal memasang hook: " + err.message, "bad");
+    }
   } else if (action === "text-add") {
     const start = Number(ED.time.toFixed(2));
     const item = {
@@ -1219,6 +1336,26 @@ async function editorAction(action, target) {
       renderPanel();
       refreshChrome();
       toast(`Caption digeser ${delta > 0 ? "+" : ""}${delta}s`, "ok");
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+  } else if (action === "sub-open") {
+    const idx = Number(target.dataset.idx);
+    ED.selectedSub = ED.selectedSub === idx ? null : idx;
+    renderPanel();
+  } else if (action === "sub-nudge") {
+    const idx = Number(target.dataset.idx);
+    const delta = Number(target.dataset.delta || 0.1);
+    try {
+      const res = await api(`/api/clips/${ED.clipId}/subtitles`, {
+        method: "POST",
+        body: { action: "nudge", index: idx, seconds: delta },
+      });
+      ED.spec = res.spec;
+      ED.selectedSub = idx;
+      renderPanel();
+      renderOverlay();
+      toast(`Baris ${idx + 1} digeser ${delta > 0 ? "+" : ""}${delta}s`, "ok");
     } catch (err) {
       toast(err.message, "bad");
     }

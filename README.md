@@ -27,6 +27,7 @@ lalu **upload otomatis ke YouTube Shorts** channel kamu.
 | 🚀 **Export sampai 4K** | 1080p / 1440p / **2160×3840 (4K)** dengan upscale lanczos + unsharp, CRF & FPS bisa diatur. **Tanpa watermark, tanpa batas** — watermark hanya kalau kamu unggah logo sendiri. |
 | 💬 **Caption karaoke** | Word-by-word highlight (3 kata/baris, bisa diatur), warna & font custom, **tanpa kedip**: timing kata disambung (tanpa celah), fade hanya sekali di awal baris. |
 | 🔊 **Normalisasi audio** | Loudnorm -14 LUFS, standar YouTube. |
+| 🎬 **Hook 3 gaya, teks = ucapan** | Hook overlay **Kapsul / Sorot kata / Ketik** yang teksnya diambil dari kata yang **benar-benar diucapkan** (bukan judul), per kata sinkron dengan suara. Badge `teks = ucapan ✓` / `teks ≠ ucapan` plus tombol satu klik untuk mengganti hook dengan ucapan asli. |
 | 🎯 **Auto-framing podcast** | Kamera 9:16 **mengikuti pembicara yang sedang tampil** (deteksi wajah lokal dengan OpenCV): halus, ada jeda diam (deadband) supaya tidak goyang, dan pindah kamera bertahap ±0,45 detik. Kalau tidak ada wajah terdeteksi → otomatis kembali ke crop tengah biasa. |
 | ✂️ **Editor per clip** | Ubah judul/hook/deskripsi/hashtag, geser start, ubah durasi, atur fokus crop, matikan caption, preview langsung, render ulang. |
 | ♪ **Upload TikTok** | Upload clip ke TikTok langsung dari Clipper — memakai browser di komputer sendiri (gratis, tanpa API key, tanpa daftar aplikasi). Caption + hashtag terisi otomatis, tombol Post ditekan otomatis (bisa dimatikan). |
@@ -635,6 +636,47 @@ didorong ke bawah, dan hook yang sudah dipakai clip lain dihindari. Untuk projec
 **Perbarui hook N clip** di halaman Project menghitung ulang semuanya
 (`POST /api/jobs/{id}/hooks/refresh`).
 
+### Teks di video = yang diucapkan (sejak v1.2.0)
+
+Keluhan klasik: **video ngomong "Saya", teks di layar "Ada"**. Itu terjadi karena teks diambil
+dari judul (hasil parafrase) sementara caption dari transkrip, dan waktunya dihitung terpisah.
+
+Sejak v1.2.0 semua teks yang muncul di video memakai **satu sumber waktu** dan **kata yang
+benar-benar diucapkan**:
+
+- `app/speech.py` menerjemahkan waktu kata Whisper → waktu **output** (setelah trim & speed),
+  jadi caption, hook overlay, dan suara duduk di garis waktu yang sama.
+- **Hook overlay 3 gaya** — teksnya diambil verbatim dari ucapan pembuka (bukan judul), tiap kata
+  menyala tepat saat diucapkan:
+
+| Gaya | Tampilan | Cocok untuk |
+|---|---|---|
+| **Kapsul** | satu blok tebal di kotak gelap, animasi pop sekali | podcast/talking head, paling mudah dibaca |
+| **Sorot kata** | semua kata tampil, kata yang sedang diucapkan menyala kuning & membesar | konten edukasi, hook panjang |
+| **Ketik** | kata muncul satu per satu mengikuti ucapan | hook dramatis/pujaan |
+
+- **Penjaga teks ≠ ucapan.** Setiap clip diberi badge **`teks = ucapan ✓`** atau
+  **`teks ≠ ucapan`** (hover = kalimat yang benar-benar diucapkan). Satu klik:
+  **Pakai ucapan ini sebagai hook**, atau untuk satu project: **Hook dari ucapan N clip**
+  (`POST /api/jobs/{id}/hooks/from-speech`). Cek manual: `GET /api/clips/{id}/hook-check`.
+- **Caption bisa dikoreksi.** Klik baris caption di tab Caption → ubah teks, geser ±0,1/0,5 detik.
+  Kata karaoke di baris itu dibagi ulang otomatis, jadi highlight tetap jalan setelah dikoreksi.
+  Baris yang kurang yakin dari Whisper diberi tanda **ragu** (probabilitas < 55%).
+- **Transkripsi lebih akurat**: `initial_prompt` bahasa Indonesia, suhu cadangan
+  (0/0,2/0,4), `best_of`/`patience` lebih tinggi, dan VAD lebih ketat — kata pendek seperti
+  "saya"/"ada" tidak gampang tertukar. Ringkasan mutu (rata-rata probabilitas, jumlah kata
+  ragu) ikut disimpan di `transcript.json`.
+- **Tidak ada teks dobel**: selama hook tampil di atas, baris caption yang isinya sama tidak
+  diulang di bawah (`captions.mute_during_hook`, default aktif).
+
+Kalau hook tetap kamu tulis sendiri (judul bebas), kata-katanya **ditempelkan ke ucapan**
+(alignment), jadi highlight tetap sinkron — tapi badge akan tetap jujur bilang teksnya tidak ada
+di ucapan, dan tombol "Pakai ucapan ini" menyelesaikannya dalam satu klik.
+
+Pemasangan/pelepasan hook di video juga tersedia lewat API:
+`POST /api/clips/{id}/hook-overlay` dengan `{"style": "capsule|highlight|typewriter",
+"source": "speech|title"}` atau `{"enabled": false}` untuk menghapus.
+
 **Whisper: library vs model.** Sidebar membedakan dua hal:
 - `Whisper ✓` = library `faster-whisper` terpasang (ikut saat instalasi Clipper),
 - tanpa tanda = library ada tapi **model** belum diunduh → transkripsi akan memakai subtitle video
@@ -849,6 +891,9 @@ Clipper/
 | `crop_focus` | 0 = kiri … 1 = kanan (mode crop) — dipakai kalau auto-framing mati atau tidak menemukan wajah. |
 | `auto_framing` | **Default aktif.** Kamera mengikuti pembicara saat render (hanya untuk `layout = crop`). Matikan kalau kamu ingin crop tengah statis. |
 | `captions`, `caption_words`, `caption_color`, `caption_highlight`, `caption_font`, `caption_uppercase` | Gaya caption. |
+| `mute_during_hook` | Caption di bawah tidak diulang selama hook tampil (default aktif). |
+| `hook_style` | `capsule` / `highlight` / `typewriter` — gaya hook saat hook di dalam video dinyalakan. |
+| `hook_seconds`, `hook_words` | Lama hook tampil (default 4,5 dtk) dan jumlah kata maksimal (default 12). |
 | `hook_overlay` | **Default mati.** Judul/hook dipakai sebagai judul unggahan & caption, *tidak* ditulis di dalam video. Nyalakan hanya kalau memang ingin teks besar di 5 detik pertama. |
 | `fps`, `crf`, `normalize_audio` | Kualitas render. |
 | `export_height`, `export_sharpen`, `default_template` | Default export editor: 1080p/2K/4K, pertajam saat upscale, template awal. |

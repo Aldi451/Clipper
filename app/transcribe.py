@@ -1,6 +1,8 @@
 """Transkripsi lokal pakai faster-whisper (gratis, jalan offline setelah model ke-cache)."""
 from __future__ import annotations
 
+import inspect as _inspect
+
 import json
 import os
 import threading
@@ -195,16 +197,46 @@ def transcribe(
 
     model = _get_model(model_name, device, compute)
 
-    segments_iter, info = model.transcribe(
-        str(media_path),
-        language=None if lang in ("auto", "", None) else lang,
-        task="transcribe",
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 400},
-        word_timestamps=True,
-        condition_on_previous_text=False,
-    )
+    # --- parameter akurasi ---
+    # initial_prompt menjaga gaya bahasa (Indonesia baku + tanda baca) sehingga
+    # kata pendek seperti "saya"/"ada" tidak gampang tertukar oleh model kecil.
+    prompt = str(settings.get("whisper_initial_prompt") or "").strip()
+    if not prompt:
+        prompt = (
+            "Ini transkrip percakapan bahasa Indonesia yang jelas, dengan tanda baca. "
+            "Contoh: Saya bukan orang biasa, saya sudah mencoba semuanya."
+            if lang in ("auto", "", None, "id")
+            else ""
+        )
+    model_name_l = str(model_name).lower()
+    # model kecil rawan salah dengar; suhu cadangan membuat Whisper mengulang
+    # bagian yang ragu alih-alih menebak satu kata (mis. "saya" jadi "ada").
+    kwargs = {
+        "language": None if lang in ("auto", "", None) else lang,
+        "task": "transcribe",
+        "beam_size": 5,
+        "best_of": 5,
+        "patience": 1.0,
+        "temperature": [0.0, 0.2, 0.4],
+        "compression_ratio_threshold": 2.4,
+        "log_prob_threshold": -1.0,
+        "no_speech_threshold": 0.6,
+        "vad_filter": True,
+        "vad_parameters": {"min_silence_duration_ms": 300, "speech_pad_ms": 200},
+        "word_timestamps": True,
+        "condition_on_previous_text": False,
+        "initial_prompt": prompt or None,
+        "prefix": None,
+        "hallucination_silence_threshold": 1.5 if model_name_l in ("tiny", "base", "small") else None,
+    }
+    # Versi faster-whisper lama tidak punya semua parameter di atas; buang yang
+    # tidak dikenal supaya transkripsi tidak gagal total di komputer user.
+    try:
+        allowed = set(_inspect.signature(model.transcribe).parameters)
+        kwargs = {key: value for key, value in kwargs.items() if key in allowed}
+    except (TypeError, ValueError):
+        pass
+    segments_iter, info = model.transcribe(str(media_path), **kwargs)
     total = float(getattr(info, "duration", 0) or 0)
     detected = getattr(info, "language", None) or "unknown"
     segments: list[Segment] = []
@@ -228,9 +260,21 @@ def transcribe(
     if on_progress:
         on_progress(1.0, f"Transkripsi selesai ({detected})")
 
+    all_words = [w for seg in segments for w in seg.words]
+    probs = [float(w.prob) for w in all_words if w.prob is not None]
+    low = sum(1 for value in probs if value < 0.5)
+    quality = {
+        "model": str(model_name),
+        "words": len(all_words),
+        "avg_prob": round(sum(probs) / len(probs), 3) if probs else 0.0,
+        "low_confidence": low,
+        "low_ratio": round(low / len(probs), 3) if probs else 0.0,
+    }
+
     return {
         "language": detected,
         "duration": total,
+        "quality": quality,
         "segments": [
             {"start": s.start, "end": s.end, "text": s.text,
              "words": [asdict(w) for w in s.words]}

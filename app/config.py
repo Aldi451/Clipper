@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "Clipper"
-VERSION = "1.1.9"
+VERSION = "1.2.0"
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -128,6 +128,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "caption_color": "#FFFFFF",
     "caption_highlight": "#FFE02B",
     "hook_overlay": False,       # judul TIDAK ditulis di dalam video (default mati)
+    "hook_style": "highlight",   # kalau hook_overlay nyala: capsule | highlight | typewriter
+    "hook_seconds": 4.5,         # berapa lama hook tampil
+    "hook_words": 12,            # maksimal berapa kata di hook overlay
     "auto_framing": True,        # layout crop: kamera mengikuti pembicara (deteksi wajah lokal)
     "normalize_audio": True,
     "fps": 30,

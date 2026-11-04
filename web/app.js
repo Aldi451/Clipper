@@ -956,6 +956,39 @@ function hookGradeTag(clip) {
   )} · ${esc(info.grade)}</span>`;
 }
 
+function hookSpeechInfo(clip) {
+  const info = (clip.meta || {}).hook_speech;
+  return info && typeof info === "object" ? info : null;
+}
+
+function hookSpeechBadge(clip) {
+  const info = hookSpeechInfo(clip);
+  if (!info || !info.speech_text) return "";
+  if (info.ok) {
+    return `<span class="tag up" title="Teks hook ada di ucapan clip ini">teks = ucapan ✓</span>`;
+  }
+  return `<span class="tag err" title="Teks hook tidak ditemukan di ucapan: ${esc(
+    info.speech_text
+  )}">teks ≠ ucapan</span>`;
+}
+
+function hookSpeechBoxHtml(clip) {
+  const info = hookSpeechInfo(clip);
+  if (!info || !info.speech_text) return "";
+  const same = String(info.speech_text || "").trim().toLowerCase() === String(clip.hook || "").trim().toLowerCase();
+  return `<div class="field">
+    <label>Yang benar-benar diucapkan di awal clip</label>
+    <div class="tiny" style="margin-bottom:6px">“${esc(info.speech_text)}”</div>
+    ${
+      same
+        ? '<div class="tiny up">Hook sudah sama dengan ucapan — aman dipakai sebagai teks di video.</div>'
+        : `<button class="btn small ghost" data-action="hook-speech" data-id="${esc(clip.id)}"
+             data-text="${esc(info.speech_text)}">Pakai ucapan ini sebagai hook</button>
+           <div class="tiny dim" style="margin-top:6px">Teks di video akan sama persis dengan suara.</div>`
+    }
+  </div>`;
+}
+
 function framingBadge(clip) {
   const info = (clip.meta || {}).framing;
   if (!info) return "";
@@ -1014,6 +1047,7 @@ function clipCardHtml(clip) {
           <div class="meta-row">
             <span class="score">skor ${scoreText}</span>
             ${hookGradeTag(clip)}
+            ${hookSpeechBadge(clip)}
             ${framingBadge(clip)}
             <span>${fmtTime(clip.start)} → ${fmtTime(clip.start + clip.duration)}</span>
             <span>${fmtDur(clip.duration)}</span>
@@ -1085,6 +1119,8 @@ async function renderProject(jobId) {
         <button class="btn" data-action="render-all" ${!clips.length || running ? "disabled" : ""}>Render semua</button>
         ${clips.length ? `<button class="btn ghost" data-action="detect-all-speakers" ${running ? "disabled" : ""}
           title="Deteksi wajah pembicara untuk semua clip di project ini">Deteksi pembicara ${clips.length} clip</button>` : ""}
+        ${clips.length ? `<button class="btn ghost" data-action="hooks-from-speech-all" ${running ? "disabled" : ""}
+          title="Ganti hook semua clip dengan kata yang benar-benar diucapkan (paling anti-melenceng)">Hook dari ucapan ${clips.length} clip</button>` : ""}
         ${clips.length ? `<button class="btn ghost" data-action="refresh-hooks" ${running ? "disabled" : ""}
           title="Hitung ulang kekuatan hook & variannya untuk semua clip di project ini">Perbarui hook ${clips.length} clip</button>` : ""}
         ${dirtyCount ? `<button class="btn ghost" data-action="render-dirty" ${running ? "disabled" : ""}>Render ulang ${dirtyCount} clip berubah</button>` : ""}
@@ -1193,6 +1229,14 @@ async function openClipEditor(clipId) {
     return;
   }
   state.editing = clip;
+  if (!state.editorMeta || !state.editorMeta.hook_styles) {
+    // meta editor (gaya hook, resolusi, template) butuh sekali muat saja
+    try {
+      state.editorMeta = await api("/api/editor/meta");
+    } catch (err) {
+      state.editorMeta = state.editorMeta || {};
+    }
+  }
   const job = state.job && state.job.id === clip.job_id ? state.job : await api("/api/jobs/" + clip.job_id);
   const hasFile = clip.has_file;
   const src = hasFile ? `/api/clips/${clip.id}/video?v=${Math.round(clip.updated_at)}` : `/api/jobs/${clip.job_id}/source#t=${clip.start},${clip.start + clip.duration}`;
@@ -1232,7 +1276,28 @@ async function openClipEditor(clipId) {
               <label>Hook overlay (muncul 5 detik pertama)</label>
               <input class="input" id="edit-hook" value="${esc(clip.hook)}" maxlength="60" />
             </div>
+            ${hookSpeechBoxHtml(clip)}
             ${hookVariantsHtml(clip)}
+            <div class="field">
+              <label>Gaya hook di dalam video</label>
+              <select class="input" id="edit-hook-style">
+                ${((state.editorMeta && state.editorMeta.hook_styles) || []).map((st) => {
+                  const current = (state.settings && state.settings.hook_style) || "highlight";
+                  return `<option value="${esc(st.id)}" ${st.id === current ? "selected" : ""}>${esc(
+                    st.label
+                  )} — ${esc(st.desc)}</option>`;
+                }).join("") || '<option value="highlight">Sorot kata</option>'}
+              </select>
+              <div class="tiny dim" style="margin-top:6px">
+                Teks hook diambil dari kata yang diucapkan (bukan judul), jadi tidak mungkin beda dengan suara.
+              </div>
+              <button class="btn small" style="margin-top:8px" data-action="hook-overlay" data-id="${esc(clip.id)}">
+                Pasang hook di video (3 gaya)
+              </button>
+              <button class="btn small ghost" style="margin-top:6px" data-action="hook-remove" data-id="${esc(clip.id)}">
+                Hapus teks hook dari video
+              </button>
+            </div>
             <div class="grid-2">
               <div class="field">
                 <label>Mulai (detik)</label>
@@ -2204,15 +2269,36 @@ async function renderSettings() {
         </label>
         <label class="switch">
           <input type="checkbox" data-setting="hook_overlay" ${s.hook_overlay ? "checked" : ""} />
-          <span class="track"></span><span>Judul hook di dalam video (default mati)</span>
+          <span class="track"></span><span>Hook di dalam video (teks dari ucapan, default mati)</span>
         </label>
         <label class="switch">
           <input type="checkbox" data-setting="normalize_audio" ${s.normalize_audio ? "checked" : ""} />
           <span class="track"></span><span>Normalisasi audio</span>
         </label>
       </div>
+      <div class="grid-3" style="margin-top:14px">
+        <div class="field">
+          <label>Gaya hook di dalam video</label>
+          <select class="select" data-setting="hook_style">
+            ${((state.editorMeta && state.editorMeta.hook_styles) || []).map(
+              (st) => `<option value="${esc(st.id)}" ${s.hook_style === st.id ? "selected" : ""}>${esc(st.label)}</option>`
+            ).join("") || '<option value="highlight">Sorot kata</option>'}
+          </select>
+          <div class="tiny dim">Kapsul · Sorot kata · Ketik. Semua memakai kata yang diucapkan, per kata sinkron.</div>
+        </div>
+        <div class="field">
+          <label>Lama hook tampil (detik)</label>
+          <input class="input" type="number" min="1" max="10" step="0.5" data-setting="hook_seconds" value="${Number(s.hook_seconds || 4.5)}" />
+        </div>
+        <div class="field">
+          <label>Maksimal kata di hook</label>
+          <input class="input" type="number" min="4" max="20" step="1" data-setting="hook_words" value="${Number(s.hook_words || 12)}" />
+        </div>
+      </div>
       <p class="hint" style="margin-top:12px">
-        Judul/hook hanya dipakai sebagai caption & judul unggahan (di luar video). Kalau clip lama
+        Judul/hook tetap dipakai sebagai caption & judul unggahan (di luar video). Kalau kamu
+        menyalakan hook di dalam video, teksnya diambil dari <b>kata yang benar-benar diucapkan</b>
+        di awal clip — bukan dari judul — supaya tidak pernah beda dengan suara. Kalau clip lama
         masih punya teks judul menempel di gambar, hapus sekali di sini:
       </p>
       <button class="btn small ghost" data-action="strip-hooks" style="margin-top:8px">
@@ -2629,6 +2715,39 @@ document.addEventListener("click", async (e) => {
       if (box) box.value = text;
       await api("/api/clips/" + id, { method: "PATCH", body: { hook: text } });
       toast("Hook dipakai: " + text.slice(0, 40), "ok");
+    } else if (action === "hook-speech") {
+      const text = (target && target.dataset ? target.dataset.text : "") || "";
+      if (!text) {
+        toast("Belum ada transkrip untuk clip ini", "bad");
+        return;
+      }
+      await api("/api/clips/" + id, { method: "PATCH", body: { hook: text } });
+      toast("Hook diganti dengan kata yang diucapkan", "ok");
+      if (state.job) renderProject(state.job.id);
+    } else if (action === "hook-from-speech-all") {
+      const res = await api("/api/jobs/" + encodeURIComponent(state.job.id) + "/hooks/from-speech", {
+        method: "POST",
+      });
+      toast(`${res.updated} dari ${res.clips} hook sekarang sama dengan ucapan`, "ok");
+      renderProject(state.job.id);
+    } else if (action === "hook-overlay" || action === "hook-remove") {
+      const styleEl = $("#edit-hook-style");
+      const style = styleEl ? styleEl.value : (state.settings && state.settings.hook_style) || "highlight";
+      const body = action === "hook-remove" ? { enabled: false } : { style, source: "speech" };
+      try {
+        const res = await api("/api/clips/" + id + "/hook-overlay", { method: "POST", body });
+        if (action === "hook-remove") {
+          toast("Teks hook dihapus dari video", "ok");
+        } else {
+          const item = res.hook || {};
+          const words = (item.words || []).length;
+          toast(`Hook "${(item.text || "").slice(0, 34)}" terpasang (${style}, ${words} kata sinkron)`, "ok");
+        }
+        if (state.settings) state.settings.hook_style = style;
+        if (state.job) renderProject(state.job.id);
+      } catch (err) {
+        toast("Gagal memasang hook: " + err.message, "bad");
+      }
     } else if (action === "upload-tt") {
       await api("/api/clips/" + id + "/upload", { method: "POST", body: { target: "tiktok" } });
       toast("Masuk antrean upload TikTok — jendela browser akan terbuka", "ok");
