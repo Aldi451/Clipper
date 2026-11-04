@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import framing as framing_module
 from . import media
 from .config import CLIP_DIR, WORK_DIR, ffmpeg_exe, load_settings
 from .fsutil import safe_replace, safe_rmtree
@@ -478,6 +479,7 @@ def default_spec(
         "layout": layout if layout in ("fit", "crop", "black") else "fit",
         "background": background,
         "crop_focus": _clamp(_f(focus, _f(settings.get("crop_focus"), 0.5)), 0.0, 1.0),
+        "framing": _framing_from_meta(clip_meta.get("framing")),
         "segments": segments,
         "captions": captions,
         "subtitles": subtitles,
@@ -492,6 +494,59 @@ def default_spec(
         spec = apply_template(spec, default_template)
         spec["output"] = output
     return spec
+
+
+def _framing_from_meta(raw: Any) -> dict[str, Any]:
+    """Ambil hasil analisa pembicara dari meta clip jadi bagian spec."""
+    if not isinstance(raw, dict) or not raw.get("segments") or not raw.get("ok"):
+        return {"mode": "center", "segments": [], "moves": 0, "faces": 0, "coverage": 0.0}
+    segments = []
+    for item in raw.get("segments") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            at = max(0.0, float(item.get("at")))
+            x = _clamp(float(item.get("x")), 0.0, 1.0)
+        except (TypeError, ValueError):
+            continue
+        segments.append({"at": round(at, 3), "x": round(x, 4)})
+    if not segments:
+        return {"mode": "center", "segments": [], "moves": 0, "faces": 0, "coverage": 0.0}
+    return {
+        "mode": "auto",
+        "segments": sorted(segments, key=lambda seg: seg["at"])[:400],
+        "moves": max(0, len(segments) - 1),
+        "faces": int(raw.get("faces") or 0),
+        "coverage": round(_clamp(_f(raw.get("coverage"), 0.0), 0.0, 1.0), 3),
+    }
+
+
+def _framing_from_spec(raw: Any, base: Any) -> dict[str, Any]:
+    """Validasi bagian ``framing`` dari client (bisa juga untuk mematikan)."""
+    default = base if isinstance(base, dict) else {"mode": "center", "segments": [], "moves": 0,
+                                                   "faces": 0, "coverage": 0.0}
+    if not isinstance(raw, dict):
+        return dict(default)
+    mode = "auto" if raw.get("mode") == "auto" else "center"
+    segments = []
+    for item in (raw.get("segments") or [])[:400]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            segments.append({"at": round(max(0.0, _f(item.get("at"))), 3),
+                             "x": round(_clamp(_f(item.get("x"), 0.5), 0.0, 1.0), 4)})
+        except (TypeError, ValueError):
+            continue
+    segments.sort(key=lambda seg: seg["at"])
+    if mode == "auto" and not segments:
+        mode = "center"
+    return {
+        "mode": mode,
+        "segments": segments,
+        "moves": max(0, len(segments) - 1),
+        "faces": int(raw.get("faces") or default.get("faces") or 0),
+        "coverage": round(_clamp(_f(raw.get("coverage"), _f(default.get("coverage"), 0.0)), 0.0, 1.0), 3),
+    }
 
 
 def _existing_spec(clip: dict[str, Any]) -> dict[str, Any]:
@@ -521,6 +576,7 @@ def normalize_spec(
     result = dict(base)
     result["layout"] = spec.get("layout") if spec.get("layout") in ("fit", "crop", "black") else base["layout"]
     result["crop_focus"] = _clamp(_f(spec.get("crop_focus"), base["crop_focus"]), 0.0, 1.0)
+    result["framing"] = _framing_from_spec(spec.get("framing"), base.get("framing"))
     result["template"] = str(spec.get("template") or "")[:40]
     result["segments"] = normalize_segments(spec.get("segments"), clip, source_duration)
 
@@ -851,7 +907,8 @@ def build_overlays_ass(texts: list[dict[str, Any]], out_path: str | Path, font: 
 # render
 # --------------------------------------------------------------------------- #
 def _layout_chain(layout: str, focus: float, background: dict[str, Any], fps: int,
-                  width: int = CANVAS_W, height: int = CANVAS_H) -> str:
+                  width: int = CANVAS_W, height: int = CANVAS_H,
+                  framing: list[dict[str, Any]] | None = None) -> str:
     """Filter chain yang menghasilkan [vbase] berukuran canvas (1080x1920)."""
     focus = _clamp(focus, 0.0, 1.0)
     bg_type = background.get("type", "blur")
@@ -862,6 +919,14 @@ def _layout_chain(layout: str, focus: float, background: dict[str, Any], fps: in
     )
 
     if layout == "crop":
+        # Framing otomatis: kamera mengikuti pembicara (ekspresi berbasis waktu).
+        # Tanpa framing: satu titik fokus tetap seperti sebelumnya.
+        if framing:
+            x_expr = framing_module.crop_expression(framing, default=focus)
+            return (
+                f"[0:v]fps={fps},scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height}:x='(iw-{width})*({x_expr})':y='(ih-{height})/2',setsar=1[vbase]"
+            )
         return (
             f"[0:v]fps={fps},scale={width}:{height}:force_original_aspect_ratio=increase,"
             f"crop={width}:{height}:x='(iw-{width})*{focus:.3f}':y='(ih-{height})/2',setsar=1[vbase]"
@@ -974,7 +1039,16 @@ def _render_segment(
     duration = max(0.2, _f(segment.get("end")) - start)
     out_duration = max(0.1, duration / speed)
 
-    chain = _layout_chain(layout, _f(spec.get("crop_focus"), 0.5), spec["background"], fps)
+    framing_spec = spec.get("framing") if isinstance(spec.get("framing"), dict) else {}
+    framing_segments: list[dict[str, Any]] = []
+    if framing_spec.get("mode") == "auto":
+        framing_segments = framing_module.shift_segments(
+            framing_spec.get("segments") or [], start, duration
+        )
+    chain = _layout_chain(
+        layout, _f(spec.get("crop_focus"), 0.5), spec["background"], fps,
+        framing=framing_segments,
+    )
     if speed != 1.0:
         chain += f";[vbase]setpts=PTS/{speed:.4f}[vseg]"
         last = "vseg"

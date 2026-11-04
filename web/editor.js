@@ -146,6 +146,8 @@ async function renderEditor(clipId) {
             <option value="">Template…</option>
             ${ED.meta.templates.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}
           </select>
+          <button class="btn small ghost" id="ed-cam-btn" data-ed="cam-toggle"
+            title="Kamera mengikuti pembicara yang sedang tampil. Klik untuk menyalakan/mematikan.">🎯 <span id="ed-cam-label">Kamera</span></button>
           <button class="btn small" data-ed="auto-subtitle">✨ Auto subtitle</button>
           <select class="select" id="ed-resolution" style="width:auto;padding:8px 34px 8px 12px">
             ${ED.meta.resolutions.map((r) => `<option value="${r.height}" ${Number(ED.spec.output.height) === r.height ? "selected" : ""}>${esc(r.label)}</option>`).join("")}
@@ -212,8 +214,19 @@ async function renderEditor(clipId) {
   refreshChrome();
 }
 
+function edUpdateCamLabel() {
+  const label = edEl("ed-cam-label");
+  if (!label || !ED.spec) return;
+  const info = ((ED.clip && ED.clip.meta) || {}).framing || {};
+  const on = !!info.ok && ED.spec.framing && ED.spec.framing.mode === "auto";
+  if (!info.ok) label.textContent = "Deteksi pembicara";
+  else if (on) label.textContent = `Ikuti pembicara${info.moves ? " · " + info.moves + "×" : ""}`;
+  else label.textContent = "Kamera: tengah";
+}
+
 function refreshChrome() {
   if (!ED.spec) return;
+  edUpdateCamLabel();
   const dur = specDuration(ED.spec);
   const res = ED.spec.output;
   const meta = edEl("ed-meta-line");
@@ -710,6 +723,28 @@ function panelExportHtml() {
     ${fieldRow("Deskripsi", `<textarea class="input" rows="3" data-clip-meta="description">${esc(clip.description || "")}</textarea>`)}
     ${fieldRow("Hashtag", `<input class="input" data-clip-meta="hashtags" value="${esc(clip.hashtags || "")}" />`)}
     ${fieldRow("Hook (teks overlay pertama)", `<input class="input" data-clip-meta="hook" value="${esc(clip.hook || "")}" />`)}
+    ${(() => {
+      const f = (clip.meta || {}).framing || {};
+      const on = f.ok && spec.framing && spec.framing.mode === "auto";
+      const moves = Number(f.moves || 0);
+      const label = !f.ok
+        ? "kamera tetap di tengah"
+        : on
+          ? `kamera mengikuti pembicara${moves ? " · " + moves + "× pindah" : ""}`
+          : "kamera tetap di tengah (auto-framing dimatikan)";
+      return `<div class="field">
+        <label>Kamera / framing</label>
+        <div class="tiny dim" style="margin-bottom:8px">${esc(label)}</div>
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          <button class="btn small ghost" data-ed="detect-speaker">Deteksi pembicara</button>
+          ${
+            f.ok
+              ? `<button class="btn small ghost" data-ed="toggle-framing">${on ? "Matikan auto-framing" : "Nyalakan auto-framing"}</button>`
+              : ""
+          }
+        </div>
+      </div>`;
+    })()}
     <div class="ed-divider"></div>
     <div class="ed-export-summary">
       <div class="stat"><span class="v">${edFmt(dur)}</span><span class="k">durasi</span></div>
@@ -1005,6 +1040,54 @@ async function editorAction(action, target) {
     const res = await api(`/api/clips/${ED.clipId}/upload`, { method: "POST", body: { target: "tiktok" } });
     toast("Masuk antrean TikTok — jendela browser akan terbuka", "ok");
     return res;
+  } else if (action === "detect-speaker") {
+    toast("Mendeteksi wajah pembicara…", "ok");
+    const res = await api(`/api/clips/${ED.clipId}/framing`, { method: "POST" });
+    await loadEditor(ED.clipId);
+    if (res.framing && res.framing.ok) {
+      ED.spec.framing = { mode: "auto", segments: res.framing.segments, faces: res.framing.faces,
+                          coverage: res.framing.coverage, moves: res.framing.moves };
+      ED.dirty = true;
+      await refreshChrome();
+      toast(`${res.summary} — auto-framing dinyalakan`, "ok");
+    } else {
+      toast(res.summary || "Wajah tidak terdeteksi, kamera tetap di tengah", "bad");
+    }
+    return res;
+  } else if (action === "cam-toggle") {
+    // Satu tombol: sudah menyala → matikan; sudah ada hasil deteksi → nyalakan
+    // tanpa hitung ulang; belum pernah dideteksi → jalankan deteksi sekarang.
+    const cur = (ED.spec && ED.spec.framing) || { mode: "center", segments: [] };
+    const known = ((ED.clip && ED.clip.meta) || {}).framing || null;
+    if (cur.mode === "auto") {
+      ED.spec.framing = { mode: "center", segments: [], moves: 0, faces: cur.faces || 0,
+                          coverage: cur.coverage || 0 };
+      ED.dirty = true;
+      await refreshChrome();
+      toast("Auto-framing dimatikan — kamera kembali ke tengah", "ok");
+      return ED.spec.framing;
+    }
+    if (known && known.ok && (known.segments || []).length) {
+      ED.spec.framing = { mode: "auto", segments: known.segments, faces: known.faces || 0,
+                          coverage: known.coverage || 0, moves: known.moves || 0 };
+      ED.dirty = true;
+      await refreshChrome();
+      toast("Auto-framing dinyalakan — kamera mengikuti pembicara", "ok");
+      return ED.spec.framing;
+    }
+    return editorAction("detect-speaker", target);
+  } else if (action === "toggle-framing") {
+    const current = (ED.spec && ED.spec.framing) || { mode: "center", segments: [] };
+    const meta = (ED.clip && ED.clip.meta) || {};
+    const source = (meta.framing && meta.framing.segments) || [];
+    ED.spec.framing = current.mode === "auto"
+      ? { mode: "center", segments: [] }
+      : { mode: "auto", segments: source, faces: (meta.framing || {}).faces || 0,
+          coverage: (meta.framing || {}).coverage || 0 };
+    ED.dirty = true;
+    await refreshChrome();
+    toast(ED.spec.framing.mode === "auto" ? "Auto-framing dinyalakan" : "Auto-framing dimatikan", "ok");
+    return ED.spec.framing;
   } else if (action === "fix-duration") {
     const wanted = Number(target.dataset.target) || 60;
     const sourceDur = Number(ED.source && ED.source.duration) || 0;

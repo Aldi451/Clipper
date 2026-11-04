@@ -956,6 +956,18 @@ function hookGradeTag(clip) {
   )} · ${esc(info.grade)}</span>`;
 }
 
+function framingBadge(clip) {
+  const info = (clip.meta || {}).framing;
+  if (!info) return "";
+  if (!info.ok) {
+    return `<span class="tag" title="${esc(info.reason || "")}">kamera: tengah</span>`;
+  }
+  const moves = Number(info.moves || 0);
+  return `<span class="tag up" title="Wajah terdeteksi di ${Math.round(
+    (info.coverage || 0) * 100
+  )}% frame">kamera: ikuti pembicara${moves ? " · " + moves + "× pindah" : ""}</span>`;
+}
+
 function hookVariantsHtml(clip) {
   const info = hookMeta(clip);
   if (!info || !info.variants || !info.variants.length) return "";
@@ -1002,6 +1014,7 @@ function clipCardHtml(clip) {
           <div class="meta-row">
             <span class="score">skor ${scoreText}</span>
             ${hookGradeTag(clip)}
+            ${framingBadge(clip)}
             <span>${fmtTime(clip.start)} → ${fmtTime(clip.start + clip.duration)}</span>
             <span>${fmtDur(clip.duration)}</span>
           </div>
@@ -1022,6 +1035,8 @@ function clipCardHtml(clip) {
           <button class="btn small yt" data-action="upload" data-id="${esc(clip.id)}" ${!clip.has_file || active ? "disabled" : ""}>Upload YT</button>
           ${ttOn ? `<button class="btn small tt" data-action="upload-tt" data-id="${esc(clip.id)}" ${!clip.has_file || active ? "disabled" : ""}>TikTok</button>` : ""}
           ${clip.has_file ? `<a class="btn small ghost" href="/api/clips/${esc(clip.id)}/download">Unduh</a>` : ""}
+          <button class="btn small ghost" data-action="detect-speaker" data-id="${esc(clip.id)}"
+            title="Deteksi wajah pembicara supaya kamera fokus ke dia">Kamera</button>
           <button class="btn small ghost danger" data-action="delete-clip" data-id="${esc(clip.id)}">Hapus</button>
         </div>
       </div>
@@ -1068,6 +1083,8 @@ async function renderProject(jobId) {
       </div>
       <div class="row">
         <button class="btn" data-action="render-all" ${!clips.length || running ? "disabled" : ""}>Render semua</button>
+        ${clips.length ? `<button class="btn ghost" data-action="detect-all-speakers" ${running ? "disabled" : ""}
+          title="Deteksi wajah pembicara untuk semua clip di project ini">Deteksi pembicara ${clips.length} clip</button>` : ""}
         ${clips.length ? `<button class="btn ghost" data-action="refresh-hooks" ${running ? "disabled" : ""}
           title="Hitung ulang kekuatan hook & variannya untuk semua clip di project ini">Perbarui hook ${clips.length} clip</button>` : ""}
         ${dirtyCount ? `<button class="btn ghost" data-action="render-dirty" ${running ? "disabled" : ""}>Render ulang ${dirtyCount} clip berubah</button>` : ""}
@@ -2181,6 +2198,11 @@ async function renderSettings() {
           <span class="track"></span><span>HURUF BESAR</span>
         </label>
         <label class="switch">
+          <input type="checkbox" data-setting="auto_framing" ${s.auto_framing ? "checked" : ""} />
+          <span class="track"></span>
+          <span>Kamera mengikuti pembicara (auto-framing podcast)</span>
+        </label>
+        <label class="switch">
           <input type="checkbox" data-setting="hook_overlay" ${s.hook_overlay ? "checked" : ""} />
           <span class="track"></span><span>Judul hook di dalam video (default mati)</span>
         </label>
@@ -2530,6 +2552,16 @@ document.addEventListener("click", async (e) => {
       await api("/api/jobs/" + id + "/retry", { method: "POST" });
       toast("Mencoba ulang analisis…", "ok");
       renderProject(id);
+    } else if (action === "detect-speaker") {
+      toast("Mendeteksi pembicara… (beberapa detik)", "ok");
+      const res = await api("/api/clips/" + id + "/framing", { method: "POST" });
+      toast(res.summary || "Analisa selesai", res.framing && res.framing.ok ? "ok" : "bad");
+      if (state.job) await renderProject(state.job.id);
+    } else if (action === "detect-all-speakers") {
+      toast("Mendeteksi pembicara untuk semua clip…", "ok");
+      const res = await api("/api/jobs/" + encodeURIComponent(state.job.id) + "/framing", { method: "POST" });
+      toast(`${res.detected} dari ${res.clips} clip: kamera mengikuti pembicara`, "ok");
+      await renderProject(state.job.id);
     } else if (action === "refresh-hooks") {
       const res = await api("/api/jobs/" + encodeURIComponent(state.job.id) + "/hooks/refresh", { method: "POST" });
       toast(`${res.updated} dari ${res.clips} hook diperbarui`, "ok");

@@ -166,6 +166,27 @@ def _run_analysis(job_id: str) -> None:
         if not candidates:
             candidates = analyze.fixed_windows(info.duration, settings)
 
+        # 5b) auto-framing: kamera mengikuti pembicara (hanya kalau layout crop)
+        framing_results: dict[int, dict[str, Any]] = {}
+        if settings.get("auto_framing") and str(settings.get("layout") or "") == "crop" and candidates:
+            try:
+                from . import framing as framing_module
+
+                if framing_module.available() and source_path:
+                    for index, cand in enumerate(candidates):
+                        _job_set(job_id, stage="framing",
+                                 progress=0.94 + 0.03 * index / max(1, len(candidates)),
+                                 message=f"Mendeteksi pembicara clip {index + 1}/{len(candidates)}…")
+                        result = framing_module.analyze(
+                            source_path, cand.start, cand.duration
+                        )
+                        framing_results[index] = result
+                        if result.get("ok"):
+                            cand.features["framing_moves"] = float(result.get("moves") or 0)
+                    _job_set(job_id, message="Pembicara terdeteksi, kamera akan mengikuti…")
+            except Exception:  # noqa: BLE001 - framing opsional, jangan gagalkan job
+                traceback.print_exc()
+
         if settings.get("llm_enabled") and analyze.ollama_available(settings) and candidates:
             _job_set(job_id, message="Minta judul ke LLM lokal…")
             analyze.refine_with_llm(candidates, settings)
@@ -193,6 +214,7 @@ def _run_analysis(job_id: str) -> None:
                 meta={
                     "features": cand.features,
                     "hook": getattr(cand, "hook_info", {}) or {},
+                    "framing": framing_results.get(idx, {}),
                     "transcript": cand.text[:4000],
                     "language": (transcript or {}).get("language", ""),
                     "caption": bool(transcript),
