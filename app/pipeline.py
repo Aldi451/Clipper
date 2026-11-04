@@ -192,6 +192,7 @@ def _run_analysis(job_id: str) -> None:
                 status="suggested",
                 meta={
                     "features": cand.features,
+                    "hook": getattr(cand, "hook_info", {}) or {},
                     "transcript": cand.text[:4000],
                     "language": (transcript or {}).get("language", ""),
                     "caption": bool(transcript),

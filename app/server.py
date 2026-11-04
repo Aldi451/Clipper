@@ -961,6 +961,42 @@ def create_app() -> FastAPI:
         return {"enabled": bool(settings.get("llm_enabled")),
                 "available": analyze.ollama_available(settings)}
 
+    @app.post("/api/jobs/{job_id}/hooks/refresh")
+    def refresh_hooks(job_id: str) -> dict[str, Any]:
+        """Hitung ulang hook semua clip di project dengan mesin penilai terbaru.
+
+        Berguna untuk project lama yang hook-nya masih hasil aturan lama
+        ("6 kata pertama judul"), supaya semuanya ikut di-level-up.
+        """
+        job = db.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "Project tidak ditemukan")
+        clips = db.list_clips(job_id)
+        if not clips:
+            return {"ok": True, "updated": 0, "clips": 0}
+
+        used: list[list[str]] = []
+        updated = 0
+        results: list[dict[str, Any]] = []
+        for clip in clips:
+            meta = dict(clip.get("meta") or {})
+            source = str(meta.get("transcript") or "").strip() or str(clip.get("title") or "")
+            if not source:
+                continue
+            hook_text, info = analyze.choose_hook(source[:1200], used)
+            if not hook_text:
+                continue
+            if hook_text != (clip.get("hook") or ""):
+                updated += 1
+            meta["hook"] = info
+            features = dict(meta.get("features") or {})
+            features["hook_score"] = float(info.get("score") or 0.0)
+            meta["features"] = features
+            db.update_clip(clip["id"], hook=hook_text, meta=meta)
+            results.append({"id": clip["id"], "hook": hook_text, "score": info.get("score"),
+                            "grade": info.get("grade")})
+        return {"ok": True, "clips": len(clips), "updated": updated, "hooks": results}
+
     @app.post("/api/clips/strip-hooks")
     def strip_hooks(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         """Hapus teks judul/hook dari dalam video untuk clip yang sudah punya spec."""

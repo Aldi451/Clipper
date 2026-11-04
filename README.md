@@ -611,6 +611,29 @@ pendek dari 1 menit, Clipper memberi tahu bahwa target tidak bisa dicapai.
 **Render ulang N clip berubah** → `POST /api/jobs/{id}/render` dengan `{"only_dirty": true}`,
 hanya mengantre clip yang spesifikasinya berubah (mis. setelah membersihkan teks judul).
 
+**Hook: dinilai, bukan dipotong 6 kata pertama.** Mulai v1.1.8 setiap clip mendapat hook yang
+dipilih dari kalimat terbaik di dalamnya, lengkap dengan **skor 0–100** dan **grade**
+(Kuat ≥ 60, Sedang ≥ 40, Lemah). Penilaiannya memakai enam sinyal:
+
+| Sinyal | Contoh pemicu |
+|---|---|
+| frasa pemicu (2+ kata) | “jangan pernah”, “kebanyakan orang”, “ini yang bikin” |
+| pertanyaan | apa/kenapa/gimana/how/why |
+| angka konkret | “90 persen”, “8 detik” |
+| superlatif | paling, tercepat, best, worst |
+| menyapa penonton | kamu, kalian, you |
+| pembuka kuat | bukan “jadi…”, “oke guys…”, “eee…” |
+
+Di kartu clip muncul badge **hook 57 · Sedang** (hover = alasannya), dan di panel **Detail** ada
+3–4 **varian hook** siap pakai (gaya asli / singkat / pertanyaan / peringatan / penasaran). Klik
+salah satu → langsung tersimpan sebagai hook clip itu.
+
+Supaya satu project tidak terasa "semua sama", pemilihan clip juga memakai **penalti kemiripan
+pembuka** (max-marginal-relevance): kandidat yang pembukanya mirip clip yang sudah terpilih
+didorong ke bawah, dan hook yang sudah dipakai clip lain dihindari. Untuk project lama, tombol
+**Perbarui hook N clip** di halaman Project menghitung ulang semuanya
+(`POST /api/jobs/{id}/hooks/refresh`).
+
 **Whisper: library vs model.** Sidebar membedakan dua hal:
 - `Whisper ✓` = library `faster-whisper` terpasang (ikut saat instalasi Clipper),
 - tanpa tanda = library ada tapi **model** belum diunduh → transkripsi akan memakai subtitle video

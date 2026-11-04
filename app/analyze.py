@@ -36,6 +36,42 @@ HOOK_WORDS = {
     "hack", "hacks", "learn", "beginner", "growth", "viral",
 }
 
+# Frasa pemicu (2+ kata) — bobotnya lebih besar daripada kata tunggal, karena
+# inilah yang membuat orang berhenti scroll: "jangan pernah", "kebanyakan orang",
+# "yang gak banyak orang tahu", dst.
+HOOK_PHRASES: dict[str, float] = {
+    # keingintahuan / membongkar
+    "rahasia yang": 1.15, "yang gak banyak orang": 1.2, "yang tidak banyak orang": 1.2,
+    "kebanyakan orang": 1.1, "banyak orang gak": 1.0, "sebenarnya yang": 0.9,
+    "ternyata yang": 0.95, "ini yang bikin": 1.1, "ini yang bikin orang": 1.15,
+    "kuncinya adalah": 0.95, "yang bikin beda": 1.0, "bongkar rahasia": 1.2,
+    "nobody tells you": 1.2, "what nobody": 1.2, "here is why": 1.0, "the reason": 0.9,
+    # peringatan / kesalahan
+    "jangan pernah": 1.25, "jangan sampai": 1.15, "jangan lakukan": 1.15,
+    "kesalahan paling": 1.15, "kesalahan yang": 1.05, "stop lakukan": 1.15,
+    "biggest mistake": 1.2, "never do": 1.15,
+    # bukti / angka
+    "hasilnya adalah": 0.9, "terbukti bahwa": 0.9, "datanya bilang": 1.0,
+    "riset menunjukkan": 0.95, "faktanya adalah": 1.0,
+    # nilai / uang
+    "tanpa modal": 1.1, "gratis tanpa": 1.0, "cuan gede": 1.0, "untung besar": 1.0,
+    # penegasan
+    "paling penting": 0.95, "yang paling": 0.85, "satu-satunya": 1.0,
+    "pertama kali": 0.85, "akhirnya": 0.8,
+}
+
+# Pembuka yang melemahkan hook ("jadi gini guys…", "oke lanjut…")
+WEAK_OPENERS = {
+    "jadi", "oke", "okay", "ok", "nah", "so", "and", "terus", "lalu", "kemudian",
+    "sekarang", "gini", "begini", "eee", "ee", "eh", "emm", "hmm", "uh", "um",
+    "ya", "iya", "betul", "benar", "halo", "hai", "guys", "teman", "semuanya",
+}
+
+
+def _norm_phrase(text: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower())
+
+
 QUESTION_WORDS = {
     "apa", "kenapa", "mengapa", "gimana", "bagaimana", "kok", "siapa", "kapan", "berapa",
     "why", "how", "what", "who", "when", "which", "can", "do", "does",
@@ -88,6 +124,7 @@ class Candidate:
     hashtags: str
     features: dict[str, float] = field(default_factory=dict)
     sentences: list[Sentence] = field(default_factory=list)
+    hook_info: dict[str, Any] = field(default_factory=dict)
 
     @property
     def duration(self) -> float:
@@ -160,15 +197,214 @@ def _clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
-def _hook_score(text: str) -> float:
-    tokens = _tokens(text)
+HOOK_GRADES = ((60.0, "Kuat"), (40.0, "Sedang"), (0.0, "Lemah"))
+
+
+def _grade(score: float) -> str:
+    for threshold, name in HOOK_GRADES:
+        if score >= threshold:
+            return name
+    return "Lemah"
+
+
+def hook_assessment(text: str) -> dict[str, Any]:
+    """Nilai kekuatan hook sebuah kalimat (0–100) + alasan yang bisa dibaca user.
+
+    Berbeda dari versi lama yang hanya menghitung kata pemicu: di sini ada enam
+    sinyal yang masing-masing punya bobot, plus penalti untuk pembuka lemah dan
+    kalimat yang bertele-tele. Tujuannya supaya dua clip yang berbeda benar-benar
+    mendapat nilai berbeda — bukan semuanya "sedang".
+    """
+    raw = re.sub(r"\s+", " ", (text or "")).strip()
+    tokens = _tokens(raw)
     if not tokens:
+        return {"score": 0.0, "grade": "Lemah", "signals": {}, "reasons": [],
+                "words": 0, "phrases": []}
+
+    padded = " " + _norm_phrase(raw) + " "
+    found_phrases = [(phrase, weight) for phrase, weight in HOOK_PHRASES.items()
+                     if f" {phrase} " in padded]
+    phrase_weight = sum(weight for _, weight in found_phrases)
+
+    lowered = [t.lower() for t in tokens]
+    hook_hits = sum(1 for t in lowered if t in HOOK_WORDS)
+    questions = sum(1 for t in lowered if t in QUESTION_WORDS)
+    numbers = len(re.findall(r"\b\d+([.,]\d+)?\b", raw))
+    superlatives = sum(1 for t in lowered if t in
+                       ("paling", "terbesar", "tercepat", "termurah", "nomor", "biggest",
+                        "fastest", "best", "worst", "terbaik", "terburuk"))
+    address = sum(1 for t in lowered if t in ("kamu", "kalian", "lo", "lu", "anda", "you", "your"))
+
+    word_count = len(tokens)
+    first = lowered[0]
+    weak_open = first in WEAK_OPENERS
+    stop_ratio = sum(1 for t in lowered if t in STOPWORDS) / word_count
+    filler_hits = sum(1 for t in lowered if t in FILLERS)
+
+    # --- sinyal 0..1 ---
+    trigger = _clamp((phrase_weight * 0.9 + hook_hits * 0.32) / 2.4)
+    curiosity = 1.0 if questions else 0.0
+    concrete = _clamp(numbers / 2.0 + (0.45 if numbers else 0.0))
+    punch = _clamp((superlatives * 0.5 + address * 0.35))
+    # panjang ideal: 4–14 kata. Terlalu pendek tidak jelas, terlalu panjang bertele-tele.
+    if word_count < 3:
+        length_fit = 0.25
+    elif word_count <= 14:
+        length_fit = 1.0
+    else:
+        length_fit = _clamp(1.0 - (word_count - 14) / 18.0)
+    clarity = _clamp(1.0 - max(0.0, stop_ratio - 0.42) / 0.35 - filler_hits * 0.12)
+    opener = 0.15 if weak_open else 1.0
+
+    score = 100.0 * (
+        0.34 * trigger + 0.14 * curiosity + 0.12 * concrete +
+        0.10 * punch + 0.14 * length_fit + 0.10 * clarity + 0.06 * opener
+    )
+    if weak_open:
+        score *= 0.86
+    score = round(_clamp(score / 100.0) * 100.0, 1)
+
+    # --- alasan yang ditampilkan ke user ---
+    reasons: list[str] = []
+    if found_phrases:
+        reasons.append("frasa pemicu: " + ", ".join(f"“{p}”" for p, _ in found_phrases[:2]))
+    elif hook_hits >= 2:
+        reasons.append(f"{hook_hits} kata pemicu")
+    if questions:
+        reasons.append("berbentuk pertanyaan")
+    if numbers:
+        reasons.append(f"ada angka konkret ({numbers})")
+    if superlatives:
+        reasons.append("pakai kata superlatif")
+    if address:
+        reasons.append("menyapa penonton langsung")
+    if weak_open:
+        reasons.append("dibuka kata lemah (“" + first + "”)")
+    if not reasons:
+        reasons.append("tidak ada pemicu kuat")
+
+    return {
+        "score": score,
+        "grade": _grade(score),
+        "words": word_count,
+        "phrases": [phrase for phrase, _ in found_phrases[:4]],
+        "signals": {
+            "trigger": round(trigger, 3),
+            "curiosity": round(curiosity, 3),
+            "concrete": round(concrete, 3),
+            "punch": round(punch, 3),
+            "length": round(length_fit, 3),
+            "clarity": round(clarity, 3),
+            "opener": round(opener, 3),
+        },
+        "reasons": reasons[:4],
+    }
+
+
+def _hook_score(text: str) -> float:
+    """Skor hook 0..1 (kompatibel dengan pemanggil lama)."""
+    return _clamp(hook_assessment(text)["score"] / 100.0)
+
+
+# --------------------------------------------------------------------------- #
+# pembuat hook: ambil klausa terbaik, bukan 6 kata pertama judul
+# --------------------------------------------------------------------------- #
+_CLAUSE_SPLIT = re.compile(r"(?<=[.!?…])\s+|\s+(?:tapi|namun|tetapi|karena|soalnya|padahal)\s+", re.I)
+
+
+def _trim_words(text: str, limit: int = 12) -> str:
+    words = text.split()
+    if len(words) <= limit:
+        return text.strip(" ,.")
+    return " ".join(words[:limit]).strip(" ,.") + "…"
+
+
+def _lower_first(text: str) -> str:
+    """Huruf pertama jadi kecil, kecuali singkatan/angka (“90 persen”, “AI …”)."""
+    if not text:
+        return text
+    if len(text) > 1 and text[0].isupper() and text[1].isupper():
+        return text
+    return text[0].lower() + text[1:]
+
+
+def hook_variants(text: str, limit: int = 3) -> list[dict[str, Any]]:
+    """Beberapa varian hook dari satu klip, diurutkan dari yang paling kuat.
+
+    Gaya: klausa asli (dipotong), versi pendek, versi peringatan, versi penasaran,
+    dan versi pertanyaan — hanya dibuat kalau kalimatnya memang cocok, supaya
+    tidak muncul kalimat janggal seperti “Kenapa Ternyata …”.
+    """
+    clauses = [c.strip(" ,.") for c in _CLAUSE_SPLIT.split(text or "") if c.strip(" ,.")]
+    if not clauses:
+        return []
+    clauses = [c for c in clauses if 3 <= len(c.split()) <= 30] or clauses[:1]
+    best = max(clauses, key=lambda c: hook_assessment(c)["score"])
+    core = _trim_words(best, 11)
+    core_low = _lower_first(core)
+    core_score = hook_assessment(best)["score"]
+    tokens = _tokens(best)
+    has_question = any(t in QUESTION_WORDS for t in tokens)
+    head = next((w for w in tokens if w in HOOK_WORDS), "")
+    numbers = len(re.findall(r"\b\d+([.,]\d+)?\b", best))
+
+    seeds: list[tuple[str, str]] = [("asli", core)]
+    short = _trim_words(best, 7)
+    if short and len(short.split()) < len(core.split()):
+        seeds.append(("singkat", short))
+    NO_QUESTION = {"jangan", "awas", "stop", "berhenti", "ternyata", "sebenarnya",
+                   "padahal", "justru", "salah", "kesalahan", "kebanyakan"}
+    if not has_question and not core.rstrip().endswith("?"):
+        if head in ("jangan", "awas", "stop", "salah", "kesalahan"):
+            seeds.append(("peringatan", f"Berhenti dulu: {core_low}"))
+        elif head in ("rahasia", "ternyata", "sebenarnya", "bocoran", "fakta"):
+            seeds.append(("penasaran", f"{core} — dan ini alasannya"))
+        elif numbers:
+            seeds.append(("angka", f"Angka ini penting: {core_low}"))
+        else:
+            seeds.append(("penasaran", f"Ini yang bikin beda: {core_low}"))
+        # "Kenapa ternyata…?" / "Kenapa jangan pernah…?" terdengar janggal, jadi
+        # bentuk pertanyaan hanya dibuat untuk kalimat yang memang netral.
+        if len(core.split()) <= 9 and head not in NO_QUESTION:
+            seeds.append(("pertanyaan", f"Kenapa {core_low}?"))
+
+    seen: set[str] = set()
+    variants: list[dict[str, Any]] = []
+    for style, candidate in seeds:
+        candidate = re.sub(r"\s+", " ", candidate).strip(" ,.")
+        key = _norm_phrase(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        assessment = hook_assessment(candidate)
+        # jangan biarkan awalan bagus "menyelamatkan" kalimat inti yang lemah
+        blended = round(0.65 * assessment["score"] + 0.35 * core_score, 1)
+        variants.append({
+            "text": candidate[:90],
+            "style": style,
+            "score": blended,
+            "grade": _grade(blended),
+            "reasons": assessment["reasons"],
+        })
+    variants.sort(key=lambda item: -item["score"])
+    return variants[:limit]
+
+
+def _make_hook(title: str) -> str:
+    """Hook terbaik dari judul/kalimat klip (fallback: 8 kata pertama)."""
+    variants = hook_variants(title, limit=1)
+    if variants:
+        return variants[0]["text"][:60]
+    words = title.split()[:8]
+    hook = " ".join(words).strip(" ,.")
+    return hook.rstrip(".") if hook else title[:48]
+
+
+def _jaccard(a: list[str], b: list[str]) -> float:
+    set_a, set_b = set(a), set(b)
+    if not set_a or not set_b:
         return 0.0
-    hooks = sum(1 for t in tokens if t in HOOK_WORDS)
-    questions = sum(1 for t in tokens if t in QUESTION_WORDS)
-    numbers = len(re.findall(r"\b\d+([.,]\d+)?\b", text))
-    per_100 = (hooks + questions * 1.2 + numbers * 0.8) / len(tokens) * 100
-    return _clamp(per_100 / 9.0)
+    return len(set_a & set_b) / len(set_a | set_b)
 
 
 def _clean_title(text: str, max_len: int = 70) -> str:
@@ -193,17 +429,6 @@ def _make_title(sentences: list[Sentence]) -> str:
     if len(title) < 8 and len(sentences) > 1:
         title = _clean_title(" ".join(s.text for s in sentences[:2]), 70)
     return title
-
-
-def _make_hook(title: str) -> str:
-    tokens = title.split()
-    words: list[str] = []
-    for token in tokens:
-        words.append(token)
-        if len(words) >= 6:
-            break
-    hook = " ".join(words).strip(" ,.")
-    return hook.rstrip(".") if hook else title[:48]
 
 
 def _keywords(text: str, limit: int = 4) -> list[str]:
@@ -336,9 +561,22 @@ def find_candidates(
 
     raw.sort(key=lambda c: -c.score)
     picked: list[Candidate] = []
-    for cand in raw:
-        if len(picked) >= target * 3:
-            break
+    picked_openings: list[list[str]] = []
+    pool = list(raw)
+    # pembuka tiap kandidat sudah dihitung sekali (bukan berulang di dalam loop)
+    openings = {id(c): _tokens(" ".join(x.text for x in c.sentences[:2])) for c in pool}
+
+    while pool and len(picked) < target:
+        best_index, best_value = 0, -1.0
+        for index, cand in enumerate(pool):
+            opening = openings[id(cand)]
+            # clip yang pembukanya mirip clip terpilih didorong ke bawah, supaya
+            # isi project tidak terasa "semua sama" (keluhan paling umum)
+            similarity = max((_jaccard(opening, other) for other in picked_openings), default=0.0)
+            value = cand.score * (1.0 - 0.45 * similarity)
+            if value > best_value:
+                best_index, best_value = index, value
+        cand = pool.pop(best_index)
         clash = False
         for other in picked:
             overlap = min(cand.end, other.end) - max(cand.start, other.start)
@@ -348,9 +586,14 @@ def find_candidates(
             if abs(cand.start - other.start) < 4:
                 clash = True
                 break
-        if not clash:
-            picked.append(cand)
-    picked = picked[:target]
+        if clash:
+            continue
+        cand.features["original_score"] = round(cand.score, 2)
+        cand.features["score"] = round(best_value, 2)
+        cand.features["opening_novelty"] = round(
+            1.0 - max((_jaccard(openings[id(cand)], o) for o in picked_openings), default=0.0), 3)
+        picked.append(cand)
+        picked_openings.append(openings[id(cand)])
 
     # rapikan tepi clip: buang hening di awal/akhir
     for cand in picked:
@@ -358,16 +601,59 @@ def find_candidates(
         cand.end = _snap_end(cand.end, cand.sentences, energy)
 
     picked.sort(key=lambda c: c.start)
+    used_hooks: list[list[str]] = []
     for idx, cand in enumerate(picked):
         cand.title = _make_title(cand.sentences)
-        cand.hook = _make_hook(cand.title)
         keywords = _keywords(cand.title + " " + cand.text)
+        cand.hook, cand.hook_info = _pick_hook(cand, used_hooks)
+        cand.features["hook_score"] = float(cand.hook_info.get("score") or 0.0)
         cand.hashtags = _hashtags(keywords, settings.get("yt_hashtags") or "#Shorts")
         cand.description = _build_description(cand, keywords)
         cand.features["order"] = idx
     if on_progress:
         on_progress(1.0, f"{len(picked)} kandidat clip ditemukan")
     return picked
+
+
+def choose_hook(text: str, used: list[list[str]] | None = None) -> tuple[str, dict[str, Any]]:
+    """Pilih hook terbaik dari sebuah teks + detailnya (dipakai pipeline & API).
+
+    Kalau varian terbaik terlalu mirip hook clip lain (pembawa acara sering
+    mengulang frasa yang sama), ambil varian berikutnya yang lebih segar.
+    """
+    used = used if used is not None else []
+    variants = hook_variants(text, limit=4)
+    if not variants or variants[0]["score"] < 40.0:
+        broader = hook_variants(text[:1200], limit=4)
+        if broader and (not variants or broader[0]["score"] > variants[0]["score"]):
+            variants = broader
+
+    # Pilih dengan penalti kemiripan: varian terkuat menang, tapi kalau hook-nya
+    # sudah dipakai clip lain, varian yang lebih segar didahulukan. Ini yang bikin
+    # tiap clip di satu project tidak terasa "semua sama".
+    chosen = variants[0] if variants else None
+    best_value = float("-inf")
+    for variant in variants:
+        similarity = max((_jaccard(_tokens(variant["text"]), other) for other in used), default=0.0)
+        value = float(variant["score"]) - 32.0 * similarity
+        if value > best_value:
+            best_value, chosen = value, variant
+
+    used.append(_tokens(chosen["text"]) if chosen else _tokens(text))
+    info = {
+        "score": float(chosen["score"]) if chosen else 0.0,
+        "grade": chosen["grade"] if chosen else "Lemah",
+        "style": chosen["style"] if chosen else "asli",
+        "reasons": chosen["reasons"] if chosen else [],
+        "variants": variants,
+    }
+    fallback = _make_hook(text[:120])
+    return (chosen["text"] if chosen else fallback)[:60], info
+
+
+def _pick_hook(cand: Candidate, used: list[list[str]]) -> tuple[str, dict[str, Any]]:
+    opening_text = " ".join(x.text for x in cand.sentences[:3]) or cand.title
+    return choose_hook(opening_text or cand.text, used)
 
 
 def _snap_start(start: float, sentences: list[Sentence], energy: list[tuple[float, float]]) -> float:
