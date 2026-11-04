@@ -942,6 +942,45 @@ function clipStatusTag(clip) {
   return `<span class="tag ${cls}">${esc(label)}</span>`;
 }
 
+function hookMeta(clip) {
+  const meta = clip.meta || {};
+  return meta.hook || null;
+}
+
+function hookGradeTag(clip) {
+  const info = hookMeta(clip);
+  if (!info || !info.grade) return "";
+  const cls = info.grade === "Kuat" ? "up" : info.grade === "Lemah" ? "err" : "run";
+  return `<span class="tag ${cls}" title="${esc((info.reasons || []).join(" · "))}">hook ${Math.round(
+    info.score || 0
+  )} · ${esc(info.grade)}</span>`;
+}
+
+function hookVariantsHtml(clip) {
+  const info = hookMeta(clip);
+  if (!info || !info.variants || !info.variants.length) return "";
+  const rows = info.variants
+    .map(
+      (v, i) => `<button class="hook-opt" data-action="use-hook" data-id="${esc(clip.id)}"
+        data-text="${esc(v.text)}" title="${esc((v.reasons || []).join(" · "))}">
+        <span class="hook-opt-head">
+          <b>${v.score ? Math.round(v.score) : "-"}</b>
+          <span class="tiny dim">${esc(v.style || "")}${v.grade ? " · " + esc(v.grade) : ""}</span>
+          ${i === 0 ? '<span class="tiny up">disarankan</span>' : ""}
+        </span>
+        <span class="hook-opt-text">${esc(v.text)}</span>
+      </button>`
+    )
+    .join("");
+  return `<div class="field">
+    <label>Pilihan hook (klik untuk pakai)</label>
+    <div class="hook-opts">${rows}</div>
+    <div class="tiny dim" style="margin-top:6px">
+      Skor dari sinyal: frasa pemicu, pertanyaan, angka, superlatif, sapaan, dan pembuka yang tidak lemah.
+    </div>
+  </div>`;
+}
+
 function clipCardHtml(clip) {
   const ttOn = !state.settings || state.settings.tt_enabled !== false;
   const thumb = clip.thumb
@@ -962,6 +1001,7 @@ function clipCardHtml(clip) {
             placeholder="Judul clip…">${esc(clip.title)}</textarea>
           <div class="meta-row">
             <span class="score">skor ${scoreText}</span>
+            ${hookGradeTag(clip)}
             <span>${fmtTime(clip.start)} → ${fmtTime(clip.start + clip.duration)}</span>
             <span>${fmtDur(clip.duration)}</span>
           </div>
@@ -1028,6 +1068,8 @@ async function renderProject(jobId) {
       </div>
       <div class="row">
         <button class="btn" data-action="render-all" ${!clips.length || running ? "disabled" : ""}>Render semua</button>
+        ${clips.length ? `<button class="btn ghost" data-action="refresh-hooks" ${running ? "disabled" : ""}
+          title="Hitung ulang kekuatan hook & variannya untuk semua clip di project ini">Perbarui hook ${clips.length} clip</button>` : ""}
         ${dirtyCount ? `<button class="btn ghost" data-action="render-dirty" ${running ? "disabled" : ""}>Render ulang ${dirtyCount} clip berubah</button>` : ""}
         <button class="btn yt" data-action="upload-all" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload YT</button>
         ${ttOn ? `<button class="btn tt" data-action="upload-all-tt" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload TikTok</button>` : ""}
@@ -1173,6 +1215,7 @@ async function openClipEditor(clipId) {
               <label>Hook overlay (muncul 5 detik pertama)</label>
               <input class="input" id="edit-hook" value="${esc(clip.hook)}" maxlength="60" />
             </div>
+            ${hookVariantsHtml(clip)}
             <div class="grid-2">
               <div class="field">
                 <label>Mulai (detik)</label>
@@ -2487,6 +2530,10 @@ document.addEventListener("click", async (e) => {
       await api("/api/jobs/" + id + "/retry", { method: "POST" });
       toast("Mencoba ulang analisis…", "ok");
       renderProject(id);
+    } else if (action === "refresh-hooks") {
+      const res = await api("/api/jobs/" + encodeURIComponent(state.job.id) + "/hooks/refresh", { method: "POST" });
+      toast(`${res.updated} dari ${res.clips} hook diperbarui`, "ok");
+      await renderProject(state.job.id);
     } else if (action === "render-dirty") {
       const res = await api("/api/jobs/" + state.job.id + "/render", {
         method: "POST",
@@ -2543,6 +2590,13 @@ document.addEventListener("click", async (e) => {
       await api("/api/settings", { method: "PATCH", body: { tt_enabled: true } });
       toast("Tombol TikTok dinyalakan", "ok");
       await renderTikTok();
+    } else if (action === "use-hook") {
+      const text = (target && target.dataset ? target.dataset.text : "") || "";
+      if (!text) return;
+      const box = $("#edit-hook");
+      if (box) box.value = text;
+      await api("/api/clips/" + id, { method: "PATCH", body: { hook: text } });
+      toast("Hook dipakai: " + text.slice(0, 40), "ok");
     } else if (action === "upload-tt") {
       await api("/api/clips/" + id + "/upload", { method: "POST", body: { target: "tiktok" } });
       toast("Masuk antrean upload TikTok — jendela browser akan terbuka", "ok");

@@ -164,6 +164,20 @@ h3 { font-size: 15px; margin: 0 0 4px; }
   white-space: pre-wrap; word-break: break-all; color: #b8c2d0;
 }
 
+.hook-opts { display: flex; flex-direction: column; gap: 8px; }
+.hook-opt {
+  display: flex; flex-direction: column; gap: 4px; text-align: left; cursor: pointer;
+  padding: 9px 11px; border-radius: 10px; font: inherit; color: inherit;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.08));
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+}
+.hook-opt:hover { border-color: rgba(124, 92, 255, 0.55); background: rgba(124, 92, 255, 0.10); }
+.hook-opt:active { transform: scale(0.995); }
+.hook-opt-head { display: flex; align-items: center; gap: 8px; }
+.hook-opt-head b { font-size: 12px; color: #c9b8ff; min-width: 22px; }
+.hook-opt-text { font-size: 13px; line-height: 1.45; }
+
 .tt-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .tt-row {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
