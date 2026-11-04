@@ -27,6 +27,7 @@ lalu **upload otomatis ke YouTube Shorts** channel kamu.
 | 🚀 **Export sampai 4K** | 1080p / 1440p / **2160×3840 (4K)** dengan upscale lanczos + unsharp, CRF & FPS bisa diatur. **Tanpa watermark, tanpa batas** — watermark hanya kalau kamu unggah logo sendiri. |
 | 💬 **Caption karaoke** | Word-by-word highlight (3 kata/baris, bisa diatur), warna & font custom, **tanpa kedip**: timing kata disambung (tanpa celah), fade hanya sekali di awal baris. |
 | 🔊 **Normalisasi audio** | Loudnorm -14 LUFS, standar YouTube. |
+| 🎯 **Auto-framing podcast** | Kamera 9:16 **mengikuti pembicara yang sedang tampil** (deteksi wajah lokal dengan OpenCV): halus, ada jeda diam (deadband) supaya tidak goyang, dan pindah kamera bertahap ±0,45 detik. Kalau tidak ada wajah terdeteksi → otomatis kembali ke crop tengah biasa. |
 | ✂️ **Editor per clip** | Ubah judul/hook/deskripsi/hashtag, geser start, ubah durasi, atur fokus crop, matikan caption, preview langsung, render ulang. |
 | ♪ **Upload TikTok** | Upload clip ke TikTok langsung dari Clipper — memakai browser di komputer sendiri (gratis, tanpa API key, tanpa daftar aplikasi). Caption + hashtag terisi otomatis, tombol Post ditekan otomatis (bisa dimatikan). |
 | ▶️ **Upload YouTube** | OAuth Google resmi (device flow — login pakai kode, tanpa buka port lokal), upload resumable, subtitle `.srt` ikut diunggah, `#Shorts` otomatis. |
@@ -643,6 +644,40 @@ Unduh model kapan saja di **Pengaturan → Analisis & transkripsi**: pilih `tiny
 `large-v3` (3,1 GB) lewat tombol **Unduh**, lengkap dengan progres. Setelah terunduh, transkripsi
 100% offline dari folder `models/`.
 
+### Auto-framing: kamera mengikuti pembicara (sejak v1.1.9)
+
+Crop tengah statis bikin podcast dua orang sering "meleset" — yang tampil di frame
+cuma kepala belakang atau kursi kosong. Dengan auto-framing, Clipper mencari wajah
+di video sumber lalu menggeser crop 9:16 supaya pembicara tetap di tengah frame.
+
+Cara kerja (semua lokal, tanpa API):
+
+1. Sampel frame tiap 0,4 detik dari bagian video yang dipakai clip; deteksi wajah
+   dengan **Haar cascade bawaan OpenCV** (tidak ada unduhan model tambahan).
+2. Posisi wajah diterjemahkan menjadi `x` crop (0 = paling kiri, 1 = paling kanan),
+   lalu dihaluskan: perubahan di bawah 0,7% lebar diabaikan (**deadband**) dan
+   segmen lebih pendek dari 1,1 detik digabung ke tetangganya → kamera tidak
+   bolak-balik karena deteksi yang goyang.
+3. Saat render, posisi crop menjadi ekspresi ffmpeg `x='…'` yang bergerak mulus
+   (pan 0,45 detik) hanya pada saat pembicara benar-benar berganti.
+4. **Fallback aman**: kalau wajah terdeteksi di kurang dari 35% frame sampel
+   (video tanpa orang, animasi, kamera jauh), clip tetap dirender dengan crop
+   tengah seperti sebelumnya. Tidak ada render yang gagal gara-gara ini.
+
+Di UI: tombol **🎯 Kamera** di topbar editor (per clip) dan tombol
+**Deteksi pembicara N clip** di halaman Project (semua clip sekaligus). Badge di
+kartu clip menunjukkan hasilnya, mis. `kamera: ikuti pembicara · 1× pindah`.
+Bisa juga lewat API: `POST /api/clips/{id}/framing` dan `POST /api/jobs/{id}/framing`
+(idempoten — aman diklik berkali-kali).
+
+Privasi & biaya: deteksi berjalan di komputer sendiri, **tidak ada frame yang
+diunggah ke mana pun**, dan tidak butuh GPU. Satu-satunya syarat adalah paket
+`opencv-python-headless` yang dipasang otomatis oleh `run.bat` (ikut di
+`requirements.txt`). Auto-framing hanya dipakai untuk `layout = crop`; kalau
+paket itu belum ada, tombolnya akan menjelaskan cara memasangnya dan clip tetap
+bisa dirender. Matikan lewat **Pengaturan → `auto_framing`** (default **aktif**,
+cuma dijalankan untuk clip yang memang berisi orang).
+
 ---
 
 ## Upload ke TikTok (gratis, tanpa API)
@@ -811,7 +846,8 @@ Clipper/
 | `prefer_whisper` | `true` = selalu transkripsi sendiri walau ada subtitle. |
 | `target_clips`, `min_clip_seconds`, `max_clip_seconds` | Berapa & sepanjang apa clip. Durasi dikunci di **60–180 detik** (1–3 menit); nilai di luar itu otomatis dirapikan. |
 | `layout` | `fit` (blur bg) atau `crop` (penuh 9:16). |
-| `crop_focus` | 0 = kiri … 1 = kanan (mode crop). |
+| `crop_focus` | 0 = kiri … 1 = kanan (mode crop) — dipakai kalau auto-framing mati atau tidak menemukan wajah. |
+| `auto_framing` | **Default aktif.** Kamera mengikuti pembicara saat render (hanya untuk `layout = crop`). Matikan kalau kamu ingin crop tengah statis. |
 | `captions`, `caption_words`, `caption_color`, `caption_highlight`, `caption_font`, `caption_uppercase` | Gaya caption. |
 | `hook_overlay` | **Default mati.** Judul/hook dipakai sebagai judul unggahan & caption, *tidak* ditulis di dalam video. Nyalakan hanya kalau memang ingin teks besar di 5 detik pertama. |
 | `fps`, `crf`, `normalize_audio` | Kualitas render. |

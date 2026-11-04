@@ -307,6 +307,17 @@ def diagnose(check_update: bool = False) -> dict[str, Any]:
             log("   → inilah penyebab status 'belum terpasang' walau pip bilang sudah ada.")
             log("   → jalankan perbaiki_tiktok.bat (memasang ke .venv, bukan ke Python global).")
 
+    # --- deteksi wajah (auto-framing kamera ikut pembicara) ---
+    py_check = str(vpy) if vpy else sys.executable
+    code, out = run_capture([py_check, "-c", "import cv2; print(cv2.__version__)"], 120)
+    info["opencv"] = out.strip() if code == 0 else ""
+    if code == 0:
+        log(f"Deteksi wajah: opencv {info['opencv']} ada → auto-framing siap", OK)
+    else:
+        log("Deteksi wajah: opencv TIDAK ada → auto-framing nonaktif", WARN)
+        log("   Klip tetap bisa dirender (crop tengah biasa), hanya kamera tidak mengikuti pembicara.")
+        log("   → jalankan run.bat sekali (atau perbaiki_tiktok.bat) untuk memasangnya.")
+
     # --- browser ---
     browsers = tiktok._browser_paths()  # noqa: SLF001
     info["browsers"] = [{"channel": c, "path": str(p)} for c, p in browsers]
@@ -383,7 +394,8 @@ def fix() -> bool:
     log.head("Perbaikan dukungan TikTok")
     log("Yang akan dilakukan:")
     log("  1. memastikan paket playwright terpasang DI DALAM .venv Clipper")
-    log("  2. memastikan ada browser (pakai Edge/Chrome yang sudah ada,")
+    log("  2. memastikan opencv ada (deteksi wajah untuk auto-framing)")
+    log("  3. memastikan ada browser (pakai Edge/Chrome yang sudah ada,")
     log("     atau unduh Chromium ±130 MB)")
     log("Tidak ada data (video/klip/cookies/token) yang disentuh.")
     log("")
@@ -416,7 +428,25 @@ def fix() -> bool:
         else:
             log(f"Playwright terpasang di .venv ({where})", OK)
 
-    # --- 2. Browser ---
+    # --- 2. Deteksi wajah (auto-framing) ---
+    code, out = run_capture([str(vpy), "-c", "import cv2; print(cv2.__version__)"], 120)
+    if code == 0:
+        log(f"opencv (deteksi wajah) sudah ada: {out.strip()}", OK)
+    else:
+        log("opencv belum ada — memasang opencv-python-headless (auto-framing)…")
+        code, out = run_capture(
+            [str(vpy), "-m", "pip", "install", "opencv-python-headless>=4.8,<5"], 1800
+        )
+        for line in useful_tail(out):
+            log(f"   {line}")
+        code, out = run_capture([str(vpy), "-c", "import cv2; print(cv2.__version__)"], 120)
+        if code == 0:
+            log(f"opencv terpasang: {out.strip()}", OK)
+        else:
+            log("opencv gagal dipasang — auto-framing tetap nonaktif (klip masih bisa dirender).", WARN)
+            log(f'   Manual: "{vpy}" -m pip install "opencv-python-headless>=4.8,<5"', "   ")
+
+    # --- 3. Browser ---
     browsers = tiktok._browser_paths()  # noqa: SLF001
     if browsers:
         channel, path = browsers[0]
