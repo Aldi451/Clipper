@@ -773,6 +773,20 @@ select.ed-mini { width: 76px !important; }
 .ed-sub-time { color: var(--accent-2); flex: none; }
 .ed-sub-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ed-sub-btn { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 12px; }
+.ed-sub.open { flex-wrap: wrap; background: rgba(255, 255, 255, 0.05); }
+.ed-sub.open .ed-sub-text { white-space: normal; }
+.ed-sub-edit { flex-basis: 100%; padding: 8px 2px 2px; display: flex; flex-direction: column; gap: 6px; }
+.ed-sub-text .tag { margin-left: 4px; font-size: 9px; padding: 1px 5px; }
+
+/* --- hook overlay: pilih gaya + status teks vs ucapan --- */
+.ed-hook-box {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  padding: 9px 10px;
+  margin-bottom: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.hook-opt-text { display: block; }
 
 .ed-export-summary { display: flex; gap: 22px; flex-wrap: wrap; }
 

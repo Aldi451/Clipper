@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import framing as framing_module
+from . import speech
 from . import media
 from .config import CLIP_DIR, WORK_DIR, ffmpeg_exe, load_settings
 from .fsutil import safe_replace, safe_rmtree
@@ -133,6 +134,37 @@ RESOLUTIONS = [
 MAX_SEGMENTS = 40
 ANIMS = ("none", "fade", "pop")
 
+# Tiga gaya hook overlay. Semua memakai kata yang benar-benar diucapkan
+# (lihat app/speech.py) supaya teks di layar == suara.
+HOOK_STYLES: dict[str, dict[str, Any]] = {
+    "capsule": {
+        "label": "Kapsul",
+        "desc": "Satu baris tebal di kotak gelap, muncul sekali dengan animasi pop. Paling aman & paling mudah dibaca.",
+        "size": 78, "uppercase": True, "anim": "pop",
+        "box": True, "box_color": "#000000", "box_opacity": 0.55,
+        "color": "#FFFFFF", "stroke": 8, "stroke_color": "#0B0B10", "y": 0.18,
+    },
+    "highlight": {
+        "label": "Sorot kata",
+        "desc": "Semua kata tampil, kata yang sedang diucapkan menyala kuning. Sinkron per kata dengan suara.",
+        "size": 82, "uppercase": True, "anim": "pop",
+        "box": False, "box_color": "#000000", "box_opacity": 0.5,
+        "color": "#FFFFFF", "stroke": 10, "stroke_color": "#0B0B10", "y": 0.18,
+    },
+    "typewriter": {
+        "label": "Ketik",
+        "desc": "Kata muncul satu per satu mengikuti ucapan, seperti sedang diketik. Paling dramatis.",
+        "size": 84, "uppercase": True, "anim": "fade",
+        "box": True, "box_color": "#000000", "box_opacity": 0.45,
+        "color": "#FFFFFF", "stroke": 10, "stroke_color": "#0B0B10", "y": 0.18,
+    },
+}
+
+
+def hook_styles_payload() -> list[dict[str, Any]]:
+    """Daftar gaya hook untuk UI (id, label, penjelasan)."""
+    return [{"id": key, **{k: v for k, v in value.items()}} for key, value in HOOK_STYLES.items()]
+
 
 def template_by_id(template_id: str) -> dict[str, Any] | None:
     return next((t for t in TEMPLATES if t["id"] == template_id), None)
@@ -143,6 +175,7 @@ def templates_payload() -> dict[str, Any]:
         "templates": TEMPLATES,
         "caption_styles": [{"id": k, **v} for k, v in CAPTION_STYLES.items()],
         "resolutions": RESOLUTIONS,
+        "hook_styles": hook_styles_payload(),
         "canvas": {"w": CANVAS_W, "h": CANVAS_H},
         "max_segments": MAX_SEGMENTS,
     }
@@ -301,9 +334,13 @@ def out_to_src(seconds: float, segments: list[dict[str, Any]]) -> float | None:
 # --------------------------------------------------------------------------- #
 # subtitle otomatis
 # --------------------------------------------------------------------------- #
-def _words_from_transcript(transcript: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _words_from_transcript(transcript: dict[str, Any] | None,
+                           segments: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Kata dari transkrip. Kalau ``segments`` dikirim, waktunya = waktu output."""
     if not transcript:
         return []
+    if segments:
+        return speech.words_in_output(transcript, segments)
     words: list[dict[str, Any]] = []
     for seg in transcript.get("segments") or []:
         seg_words = seg.get("words") or []
@@ -315,6 +352,7 @@ def _words_from_transcript(transcript: dict[str, Any] | None) -> list[dict[str, 
                         "start": _f(word.get("start")),
                         "end": _f(word.get("end"), _f(word.get("start")) + 0.3),
                         "text": text,
+                        "prob": _f(word.get("prob"), 1.0),
                     })
             continue
         tokens = (seg.get("text") or "").split()
@@ -323,8 +361,31 @@ def _words_from_transcript(transcript: dict[str, Any] | None) -> list[dict[str, 
         start, end = _f(seg.get("start")), _f(seg.get("end"))
         step = max(0.08, (end - start) / max(1, len(tokens)))
         for i, token in enumerate(tokens):
-            words.append({"start": start + i * step, "end": start + (i + 1) * step, "text": token})
+            words.append({"start": start + i * step, "end": start + (i + 1) * step,
+                          "text": token, "prob": 0.5})
     words.sort(key=lambda w: w["start"])
+    return words
+
+
+def redistribute_words(text: str, start: float, end: float) -> list[dict[str, Any]]:
+    """Bagi waktu baris caption ke kata-katanya (dipakai saat teks diedit user).
+
+    Proporsional panjang kata, jadi kata panjang dapat waktu lebih lama —
+    cukup akurat untuk karaoke dan tidak pernah menampilkan kata lama.
+    """
+    tokens = [tok for tok in (text or "").split() if tok.strip()]
+    if not tokens:
+        return []
+    span = max(0.3, _f(end) - _f(start))
+    weights = [max(2, len(tok)) for tok in tokens]
+    total = sum(weights) or 1
+    cursor = _f(start)
+    words: list[dict[str, Any]] = []
+    for token, weight in zip(tokens, weights):
+        step = span * weight / total
+        words.append({"text": token, "start": round(cursor, 3), "end": round(cursor + step, 3),
+                      "prob": 0.8})
+        cursor += step
     return words
 
 
@@ -334,22 +395,13 @@ def generate_subtitles(
     words_per_line: int = 3,
     word_level: bool = True,
 ) -> list[dict[str, Any]]:
-    """Buat baris subtitle di timeline OUTPUT dari transkrip + segmen aktif."""
-    ranges = with_out_ranges(segments)
-    words = _words_from_transcript(transcript)
-    mapped: list[dict[str, Any]] = []
-    for word in words:
-        for seg in ranges:
-            speed = max(0.5, seg["speed"])
-            if word["end"] <= seg["start"] or word["start"] >= seg["end"]:
-                continue
-            start = seg["out_start"] + (max(word["start"], seg["start"]) - seg["start"]) / speed
-            end = seg["out_start"] + (min(word["end"], seg["end"]) - seg["start"]) / speed
-            if end - start < 0.06:
-                end = start + 0.06
-            mapped.append({"start": round(start, 3), "end": round(end, 3), "text": word["text"]})
-            break
-    mapped.sort(key=lambda w: w["start"])
+    """Buat baris subtitle di timeline OUTPUT dari transkrip + segmen aktif.
+
+    Waktu kata dihitung sekali di ``speech.words_in_output`` (trim + speed),
+    jadi caption, hook overlay, dan audio memakai sumber waktu yang sama —
+    tidak ada lagi teks yang muncul sebelum/sesudah kata diucapkan.
+    """
+    mapped = _words_from_transcript(transcript, segments)
     if not mapped:
         return []
 
@@ -369,9 +421,15 @@ def generate_subtitles(
                     "end": round(current[-1]["end"] + 0.12, 3),
                     "text": text,
                     "hidden": False,
+                    # kata paling tidak yakin di baris ini → UI bisa menandai
+                    "conf": round(min(_f(w.get("prob"), 1.0) for w in current), 3),
                 }
                 if word_level:
-                    line["words"] = [dict(w) for w in current]
+                    line["words"] = [
+                        {"start": round(w["start"], 3), "end": round(w["end"], 3),
+                         "text": w["text"], "prob": round(_f(w.get("prob"), 1.0), 3)}
+                        for w in current
+                    ]
                 lines.append(line)
             current = []
     return lines
@@ -398,6 +456,109 @@ def _srt_ts(seconds: float) -> str:
     ms = int(round((seconds - int(seconds)) * 1000))
     total = int(seconds)
     return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d},{ms:03d}"
+
+
+# --------------------------------------------------------------------------- #
+# hook overlay: teks harus sama dengan yang diucapkan
+# --------------------------------------------------------------------------- #
+def build_hook_text(
+    clip: dict[str, Any],
+    transcript: dict[str, Any] | None,
+    segments: list[dict[str, Any]],
+    settings: dict[str, Any] | None = None,
+    *,
+    style: str | None = None,
+    source: str | None = None,
+    seconds: float | None = None,
+) -> dict[str, Any] | None:
+    """Bangun satu item teks "hook" yang sinkron dengan ucapan.
+
+    ``source = "speech"`` (default) memakai kata pembuka yang benar-benar
+    diucapkan, jadi mustahil muncul kata lain (mis. video bilang "saya" tapi
+    teks "ada"). ``source = "title"`` memakai hook/judul clip, tapi waktunya
+    ditempelkan ke kata yang cocok di transkrip supaya highlight tetap pas.
+    """
+    settings = settings or load_settings()
+    hook = (clip.get("hook") or clip.get("title") or "").strip()
+    style_id = style if style in HOOK_STYLES else str(settings.get("hook_style") or "highlight")
+    if style_id not in HOOK_STYLES:
+        style_id = "highlight"
+    preset = HOOK_STYLES[style_id]
+
+    total = spec_duration({"segments": segments}) or 0.0
+    length = min(6.0, max(1.5, _f(seconds, _f(settings.get("hook_seconds"), 4.5))))
+    if total:
+        length = min(length, max(0.8, total))
+
+    spoken = speech.words_in_output(transcript, segments)
+    window = [w for w in spoken if w["start"] <= length + 0.4]
+    spoken_hook = speech.hook_from_speech(window, max_words=int(settings.get("hook_words") or 12))
+
+    want = source if source in ("speech", "title") else ""
+    if not want:
+        want = "speech" if spoken_hook["text"] else "title"
+
+    text = ""
+    words: list[dict[str, Any]] = []
+    if want == "speech" and spoken_hook["text"]:
+        text = spoken_hook["text"]
+        words = [{"text": w["text"], "start": w["start"], "end": w["end"]}
+                 for w in spoken_hook["words"]]
+    elif hook:
+        text = hook[:90]
+        words = speech.align_words(text, window, start=0.0, end=length)
+        words = [{"text": w["text"], "start": w["start"], "end": w["end"]} for w in words]
+    else:
+        return None
+
+    if not text:
+        return None
+    start = round(max(0.0, _f(words[0]["start"])) if words else 0.0, 3)
+    end = round(max(start + 1.0, min(length, _f(words[-1]["end"]) if words else length)), 3)
+    entry: dict[str, Any] = {
+        "id": "hook",
+        "text": text,
+        "hook_style": style_id,
+        "hook_source": want,
+        "start": start,
+        "end": end,
+        "x": 0.5,
+        "y": _clamp(_f(settings.get("hook_y"), preset["y"]), 0.03, 0.97),
+        "size": int(_clamp(_f(preset["size"]), 18, 160)),
+        "color": preset["color"],
+        "stroke": preset["stroke"],
+        "stroke_color": preset["stroke_color"],
+        "box": bool(preset["box"]),
+        "box_color": preset["box_color"],
+        "box_opacity": preset["box_opacity"],
+        "bold": True,
+        "uppercase": bool(preset["uppercase"]),
+        "rotation": 0,
+        "anim": preset["anim"],
+        "align": "center",
+    }
+    if words:
+        # tanda baca akhir kalimat tidak perlu ikut menyala di overlay hook
+        last = words[-1]
+        trimmed = str(last.get("text") or "").rstrip(" ,;:.!?…")
+        if trimmed and trimmed != last.get("text"):
+            words[-1] = {**last, "text": trimmed}
+        entry["words"] = [w for w in words if str(w.get("text") or "").strip()]
+        if entry["words"]:
+            entry["text"] = entry["text"].rstrip(" ,;:.!?…") or entry["text"]
+    return entry
+
+
+def hook_report(
+    clip: dict[str, Any],
+    transcript: dict[str, Any] | None,
+    segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Bandingkan hook clip dengan ucapan: cocok atau tidak, plus alternatifnya."""
+    spoken = speech.words_in_output(transcript, segments)
+    info = speech.summarize(clip.get("hook") or clip.get("title") or "", spoken)
+    info["has_transcript"] = bool(spoken)
+    return info
 
 
 # --------------------------------------------------------------------------- #
@@ -437,6 +598,7 @@ def default_spec(
         "y": 0.76,
         "mode": "caption",
         "style": "karaoke-yellow",
+        "mute_during_hook": True,
     }
     subtitles = generate_subtitles(
         transcript, segments, captions["words_per_line"], captions["word_level"]
@@ -445,16 +607,9 @@ def default_spec(
     texts: list[dict[str, Any]] = []
     hook = (clip.get("hook") or "").strip()
     if settings.get("hook_overlay") and hook:
-        texts.append({
-            "id": "hook",
-            "text": hook,
-            "start": 0.0,
-            "end": round(min(5.0, spec_duration({"segments": segments}) or 5.0), 2),
-            "x": 0.5, "y": 0.2, "size": 82,
-            "color": "#FFFFFF", "stroke": 9, "stroke_color": "#0B0B10",
-            "box": False, "box_color": "#000000", "box_opacity": 0.5,
-            "bold": True, "uppercase": True, "rotation": 0, "anim": "pop", "align": "center",
-        })
+        entry = build_hook_text(clip, transcript, segments, settings)
+        if entry:
+            texts.append(entry)
 
     export_height = _i(settings.get("export_height"), 1920)
     if export_height <= 2000:
@@ -605,6 +760,7 @@ def normalize_spec(
         "y": _clamp(_f(captions.get("y"), base["captions"]["y"]), 0.05, 0.97),
         "mode": captions.get("mode") if captions.get("mode") in ("caption", "plain", "box") else "caption",
         "style": str(captions.get("style") or base["captions"].get("style") or "custom")[:40],
+        "mute_during_hook": _flag(captions.get("mute_during_hook"), True),
     })
     result["captions"] = merged_captions
 
@@ -634,9 +790,13 @@ def normalize_spec(
                         continue
                     wstart = _clamp(_f(word.get("start"), start), start, end)
                     wend = _clamp(_f(word.get("end"), wstart + 0.2), wstart + 0.05, end)
-                    cleaned.append({"start": round(wstart, 3), "end": round(wend, 3), "text": wtext})
+                    cleaned.append({"start": round(wstart, 3), "end": round(wend, 3), "text": wtext,
+                                    "prob": round(_f(word.get("prob"), 1.0), 3)})
                 if cleaned:
                     entry["words"] = cleaned
+            conf = line.get("conf")
+            if conf is not None:
+                entry["conf"] = round(_clamp(_f(conf), 0.0, 1.0), 3)
             subtitles.append(entry)
         subtitles.sort(key=lambda s: s["start"])
     elif keep_subtitles:
@@ -658,7 +818,7 @@ def normalize_spec(
                 continue
             start = _clamp(_f(item.get("start"), 0.0), 0.0, max(0.1, duration))
             end = _clamp(_f(item.get("end"), start + 3.0), start + 0.2, max(start + 0.2, duration))
-            texts.append({
+            entry: dict[str, Any] = {
                 "id": str(item.get("id") or f"t{idx + 1}")[:24],
                 "text": text,
                 "start": round(start, 3),
@@ -677,7 +837,30 @@ def normalize_spec(
                 "rotation": _clamp(_f(item.get("rotation"), 0), -45, 45),
                 "anim": item.get("anim") if item.get("anim") in ANIMS else "fade",
                 "align": "center",
-            })
+            }
+            # gaya hook (3 pilihan) + waktu ucapannya, hanya untuk teks hook
+            style = item.get("hook_style")
+            if style in HOOK_STYLES:
+                entry["hook_style"] = style
+            words_raw = item.get("words")
+            if isinstance(words_raw, list) and words_raw:
+                words_clean: list[dict[str, Any]] = []
+                for word in words_raw[:40]:
+                    if not isinstance(word, dict):
+                        continue
+                    wtext = str(word.get("text") or "").strip()[:60]
+                    if not wtext:
+                        continue
+                    wstart = _clamp(_f(word.get("start"), start), start, end)
+                    wend = _clamp(_f(word.get("end"), wstart + 0.2), wstart + 0.05, end)
+                    words_clean.append({"text": wtext, "start": round(wstart, 3),
+                                        "end": round(wend, 3)})
+                if words_clean:
+                    entry["words"] = words_clean
+            source = item.get("hook_source")
+            if source in ("speech", "title"):
+                entry["hook_source"] = source
+            texts.append(entry)
     result["texts"] = texts
 
     logo = spec.get("logo") if isinstance(spec.get("logo"), dict) else {}
@@ -868,6 +1051,7 @@ def build_overlays_ass(texts: list[dict[str, Any]], out_path: str | Path, font: 
             continue
         if item.get("uppercase"):
             text = text.upper()
+        style_id = item.get("hook_style")
         start = max(0.0, _f(item.get("start")))
         end = max(start + 0.2, _f(item.get("end"), start + 3.0))
         x = int(round(_clamp(_f(item.get("x"), 0.5), 0.0, 1.0) * CANVAS_W))
@@ -896,11 +1080,93 @@ def build_overlays_ass(texts: list[dict[str, Any]], out_path: str | Path, font: 
             overrides.append("\\fad(120,180)\\fscx55\\fscy55\\t(0,180,\\fscx100\\fscy100)")
         elif anim == "fade":
             overrides.append("\\fad(200,250)")
+        words = item.get("words") or []
+        if style_id in ("highlight", "typewriter") and len(words) >= 2:
+            lines.extend(_hook_word_lines(item, words, start, end, style, overrides, text,
+                                          uppercase=bool(item.get("uppercase"))))
+            continue
         lines.append(
             f"Dialogue: 0,{ass_ts(start)},{ass_ts(end)},{style},,0,0,0,,{{{''.join(overrides)}}}{text}"
         )
     Path(out_path).write_text(_ass_header(font, styles) + "\n".join(lines) + "\n", encoding="utf-8")
     return bool(lines)
+
+
+def _hook_word_lines(
+    item: dict[str, Any],
+    words: list[dict[str, Any]],
+    start: float,
+    end: float,
+    style: str,
+    overrides: list[str],
+    full_text: str,
+    *,
+    uppercase: bool,
+) -> list[str]:
+    """Event ASS per kata untuk gaya "sorot kata" dan "ketik".
+
+    Semua event memakai ``\pos`` yang sama supaya teks tidak melompat
+    (penyebab caption "berkedip"), dan fade hanya dipakai sekali di event
+    pertama per kata — bukan di setiap perubahan.
+    """
+    base = "".join(o for o in overrides if not o.startswith(("\\fad", "\\fscx", "\\t(")))
+    highlight = ass_color(item.get("highlight_color") or "#FFE02B")
+    color = ass_color(item.get("color") or "#FFFFFF")
+    timing = _snap_word_times(words, start, end)
+    chunks = [_escape(w.get("text") or "") for w in words]
+    if uppercase:
+        chunks = [chunk.upper() for chunk in chunks]
+    events: list[str] = []
+    wants_pop = (item.get("anim") or "pop") == "pop"
+    pop = "\\fad(90,0)\\fscx80\\fscy80\\t(0,120,\\fscx100\\fscy100)" if wants_pop else "\\fad(90,0)"
+
+    style_id = item.get("hook_style")
+    for idx, (wstart, wend) in enumerate(timing):
+        if idx >= len(chunks):
+            break
+        # kata yang sedang diucapkan "pop" sekali (animasi di dalam event itu
+        # saja) supaya kata lain tidak ikut berkedip.
+        current = (
+            f"{{\\c{highlight}\\fscx114\\fscy114\\t(0,110,\\fscx100\\fscy100)}}"
+            f"{chunks[idx]}"
+        )
+        if style_id == "typewriter":
+            parts = [f"{{\\c{color}}}{chunk}" for chunk in chunks[:idx]]
+            parts.append(current)
+            body = " ".join(parts)
+        else:
+            parts = []
+            for j, chunk in enumerate(chunks):
+                if not chunk:
+                    continue
+                if j == idx:
+                    parts.append(current)
+                elif j < idx:
+                    parts.append(f"{{\\c{color}}}{chunk}")
+                else:
+                    parts.append(f"{{\\c{color}\\alpha&H60&}}{chunk}{{\\alpha&H00&}}")
+            body = " ".join(parts)
+        intro = pop if idx == 0 else ""
+        ends = min(end, wend)
+        if ends <= wstart:
+            continue
+        events.append(
+            f"Dialogue: 0,{ass_ts(wstart)},{ass_ts(ends)},{style},,0,0,0,,"
+            f"{{{base}{intro}}}{body}"
+        )
+    if not events:
+        events.append(
+            f"Dialogue: 0,{ass_ts(start)},{ass_ts(end)},{style},,0,0,0,,"
+            f"{{{''.join(overrides)}}}{full_text}"
+        )
+    # sisa waktu setelah kata terakhir: teks penuh tetap tampil sampai item.end
+    last_end = timing[-1][1] if timing else start
+    if style_id == "highlight" and last_end < end - 0.05:
+        body = " ".join(f"{{\\c{color}}}{chunk}" for chunk in chunks)
+        events.append(
+            f"Dialogue: 0,{ass_ts(last_end)},{ass_ts(end)},{style},,0,0,0,,{{{base}}}{body}"
+        )
+    return events
 
 
 # --------------------------------------------------------------------------- #
@@ -1161,7 +1427,18 @@ def render_spec(
     font = str(captions.get("font") or "Inter")
     ass_paths: list[str] = []
     if captions.get("enabled") and spec.get("subtitles"):
-        if build_captions_ass(spec["subtitles"], captions, workdir / "captions.ass"):
+        subtitle_lines = spec["subtitles"]
+        hook_item = next((t for t in (spec.get("texts") or [])
+                          if isinstance(t, dict) and t.get("id") == "hook"), None)
+        if hook_item and _flag(captions.get("mute_during_hook"), True):
+            # Selama hook tampil di atas, baris caption yang isinya sama tidak
+            # diulang di bawah (layar bersih, teks tidak dobel).
+            cutoff = _f(hook_item.get("end"))
+            subtitle_lines = [
+                line for line in subtitle_lines
+                if _f(line.get("start")) >= cutoff - 0.05 or line.get("hidden")
+            ]
+        if build_captions_ass(subtitle_lines, captions, workdir / "captions.ass"):
             ass_paths.append("captions.ass")
     if spec.get("texts") and build_overlays_ass(spec["texts"], workdir / "overlays.ass", font):
         ass_paths.append("overlays.ass")

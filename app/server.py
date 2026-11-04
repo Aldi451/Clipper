@@ -14,7 +14,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analyze, db, discover, editor, ingest, media, paths, pipeline, tiktok, transcribe, youtube
+from . import analyze, db, discover, editor, ingest, media, paths, pipeline, speech, tiktok, transcribe, youtube
 from .config import (
     APP_NAME, ASSET_DIR, MAX_UPLOAD_BYTES, VERSION, WEB_DIR, WORK_DIR,
     ensure_dirs, ffmpeg_exe, ffmpeg_for_ytdlp, load_settings, update_settings,
@@ -359,6 +359,21 @@ def create_app() -> FastAPI:
             if meta.get("dirty") is not True:
                 meta["dirty"] = True
                 patch["meta"] = meta
+        if "hook" in patch and patch["hook"] != (clip.get("hook") or ""):
+            # hook berubah → nilai ulang kekuatannya dan cocokkan dengan ucapan
+            job = db.get_job(clip["job_id"]) or {}
+            merged = {**clip, **patch}
+            hook_text = patch["hook"].strip()
+            meta = dict(patch.get("meta") or meta)
+            if hook_text:
+                info = analyze.hook_assessment(hook_text)
+                info["variants"] = analyze.hook_variants(hook_text, limit=4)
+                meta["hook"] = info
+                features = dict(meta.get("features") or {})
+                features["hook_score"] = float(info.get("score") or 0.0)
+                meta["features"] = features
+            meta["hook_speech"] = _hook_speech_report(job, merged, hook_text)
+            patch["meta"] = meta
         if patch:
             db.update_clip(clip_id, **patch)
         return db.get_clip(clip_id)  # type: ignore[return-value]
@@ -562,6 +577,7 @@ def create_app() -> FastAPI:
             },
             "spec": spec,
             "summary": editor.summarize(spec),
+            "hook_report": editor.hook_report(clip, transcript, spec["segments"]),
             "transcript_available": bool(transcript and transcript.get("segments")),
             "meta": editor.templates_payload(),
         }
@@ -661,6 +677,41 @@ def create_app() -> FastAPI:
             spec["subtitles"] = []
         elif action == "set_words_per_line":
             spec["captions"]["words_per_line"] = int(payload.get("words_per_line") or 3)
+        elif action in ("edit", "nudge"):
+            lines = spec.get("subtitles") or []
+            try:
+                index = int(payload.get("index"))
+            except (TypeError, ValueError):
+                raise HTTPException(400, "Baris caption tidak valid")
+            if index < 0 or index >= len(lines):
+                raise HTTPException(400, "Baris caption tidak ditemukan")
+            line = dict(lines[index])
+            if action == "nudge":
+                delta = max(-2.0, min(2.0, float(payload.get("seconds") or 0.1)))
+                line["start"] = round(max(0.0, float(line.get("start", 0)) + delta), 3)
+                line["end"] = round(max(0.15, float(line.get("end", 0)) + delta), 3)
+                for word in line.get("words") or []:
+                    word["start"] = round(max(0.0, float(word.get("start", 0)) + delta), 3)
+                    word["end"] = round(max(0.1, float(word.get("end", 0)) + delta), 3)
+            else:
+                text = str(payload.get("text") or "").strip()
+                if text:
+                    old_text = str(line.get("text") or "")
+                    line["text"] = text[:300]
+                    # teks berubah → sebar ulang waktu kata di dalam baris ini
+                    # supaya karaoke tetap jalan (bukan menampilkan kata lama)
+                    if text != old_text:
+                        line["words"] = editor.redistribute_words(
+                            text, float(line.get("start", 0)), float(line.get("end", 0))
+                        )
+                        line.pop("conf", None)
+                for field in ("start", "end"):
+                    if payload.get(field) is not None:
+                        line[field] = round(max(0.0, float(payload[field])), 3)
+                if line.get("end", 0) <= line.get("start", 0):
+                    line["end"] = round(float(line.get("start", 0)) + 0.4, 3)
+            lines[index] = line
+            spec["subtitles"] = lines
         else:
             raise HTTPException(400, f"Aksi subtitle '{action}' tidak dikenal")
 
@@ -668,6 +719,78 @@ def create_app() -> FastAPI:
         db.update_clip(clip_id, spec=json.dumps(spec, ensure_ascii=False),
                        meta={**(clip.get("meta") or {}), "dirty": True, "edited": True})
         return {"ok": True, "spec": spec, "summary": editor.summarize(spec)}
+
+    @app.post("/api/clips/{clip_id}/hook-overlay")
+    def set_hook_overlay(clip_id: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        """Pasang/ganti teks hook di dalam video, sinkron dengan ucapan.
+
+        ``source = "speech"`` (default) memakai kata yang benar-benar diucapkan
+        di awal clip, ``"title"`` memakai hook clip tapi waktunya ditempelkan ke
+        kata yang cocok. ``enabled = false`` menghapus teks hook dari video.
+        """
+        clip = db.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip tidak ditemukan")
+        job = db.get_job(clip["job_id"]) or {}
+        source_path = paths.resolve_media_path(job.get("source_path"), (WORK_DIR / clip["job_id"],))
+        duration = float(job.get("duration") or 0)
+        if source_path is not None:
+            try:
+                duration = media.probe(source_path).duration or duration
+            except Exception:
+                pass
+        settings = load_settings()
+        transcript = transcribe.load_transcript(clip["job_id"])
+        spec = editor.load_or_create_spec(clip, transcript, duration, settings)
+
+        enabled = payload.get("enabled", True)
+        texts = [item for item in (spec.get("texts") or [])
+                 if not (isinstance(item, dict) and item.get("id") == "hook")]
+        report: dict[str, Any] = {}
+        if enabled:
+            source = str(payload.get("source") or "speech")
+            if source not in ("speech", "title"):
+                source = "speech"
+            entry = editor.build_hook_text(
+                clip, transcript, spec["segments"], settings,
+                style=str(payload.get("style") or settings.get("hook_style") or "highlight"),
+                source=source,
+                seconds=payload.get("seconds"),
+            )
+            if entry is None:
+                raise HTTPException(400, "Belum ada transkrip/ucapan yang bisa dijadikan teks hook")
+            texts.insert(0, entry)
+            report = editor.hook_report(clip, transcript, spec["segments"])
+            if payload.get("style"):
+                update_settings({"hook_style": str(payload["style"])})
+        spec["texts"] = texts
+        spec = editor.normalize_spec(spec, clip, settings, duration)
+        db.update_clip(clip_id, spec=json.dumps(spec, ensure_ascii=False),
+                       meta={**(clip.get("meta") or {}), "dirty": True, "edited": True})
+        hook_item = next((t for t in spec["texts"] if t.get("id") == "hook"), None)
+        return {"ok": True, "spec": spec, "summary": editor.summarize(spec),
+                "hook": hook_item, "report": report}
+
+    @app.get("/api/clips/{clip_id}/hook-check")
+    def check_hook(clip_id: str) -> dict[str, Any]:
+        """Cocokkan teks hook clip dengan kata yang benar-benar diucapkan."""
+        clip = db.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip tidak ditemukan")
+        job = db.get_job(clip["job_id"]) or {}
+        source_path = paths.resolve_media_path(job.get("source_path"), (WORK_DIR / clip["job_id"],))
+        duration = float(job.get("duration") or 0)
+        if source_path is not None:
+            try:
+                duration = media.probe(source_path).duration or duration
+            except Exception:
+                pass
+        transcript = transcribe.load_transcript(clip["job_id"])
+        spec = editor.load_or_create_spec(clip, transcript, duration)
+        report = editor.hook_report(clip, transcript, spec["segments"])
+        report["hook_item"] = next((t for t in (spec.get("texts") or [])
+                                    if isinstance(t, dict) and t.get("id") == "hook"), None)
+        return {"ok": True, "clip_id": clip_id, **report}
 
     @app.post("/api/clips/{clip_id}/assets")
     def upload_clip_asset(clip_id: str, file: UploadFile = File(...)) -> dict[str, Any]:
@@ -1039,6 +1162,23 @@ def create_app() -> FastAPI:
         detected = sum(1 for item in results if item["ok"])
         return {"ok": True, "clips": len(results), "detected": detected, "results": results}
 
+    def _hook_speech_report(job: dict[str, Any], clip: dict[str, Any],
+                            hook_text: str) -> dict[str, Any]:
+        """Ringkas apakah hook baru cocok dengan ucapan clip (untuk badge UI)."""
+        transcript = transcribe.load_transcript(job.get("id") or "")
+        if not transcript or not transcript.get("segments"):
+            return {}
+        segments = editor.normalize_segments(
+            [{"start": float(clip.get("start") or 0),
+              "end": float(clip.get("start") or 0) + float(clip.get("duration") or 30),
+              "speed": 1.0}],
+            clip, float(job.get("duration") or 0),
+        )
+        spoken = speech.words_in_output(transcript, segments)
+        check = speech.verify_text(hook_text, spoken)
+        return {"ok": check["ok"], "ratio": check["ratio"],
+                "speech_text": speech.hook_from_speech(spoken)["text"]}
+
     @app.post("/api/jobs/{job_id}/hooks/refresh")
     def refresh_hooks(job_id: str) -> dict[str, Any]:
         """Hitung ulang hook semua clip di project dengan mesin penilai terbaru.
@@ -1070,9 +1210,54 @@ def create_app() -> FastAPI:
             features = dict(meta.get("features") or {})
             features["hook_score"] = float(info.get("score") or 0.0)
             meta["features"] = features
+            meta["hook_speech"] = _hook_speech_report(job, clip, hook_text)
             db.update_clip(clip["id"], hook=hook_text, meta=meta)
             results.append({"id": clip["id"], "hook": hook_text, "score": info.get("score"),
                             "grade": info.get("grade")})
+        return {"ok": True, "clips": len(clips), "updated": updated, "hooks": results}
+
+    @app.post("/api/jobs/{job_id}/hooks/from-speech")
+    def hooks_from_speech(job_id: str) -> dict[str, Any]:
+        """Ganti hook semua clip dengan kata yang **benar-benar diucapkan**.
+
+        Ini jawaban untuk kasus "video bilang Saya, teksnya Ada": teks diambil
+        verbatim dari transkrip di awal clip, jadi tidak mungkin meleset.
+        """
+        job = db.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "Project tidak ditemukan")
+        transcript = transcribe.load_transcript(job_id)
+        if not transcript or not transcript.get("segments"):
+            raise HTTPException(400, "Transkrip belum tersedia untuk project ini")
+        clips = db.list_clips(job_id)
+        updated = 0
+        results: list[dict[str, Any]] = []
+        for clip in clips:
+            segments = editor.normalize_segments(
+                [{"start": float(clip.get("start") or 0),
+                  "end": float(clip.get("start") or 0) + float(clip.get("duration") or 30),
+                  "speed": 1.0}],
+                clip, float(job.get("duration") or 0),
+            )
+            spoken = speech.words_in_output(transcript, segments)
+            pick = speech.hook_from_speech(spoken)
+            if not pick["text"]:
+                results.append({"id": clip["id"], "ok": False, "hook": clip.get("hook") or ""})
+                continue
+            hook_text = pick["text"][:90]
+            meta = dict(clip.get("meta") or {})
+            info = analyze.hook_assessment(hook_text)
+            meta["hook"] = info
+            meta["hook_speech"] = {"ok": True, "ratio": 1.0, "speech_text": hook_text, "source": "speech"}
+            features = dict(meta.get("features") or {})
+            features["hook_score"] = float(info.get("score") or 0.0)
+            meta["features"] = features
+            if hook_text != (clip.get("hook") or ""):
+                updated += 1
+            db.update_clip(clip["id"], hook=hook_text, meta=meta)
+            results.append({"id": clip["id"], "ok": True, "hook": hook_text,
+                            "score": info.get("score"), "grade": info.get("grade")})
+        # teks hook di dalam video (kalau ada) ikut dibuat ulang supaya sinkron
         return {"ok": True, "clips": len(clips), "updated": updated, "hooks": results}
 
     @app.post("/api/clips/strip-hooks")
