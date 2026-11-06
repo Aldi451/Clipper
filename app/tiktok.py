@@ -388,6 +388,9 @@ def diag() -> dict[str, Any]:
         "chromium": chromium_downloaded(),
         "chromium_dirs": [str(p) for p in _chromium_roots()],
         "install_command": install_command(),
+        "profile": str(_active_profile()),
+        "profile_locks": _profile_locks(_active_profile()),
+        "browser_log": str(BROWSER_LOG),
         "os": f"{os.name} {sys.platform}",
     }
 
@@ -409,6 +412,13 @@ def status() -> dict[str, Any]:
         "installing": bool(state.get("installing") or state.get("installing_browser")),
         "message": state.get("message") or "",
         "log": state.get("log", [])[-12:],
+        "last_mode": state.get("last_mode") or "",
+        "browser_errors": state.get("browser_errors") or [],
+        "browser_log": str(BROWSER_LOG),
+        "profile_active": str(_active_profile()),
+        "profile_in_use": _profile_in_use(_active_profile()) if os.name == "nt" else bool(
+            _profile_locks(_active_profile())
+        ),
         "diag": diag(),
     }
 
@@ -607,43 +617,363 @@ def recheck() -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # helper Playwright
 # --------------------------------------------------------------------------- #
-def _launch(playwright: Any, headless: bool = False) -> Any:
-    """Buka browser dengan profil tetap supaya login TikTok tidak hilang."""
-    ensure_dirs()
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    options = dict(
-        user_data_dir=str(PROFILE_DIR),
-        headless=headless,
-        viewport=None,
-        args=[
-            "--start-maximized",
-            "--disable-blink-features=AutomationControlled",
-            "--no-first-run",
-            "--no-default-browser-check",
-        ],
-        ignore_default_args=["--enable-automation"],
-    )
-    browsers = _browser_paths()
-    attempts: list[dict[str, Any]] = []
-    if browsers:
-        channel, path = browsers[0]
-        attempts.append({"executable_path": str(path)})
-        if channel in ("chrome", "msedge"):
-            attempts.append({"channel": channel})
-    attempts.append({})
-    last_error: Exception | None = None
-    for extra in attempts:
+BROWSER_LOG = DATA_DIR / "logs" / "tiktok_browser.log"
+PROFILE_PICK = DATA_DIR / "tiktok_profile_dir.txt"
+
+# Argumen dasar untuk semua cara buka browser. Tidak ada yang berbahaya di sini:
+# hanya membuat jendela tampil penuh dan mengurangi tanda "dikendalikan robot".
+BASE_ARGS = [
+    "--start-maximized",
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+]
+
+
+def _write_browser_log(lines: list[str]) -> None:
+    """Simpan detail percobaan buka browser ke data/logs/tiktok_browser.log."""
+    try:
+        BROWSER_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with BROWSER_LOG.open("a", encoding="utf-8") as out:
+            out.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            for line in lines:
+                out.write(line.rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def _short_error(exc: Exception | str) -> str:
+    """Satu baris pesan error yang masih bisa dibaca manusia."""
+    text = str(exc).strip().splitlines()
+    return (text[0] if text else "tidak diketahui")[:220]
+
+
+def _active_profile() -> Path:
+    """Folder profil browser yang sedang dipakai (bisa berpindah kalau terkunci)."""
+    try:
+        recorded = PROFILE_PICK.read_text(encoding="utf-8").strip()
+        if recorded:
+            return Path(recorded)
+    except OSError:
+        pass
+    return PROFILE_DIR
+
+
+def _set_active_profile(path: Path) -> None:
+    try:
+        PROFILE_PICK.write_text(str(path), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _profile_locks(profile: Path) -> list[str]:
+    """File penanda profil sedang dipakai proses browser lain."""
+    names = ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile")
+    found: list[str] = []
+    for name in names:
         try:
-            return playwright.chromium.launch_persistent_context(**options, **extra)
-        except Exception as exc:  # noqa: BLE001 - coba cara lain dulu
-            last_error = exc
+            if (profile / name).exists():
+                found.append(name)
+        except OSError:
             continue
-    detail = str(last_error).splitlines()[0][:180] if last_error else "tidak diketahui"
-    raise TikTokError(
-        "Browser tidak bisa dibuka. Pastikan Chrome atau Edge terpasang, "
-        "atau klik \"Unduh browser\" di halaman TikTok. "
-        f"Detail: {detail}"
+    return found
+
+
+def _profile_in_use(profile: Path) -> bool:
+    """Ada proses browser yang memakai folder profil ini? (deteksi cepat)"""
+    if os.name != "nt":
+        return bool(_profile_locks(profile))
+    try:
+        script = (
+            "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' or Name='chrome.exe'"
+            " or Name='brave.exe' or Name='vivaldi.exe'\" | "
+            "Where-Object { $_.CommandLine -like '*tiktok_profile*' } | "
+            "Select-Object -ExpandProperty ProcessId"
+        )
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        return bool(out.stdout.strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _launch_modes() -> list[tuple[str, dict[str, Any]]]:
+    """Daftar cara membuka browser, dari yang paling diinginkan."""
+    modes: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for channel, path in _browser_paths()[:4]:
+        label = f"{channel} → {path}"
+        if str(path) in seen:
+            continue
+        seen.add(str(path))
+        modes.append((label, {"executable_path": str(path)}))
+    for channel, path in _browser_paths()[:3]:
+        if channel in ("chrome", "msedge"):
+            modes.append((f"kanal {channel}", {"channel": channel}))
+    # sebagian mesin gagal karena driver GPU/antivirus — coba sekali tanpa GPU
+    for channel, path in _browser_paths()[:1]:
+        modes.append((
+            f"{channel} tanpa GPU",
+            {"executable_path": str(path),
+             "args": list(BASE_ARGS) + ["--disable-gpu", "--disable-software-rasterizer"]},
+        ))
+    modes.append(("Chromium bawaan Playwright", {}))
+    return modes
+
+
+class _StateContext:
+    """Bungkus context non-persistent: simpan cookie saat ditutup.
+
+    Cadangan kalau profil permanen tidak bisa dibuka (mis. terkunci browser
+    lain). Login tetap tersimpan sebagai storage_state JSON, jadi lain kali
+    tidak perlu login ulang.
+    """
+
+    def __init__(self, context: Any, browser: Any, state_file: Path) -> None:
+        object.__setattr__(self, "_ctx", context)
+        object.__setattr__(self, "_browser", browser)
+        object.__setattr__(self, "_state_file", state_file)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_ctx"), name)
+
+    def close(self) -> None:
+        ctx = object.__getattribute__(self, "_ctx")
+        brw = object.__getattribute__(self, "_browser")
+        state_file = object.__getattribute__(self, "_state_file")
+        try:
+            ctx.storage_state(path=str(state_file))
+            _state["storage_state"] = str(state_file)
+        except Exception:  # noqa: BLE001
+            pass
+        for item in (ctx, brw):
+            try:
+                item.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _state_file() -> Path:
+    ensure_dirs()
+    return PROFILE_DIR / "state.json"
+
+
+def _launch_with_state(playwright: Any, mode: tuple[str, dict[str, Any]],
+                       headless: bool) -> Any:
+    """Buka browser biasa (tanpa profil tetap) lalu muat cookie tersimpan."""
+    _label, extra = mode
+    kwargs: dict[str, Any] = {"headless": headless, "args": list(BASE_ARGS), "timeout": 25000}
+    kwargs.update(extra)
+    browser = playwright.chromium.launch(**kwargs)
+    state = _state_file()
+    context_opts: dict[str, Any] = {"viewport": None}
+    if state.exists():
+        try:
+            context_opts["storage_state"] = str(state)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        context = browser.new_context(**context_opts)
+    except Exception:  # noqa: BLE001
+        context = browser.new_context()
+    return _StateContext(context, browser, state)
+
+
+def _launch(playwright: Any, headless: bool = False) -> Any:
+    """Buka browser dengan profil tetap supaya login TikTok tidak hilang.
+
+    Urutan percobaan (semua dicatat; kalau semuanya gagal, pesan error memuat
+    penyebab SEBENARNYA dari browser yang dipakai — bukan pesan "Executable
+    doesn't exist" dari Chromium bawaan yang belum diunduh):
+
+      1. browser terpasang (Edge/Chrome/Brave) + profil yang ada
+      2. kanal resmi Playwright (msedge/chrome)
+      3. chromium bawaan Playwright
+      4. ulangi 1-3 dengan profil BARU (profil lama terkunci/rusak)
+      5. cadangan terakhir: browser biasa + cookie tersimpan (storage_state)
+
+    Kalau percobaan 4 berhasil, profil baru itu diingat supaya login berikutnya
+    memakai folder yang sama.
+    """
+    ensure_dirs()
+    profile = _active_profile()
+    try:
+        profile.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        profile = PROFILE_DIR
+        profile.mkdir(parents=True, exist_ok=True)
+
+    modes = _launch_modes()
+    failures: list[tuple[str, str]] = []
+
+    def persistent(target: Path, mode: tuple[str, dict[str, Any]]) -> Any:
+        label, extra = mode
+        options: dict[str, Any] = dict(
+            user_data_dir=str(target),
+            headless=headless,
+            viewport=None,
+            args=list(BASE_ARGS),
+            ignore_default_args=["--enable-automation"],
+            timeout=25000,
+        )
+        options.update(extra)
+        del label
+        return playwright.chromium.launch_persistent_context(**options)
+
+    # --- 1-3: profil yang sudah ada (login lama tetap terpakai)
+    for mode in modes:
+        try:
+            context = persistent(profile, mode)
+            _state["last_mode"] = mode[0]
+            return context
+        except Exception as exc:  # noqa: BLE001
+            failures.append((mode[0], _short_error(exc)))
+
+    # --- 4: profil baru. Sering menyembuhkan "Process failed to launch"
+    #        karena profil terkunci / rusak setelah pindah drive.
+    fresh = profile.parent / f"{profile.name}_baru"
+    for mode in modes[:4]:
+        try:
+            context = persistent(fresh, mode)
+            _set_active_profile(fresh)
+            _state["last_mode"] = mode[0] + " (profil baru)"
+            _say(f"Profil browser lama tidak bisa dipakai — memakai profil baru: {fresh.name}")
+            return context
+        except Exception as exc:  # noqa: BLE001
+            failures.append((mode[0] + " + profil baru", _short_error(exc)))
+
+    # --- 5: tanpa profil permanen, login disimpan sebagai cookie JSON
+    for mode in modes[:4]:
+        try:
+            context = _launch_with_state(playwright, mode, headless)
+            _state["last_mode"] = mode[0] + " (tanpa profil)"
+            _say("Memakai mode cadangan: browser biasa + cookie tersimpan.")
+            return context
+        except Exception as exc:  # noqa: BLE001
+            failures.append((mode[0] + " tanpa profil", _short_error(exc)))
+
+    # --- semuanya gagal: laporkan penyebab sebenarnya + saran yang tepat
+    _write_browser_log(
+        [f"profil aktif : {profile}", f"headless     : {headless}", "percobaan:"]
+        + [f"  - {label}: {msg}" for label, msg in failures]
     )
+    _state["browser_errors"] = [{"mode": label, "error": msg} for label, msg in failures]
+    primary = failures[0][1] if failures else "tidak diketahui"
+    hint = _browser_hint(failures, profile)
+    raise TikTokError(
+        f"Browser tidak bisa dibuka. {hint} "
+        f"Penyebab dari {failures[0][0] if failures else 'browser'}: {primary} "
+        f"(detail lengkap: {BROWSER_LOG})"
+    )
+
+
+def _browser_hint(failures: list[tuple[str, str]], profile: Path) -> str:
+    """Saran yang cocok dengan pesan error yang benar-benar muncul."""
+    joined = " ".join(msg.lower() for _label, msg in failures)
+    if _profile_in_use(profile) or _profile_locks(profile):
+        return (
+            "Profil browser Clipper sedang dipakai proses browser lain. "
+            "Tutup semua jendela Edge/Chrome yang terbuka (atau restart komputer), lalu coba lagi."
+        )
+    if "process failed to launch" in joined or "target page, context or browser has been closed" in joined:
+        return (
+            "Browser langsung menutup saat dibuka — biasanya karena profil terkunci, "
+            "kebijakan kantor/sekolah, atau antivirus. Coba: tutup semua Edge/Chrome, "
+            "matikan sementara antivirus, atau klik \"Unduh browser\" di halaman TikTok."
+        )
+    if "executable doesn't exist" in joined or "is not found at" in joined:
+        return (
+            "File browser yang dicari tidak ada. Klik \"Unduh browser\" di halaman TikTok "
+            "(memakai Chromium bawaan Clipper, sekali unduh ±130 MB)."
+        )
+    if "cannot find" in joined or "winerror" in joined or "access is denied" in joined:
+        return "Akses file browser ditolak (antivirus/izin folder). Coba jalankan run.bat sebagai administrator."
+    if "protocol" in joined or "version" in joined:
+        return (
+            "Versi browser dan Playwright tidak cocok. Klik \"Pasang dukungan TikTok\" sekali lagi "
+            "untuk memperbarui Playwright, atau klik \"Unduh browser\"."
+        )
+    return (
+        "Coba klik \"Unduh browser\" di halaman TikTok (memakai Chromium bawaan Clipper, "
+        "tidak bergantung pada Edge/Chrome)."
+    )
+
+
+def diagnose_browser(headless: bool = True) -> dict[str, Any]:
+    """Tes semua cara buka browser dan kembalikan hasil per cara (untuk UI/doctor).
+
+    Read-only: tidak menyentuh profil TikTok asli. Setiap percobaan memakai
+    folder sementara yang dihapus lagi setelah tes.
+    """
+    result: dict[str, Any] = {
+        "ok": False,
+        "profile": str(_active_profile()),
+        "profile_in_use": False,
+        "results": [],
+        "errors": [],
+        "log": str(BROWSER_LOG),
+    }
+    if not _ensure_importable()[0]:
+        result["fatal"] = f"Playwright tidak bisa diimpor: {import_error()}"
+        _write_browser_log([result["fatal"]])
+        return result
+
+    profile = _active_profile()
+    result["profile_in_use"] = _profile_in_use(profile)
+    result["profile_locks"] = _profile_locks(profile)
+
+    from playwright.sync_api import sync_playwright
+
+    tmp = DATA_DIR / "tiktok_profile_tes"
+    try:
+        with sync_playwright() as pw:
+            for label, extra in _launch_modes():
+                entry: dict[str, Any] = {"mode": label, "ok": False, "error": ""}
+                try:
+                    kwargs = {"user_data_dir": str(tmp), "headless": headless,
+                              "args": list(BASE_ARGS)}
+                    kwargs.update(extra)
+                    context = pw.chromium.launch_persistent_context(**kwargs)
+                    try:
+                        page = context.new_page()
+                        page.goto("about:blank", timeout=15000)
+                        title = page.title()
+                        page.close()
+                        entry["ok"] = True
+                        entry["title"] = title
+                    finally:
+                        try:
+                            context.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception as exc:  # noqa: BLE001
+                    entry["error"] = _short_error(exc)
+                result["results"].append(entry)
+                if entry["ok"]:
+                    result["ok"] = True
+    except Exception as exc:  # noqa: BLE001
+        result["fatal"] = _short_error(exc)
+    finally:
+        try:
+            from .fsutil import safe_rmtree
+
+            safe_rmtree(tmp)
+        except Exception:  # noqa: BLE001
+            pass
+
+    result["errors"] = [f"{e['mode']}: {e['error']}" for e in result["results"] if not e["ok"]]
+    if not result["ok"]:
+        failures = [(e["mode"], e["error"]) for e in result["results"] if not e["ok"]]
+        result["hint"] = _browser_hint(failures, profile)
+    _write_browser_log(
+        [f"tes browser (headless={headless}) — profil aktif: {profile}",
+         f"profil dipakai proses lain: {result['profile_in_use']}"]
+        + [f"  [{'OK ' if e['ok'] else 'X  '}] {e['mode']}{'' if e['ok'] else ': ' + e['error']}"
+           for e in result["results"]]
+    )
+    return result
 
 
 def _page(context: Any) -> Any:
@@ -820,7 +1150,12 @@ def open_login_window(wait_seconds: float = 900) -> dict[str, Any]:
                     except Exception:
                         pass
         except Exception as exc:  # noqa: BLE001
-            _say(f"Gagal membuka jendela TikTok: {str(exc).splitlines()[0][:160]}")
+            message = " ".join(str(exc).split())
+            if len(message) > 420:
+                message = message[:420] + "…"
+            _say(f"Gagal membuka jendela TikTok: {message}")
+            _say("Klik tombol \"Tes buka browser\" di halaman TikTok — hasilnya menunjukkan "
+                 "cara mana yang gagal dan kenapa.")
         finally:
             with _state_lock:
                 _state["login_window"] = False

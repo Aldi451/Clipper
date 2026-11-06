@@ -1449,7 +1449,9 @@ async function renderTikTok(quiet = false) {
             <button class="btn tt" data-action="tt-browser" ${tt.installing ? "disabled" : ""}>
               Unduh browser Clipper</button>
             <button class="btn ghost" data-action="tt-recheck" ${tt.installing ? "disabled" : ""}>Periksa ulang</button>
+            <button class="btn ghost" data-action="tt-test-browser" ${tt.installing ? "disabled" : ""}>Tes buka browser</button>
           </div>
+          <div id="tt-test-result"></div>
           ${ttDiagHtml(tt)}
         </div>`
       : `<div class="card">
@@ -1465,8 +1467,10 @@ async function renderTikTok(quiet = false) {
               ${tt.login_window ? "Jendela login terbuka…" : tt.logged_in ? "Buka TikTok Studio" : "Buka TikTok & login"}
             </button>
             <button class="btn ghost" data-action="tt-recheck">Periksa ulang</button>
+            <button class="btn ghost" data-action="tt-test-browser" title="Coba buka browser sekarang dan laporkan penyebabnya kalau gagal">Tes buka browser</button>
             ${tt.logged_in ? `<button class="btn ghost danger" data-action="tt-logout">Hapus sesi</button>` : ""}
           </div>
+          <div id="tt-test-result"></div>
           <p class="hint" style="margin-top:12px">
             Jendela browser TikTok akan terbuka di layar kamu. Login sekali di sana (email/kode atau scan QR),
             lalu jendela menutup sendiri. Cookie disimpan lokal di profil di atas.
@@ -1601,6 +1605,35 @@ function ttUploadCardHtml(clips, tt, settings) {
     </div>
     ${note}
     ${rows ? `<div class="tt-list">${rows}</div>` : ""}
+  </div>`;
+}
+
+function ttTestResultHtml(res) {
+  const rows = (res.results || [])
+    .map(
+      (r) => `<div class="kv"><span>${r.ok ? "✓" : "✕"} ${esc(r.mode)}</span>
+        <b class="${r.ok ? "up" : ""}" style="${r.ok ? "" : "color:#fca5a5"};font-weight:500;text-align:right">
+          ${r.ok ? "bisa dibuka" : esc((r.error || "").slice(0, 160))}
+        </b></div>`
+    )
+    .join("");
+  const usage = res.profile_in_use
+    ? `<div class="tiny" style="color:#fca5a5;margin-top:8px">
+         Profil browser Clipper sedang dipakai proses Edge/Chrome lain — tutup semua jendela browser, lalu tes lagi.
+       </div>`
+    : "";
+  return `<div class="card" style="margin-top:12px;background:rgba(255,255,255,0.03)">
+    <div class="card-title"><h2>Tes buka browser</h2>
+      <span class="tag ${res.ok ? "up" : "err"}">${res.ok ? "berhasil" : "gagal"}</span>
+    </div>
+    <div class="kv-list">${rows || '<div class="tiny dim">Tidak ada hasil.</div>'}</div>
+    ${usage}
+    ${res.hint ? `<p class="hint" style="margin-top:10px">💡 ${esc(res.hint)}</p>` : ""}
+    ${res.fatal ? `<p class="hint" style="color:#fca5a5">${esc(res.fatal)}</p>` : ""}
+    <div class="tiny dim" style="margin-top:8px">
+      Detail lengkap disimpan di <span class="mono">${esc(res.log || "")}</span> — kirim file itu
+      kalau masih gagal supaya bisa saya periksa.
+    </div>
   </div>`;
 }
 
@@ -2690,6 +2723,20 @@ document.addEventListener("click", async (e) => {
         res && res.ready ? "ok" : "bad"
       );
       await renderTikTok();
+    } else if (action === "tt-test-browser") {
+      const box = $("#tt-test-result");
+      if (box) box.innerHTML = `<div class="tiny dim" style="margin-top:10px"><span class="spinner"></span> Menguji browser…</div>`;
+      target.disabled = true;
+      try {
+        const res = await api("/api/tiktok/browser-test", { method: "POST" });
+        if (box) box.innerHTML = ttTestResultHtml(res);
+        toast(res.ok ? "Browser bisa dibuka" : "Browser gagal dibuka — lihat detailnya di bawah", res.ok ? "ok" : "bad");
+        if (res.status) state.tiktok = res.status;
+      } catch (err) {
+        if (box) box.innerHTML = `<div class="tiny" style="color:#fca5a5;margin-top:10px">${esc(err.message)}</div>`;
+      } finally {
+        target.disabled = false;
+      }
     } else if (action === "tt-browser") {
       await api("/api/tiktok/browser", { method: "POST" });
       toast("Mengunduh browser (±130 MB)…", "ok");

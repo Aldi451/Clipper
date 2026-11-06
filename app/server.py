@@ -937,6 +937,24 @@ def create_app() -> FastAPI:
     def tt_browser() -> Any:
         return _tt_guard(tiktok.install_browser)
 
+    @app.post("/api/tiktok/browser-test")
+    def tt_browser_test() -> dict[str, Any]:
+        """Tes buka browser sungguhan (headless) dan laporkan hasil per cara.
+
+        Read-only: memakai profil sementara, tidak menyentuh profil/login user.
+        """
+        result = tiktok.diagnose_browser(headless=True)
+        tiktok._say(  # noqa: SLF001 - tampilkan ringkas di log halaman TikTok
+            "Tes browser: "
+            + ("berhasil — " if result.get("ok") else "gagal — ")
+            + "; ".join(
+                f"{item['mode']}: {'OK' if item['ok'] else item['error'][:70]}"
+                for item in result.get("results", [])
+            )[:400]
+        )
+        result["status"] = tiktok.status()
+        return result
+
     @app.post("/api/tiktok/login")
     def tt_login() -> Any:
         return _tt_guard(tiktok.open_login_window)
