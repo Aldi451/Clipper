@@ -335,6 +335,32 @@ def diagnose(check_update: bool = False) -> dict[str, Any]:
     else:
         log("Chromium Clipper (Playwright): belum diunduh (hanya perlu kalau tidak ada Edge/Chrome)")
 
+    # --- tes buka browser sungguhan (read-only, profil sementara) ---
+    if ok_import:
+        log("")
+        log("Uji buka browser (headless, profil sementara)…")
+        try:
+            from app import tiktok as _tiktok
+
+            test = _tiktok.diagnose_browser(headless=True)
+        except Exception as exc:  # noqa: BLE001
+            test = {"ok": False, "results": [], "hint": str(exc)}
+        info["browser_test"] = test
+        for item in test.get("results", []):
+            if item.get("ok"):
+                log(f"   ✓ {item['mode']}", OK)
+            else:
+                log(f"   ✕ {item['mode']} — {(item.get('error') or '')[:110]}", WARN)
+        if test.get("profile_in_use"):
+            log("   Profil Clipper sedang dipakai browser lain — tutup semua Edge/Chrome.", WARN)
+        if test.get("hint"):
+            log(f"   → {test['hint']}")
+        if test.get("ok"):
+            log("   Browser bisa dibuka.", OK)
+        else:
+            log("   Belum ada browser yang bisa dibuka.", NO)
+            log(f"   Detail: {test.get('log') or tiktok.BROWSER_LOG}", "   ")
+
     info["ready"] = bool(tiktok.ready())
     if info["ready"]:
         log("Status      : SIAP dipakai untuk upload TikTok", OK)

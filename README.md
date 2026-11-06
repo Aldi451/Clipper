@@ -779,6 +779,43 @@ sendiri, menambahkannya ke jalur pencarian, dan memakai folder yang sama untuk p
 3. Klik **Buka TikTok & login** → jendela browser terbuka → login (email/kode atau scan QR).
    Cookie disimpan lokal di `data/tiktok_profile/`, jadi cukup sekali. Hapus dengan **Hapus sesi**.
 
+### "Gagal membuka jendela TikTok: … BrowserType.launch_persistent_context: Exec…"
+
+Edge/Chrome terdeteksi, tapi jendela login tidak terbuka. Dua hal yang perlu diketahui:
+
+1. **Pesan "Exec…" itu menyesatkan.** Clipper mencoba beberapa cara membuka browser; dulu hanya
+   error percobaan **terakhir** (Chromium bawaan Playwright yang belum diunduh) yang ditampilkan,
+   sehingga penyebab sebenarnya dari Edge/Chrome hilang. **Sejak v1.2.2** semua percobaan dilaporkan.
+2. **Klik tombol "Tes buka browser"** di kartu *Browser & sesi* (tab TikTok). Tombol ini membuka
+   browser sungguhan dalam mode uji (profil sementara, tidak menyentuh login kamu) dan menampilkan
+   hasil per cara: Edge, kanal `msedge`, Chrome, Brave/Vivaldi, Chromium bawaan, plus versi tanpa GPU.
+   Di bawah hasilnya ada saran yang sesuai penyebabnya, dan lokasi log
+   `data\logs\tiktok_browser.log` — kirim file itu kalau masih gagal.
+
+**Sejak v1.2.2 Clipper juga mencoba sendiri** (berurutan, tanpa kamu perlu klik apa pun):
+
+| Urutan | Cara | Kenapa |
+|---|---|---|
+| 1 | Edge/Chrome/Brave terpasang + **profil lama** | login lama tetap terpakai |
+| 2 | kanal resmi Playwright (`msedge`, `chrome`) | kadang cara 1 ditolak kebijakan Windows |
+| 3 | Chromium bawaan Clipper | tidak bergantung browser sistem |
+| 4 | ulangi 1–3 dengan **profil baru** | menyembuhkan profil terkunci/rusak (sering terjadi setelah folder dipindah drive) |
+| 5 | browser biasa + **cookie tersimpan** (`state.json`) | tetap bisa login walau profil permanen bermasalah |
+
+Kalau cara 4 yang berhasil, folder profil baru diingat (`data/tiktok_profile_dir.txt`) sehingga
+login berikutnya memakai folder yang sama.
+
+**Penyebab umum yang perlu kamu cek manual:**
+
+- **Profil sedang dipakai browser lain.** Tutup **semua** jendela Edge/Chrome (termasuk yang di
+  background/tray), atau restart komputer, lalu coba lagi. Clipper mendeteksi ini dan menulis
+  peringatannya di hasil tes.
+- **Kebijakan kantor/sekolah** melarang Edge dijalankan otomatis → pakai **Unduh browser Clipper**
+  (Chromium sendiri, tidak kena kebijakan Edge).
+- **Antivirus** memblokir proses baru → matikan sementara atau tambahkan folder Clipper ke pengecualian.
+- **Versi Playwright terlalu tua/baru** untuk Edge yang terpasang → **Pasang dukungan TikTok** sekali
+  lagi (memperbarui Playwright), lalu **Unduh browser Clipper** sebagai jalan aman.
+
 **Kalau TikTok masih "belum terpasang" — pakai diagnosa (`tools/doctor.py`)**
 
 Daripada menebak, jalankan diagnosa. Ia memakai **modul deteksi yang sama** dengan aplikasi
@@ -795,8 +832,10 @@ Daripada menebak, jalankan diagnosa. Ia memakai **modul deteksi yang sama** deng
 
 Yang dilaporkan: versi Clipper di folder **dan** versi server yang sedang jalan, lokasi
 `playwright` (di dalam `.venv` atau di folder user-site — sumber bug v1.1.4), browser yang
-terdeteksi beserta path-nya, Chromium Playwright, dan status siap/belum. Semua langkah juga ditulis
-ke `logs\tiktok-doctor-<waktu>.log`.
+terdeteksi beserta path-nya, Chromium Playwright, dan status siap/belum. Sejak v1.2.2 diagnosa
+juga **benar-benar mencoba membuka browser** (headless, profil sementara) dan melaporkan hasil per
+cara beserta saran perbaikannya. Semua langkah ditulis ke `logs\tiktok-doctor-<waktu>.log`;
+detail percobaan browser ada di `data\logs\tiktok_browser.log`.
 
 Batas aman script ini: **default read-only**. `--fix` hanya memasang paket Python ke `.venv` dan
 mengunduh browser Chromium ke `%LOCALAPPDATA%\ms-playwright`; folder `data\` (video, klip, cookies,
