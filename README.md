@@ -134,13 +134,44 @@ dan di baris **`Versi`** saat Clipper start di terminal.
 2. Double-click **`update.bat`** — skrip ini otomatis:
    - menghentikan Clipper yang masih jalan (termasuk `ClipperService.exe`),
    - mengambil kode terbaru (`git pull` kalau folder ini repo git, kalau tidak mengunduh
-     `main` dari GitHub),
+     `main` dari GitHub — repo ini private, jadi lihat bagian 404 di bawah kalau gagal),
    - memasang dependensi baru kalau ada,
    - menampilkan **versi sebelum → sesudah**.
 3. Jalankan **`run.bat`** lagi → buka tab TikTok → **Periksa ulang**.
 
 Data Bang **tidak disentuh**: `data\` (video, klip, cookies, token YouTube, profil TikTok),
 `.env`, dan `logs\` tidak pernah ditimpa update.
+
+### `update.bat` gagal: "The remote server returned an error: (404) Not Found"
+
+Repo Clipper bersifat **private**. GitHub menolak unduhan tanpa login dan sengaja menjawab
+**404** (bukan 403) supaya keberadaan repo tidak bocor — jadi pesan ini bukan tanda internet mati.
+
+Ada dua cara membereskan, pilih satu:
+
+**1. Jadikan repo publik (paling cepat, sekali klik)**
+
+`github.com/Aldi451/Clipper` → **Settings** → **General** → gulir ke bawah → **Danger zone** →
+**Change visibility** → **Change to public**. Setelah itu `update.bat` versi lama pun langsung
+bisa mengunduh. Kalau mau privat lagi, lakukan hal yang sama sebaliknya.
+
+**2. Pakai token (repo tetap private)**
+
+Mulai v1.2.1 `update.bat` bisa login sendiri:
+
+1. Buka `github.com/settings/tokens` → **Generate new token (classic)**.
+2. Centang scope **`repo`** → **Generate token** → salin.
+3. Tempel saat `update.bat` menanyakannya (disimpan sekali sebagai `github_token.txt`
+   di folder Clipper; file ini **diabaikan git**, jangan dibagikan ke siapa pun).
+   Bisa juga bikin file itu manual: satu baris berisi token saja.
+
+Token yang dipakai hanya untuk **mengunduh kode** — tidak dipakai untuk upload/YouTube.
+Kalau token kedaluwarsa: hapus `github_token.txt`, jalankan `update.bat` lagi.
+
+**Kalau dua-duanya tidak bisa** (mis. sedang tidak bisa mengubah setting repo): unduh manual —
+buka repo di browser (sudah login) → **Code** → **Download ZIP** → extract → salin `app\`,
+`web\`, `tools\`, `run.py`, `requirements.txt`, dan `*.bat` ke folder Clipper. **Jangan** menyalin
+folder `data\`.
 
 **Kalau `update.bat` belum ada** (folder masih sangat lama), unduh dulu satu file ini:
 

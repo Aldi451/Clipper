@@ -1,5 +1,9 @@
 # data kerja (video, audio, model, token) tidak ikut di-commit
 data/
+
+# token GitHub untuk update repo private - JANGAN pernah di-commit
+github_token.txt
+github_token*.txt
 models/
 .venv/
 venv/
