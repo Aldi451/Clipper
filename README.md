@@ -805,6 +805,32 @@ Edge/Chrome terdeteksi, tapi jendela login tidak terbuka. Dua hal yang perlu dik
 Kalau cara 4 yang berhasil, folder profil baru diingat (`data/tiktok_profile_dir.txt`) sehingga
 login berikutnya memakai folder yang sama.
 
+**Login tidak bisa padahal browser bisa dibuka? Cek Clipper jalan dari mana (sejak v1.2.4).**
+
+Log `data\logs\tiktok_browser.log` menyebut lokasi profil Chromium seperti ini:
+
+```
+Executable doesn't exist at C:\WINDOWS\system32\config\systemprofile\AppData\Local\ms-playwright\...
+```
+
+`systemprofile` = proses berjalan sebagai **Windows service (SYSTEM, session 0)**. Service tidak
+punya desktop, jadi **jendela browser tidak mungkin muncul** — itu sebabnya login selalu gagal
+walau `Tes buka browser` bilang semua browser OK (tes itu headless, tidak butuh jendela).
+
+Cara login yang benar saat memakai service:
+
+1. Double-click **`run.bat`** (service boleh tetap jalan; Clipper di run.bat akan memakai port lain
+   kalau 8420 sudah dipakai — lihat alamat yang tercetak).
+2. Klik **Buka TikTok & login** → login di jendela yang muncul (email/kode atau scan QR).
+3. Tutup Clipper yang dari run.bat. Cookie tersimpan di folder profil yang sama
+   (`data\tiktok_profile`), jadi **service langsung bisa memakai login itu untuk upload**.
+4. Upload dari service berjalan **tanpa jendela** (headless) — sejak v1.2.4 Clipper otomatis
+   memilih mode itu kalau mendeteksi tidak ada desktop.
+
+Sejak v1.2.4 halaman TikTok menampilkan peringatan merah **"Clipper jalan sebagai Windows service"**
+beserta langkah di atas, tombol login menolak dengan pesan yang jelas (bukan error samar), dan setiap
+percobaan login dicatat di `data\logs\tiktok_browser.log` (sesi, browser, hasil).
+
 **Edge ada tapi tidak mau dibuka? Pakai Chrome (sejak v1.2.3).**
 
 Pesan `Target page, context or browser has been closed` khusus untuk Edge biasanya berarti Edge
@@ -822,6 +848,9 @@ Sejak v1.2.3:
   Clipper, jendela Edge/Chrome lain milik Bang tidak disentuh.
 - Tombol login tidak bisa "terkunci selamanya" lagi: penanda jendela login otomatis direset kalau
   prosesnya mati (mis. aplikasi ditutup paksa).
+- **Tombol `Tes jendela`** menjalankan uji *dengan jendela terlihat* (persis seperti saat login),
+  berbeda dari `Tes buka browser` yang headless. Kalau headless OK tapi jendela gagal, berarti
+  tidak ada desktop (service) atau jendela diblokir kebijakan.
 
 **Penyebab umum yang perlu kamu cek manual:**
 

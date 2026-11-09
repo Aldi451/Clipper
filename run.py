@@ -384,7 +384,10 @@ def handle_service_command(args) -> int | None:
     ws = _winservice()
     try:
         if args.run_service:
-            # dijalankan oleh Service Control Manager: tidak ada output ke layar
+            # dijalankan oleh Service Control Manager: tidak ada output ke layar.
+            # Penanda ini dipakai app/tiktok.py untuk tahu bahwa tidak ada
+            # desktop (jendela browser tidak bisa dibuka).
+            os.environ["CLIPPER_SERVICE"] = "1"
             ws.run_service()
             return 0
 

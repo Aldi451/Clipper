@@ -423,6 +423,7 @@ def status() -> dict[str, Any]:
         "log": state.get("log", [])[-12:],
         "last_mode": state.get("last_mode") or "",
         "browser_pick": browser_pick(),
+        "session": session_info(),
         "browser_errors": state.get("browser_errors") or [],
         "browser_log": str(BROWSER_LOG),
         "profile_active": str(_active_profile()),
@@ -628,6 +629,49 @@ def recheck() -> dict[str, Any]:
 # helper Playwright
 # --------------------------------------------------------------------------- #
 BROWSER_LOG = DATA_DIR / "logs" / "tiktok_browser.log"
+
+# Penanda proses dijalankan oleh Windows Service (SCM). Service tidak punya
+# desktop, jadi jendela browser tidak mungkin muncul.
+SERVICE_FLAG = "CLIPPER_SERVICE"
+
+
+def session_info() -> dict[str, Any]:
+    """Apakah Clipper bisa membuka jendela browser di layar user?
+
+    Penting: kalau Clipper dijalankan sebagai Windows service, prosesnya ada di
+    *session 0* (tanpa desktop). Browser headless jalan, tapi jendela login
+    TIDAK bisa muncul — dulu inilah sebab "Gagal membuka jendela TikTok" yang
+    tidak jelas (log menunjukkan profil di C:\WINDOWS\system32\config\systemprofile).
+    """
+    info: dict[str, Any] = {
+        "session_id": None,
+        "session_name": os.environ.get("SESSIONNAME", ""),
+        "user": os.environ.get("USERNAME", ""),
+        "service_flag": os.environ.get(SERVICE_FLAG, "") == "1",
+        "interactive": True,
+        "reason": "",
+    }
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            sid = ctypes.c_ulong()
+            if ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid)):
+                info["session_id"] = int(sid.value)
+        except Exception:  # noqa: BLE001
+            pass
+    name = str(info["session_name"] or "").lower()
+    user = str(info["user"] or "").lower()
+    sid = info["session_id"]
+    if info["service_flag"] or sid == 0 or name.startswith("services") or user in (
+        "system", "local service", "network service",
+    ):
+        info["interactive"] = False
+        info["reason"] = (
+            "Clipper sedang berjalan sebagai Windows service (tanpa desktop), "
+            "jadi jendela browser tidak bisa dibuka."
+        )
+    return info
 PROFILE_PICK = DATA_DIR / "tiktok_profile_dir.txt"
 
 # Argumen dasar untuk semua cara buka browser. Tidak ada yang berbahaya di sini:
@@ -1104,6 +1148,8 @@ def diagnose_browser(headless: bool = True) -> dict[str, Any]:
         result["hint"] = _browser_hint(failures, profile)
     _write_browser_log(
         [f"tes browser (headless={headless}) — profil aktif: {profile}",
+         f"sesi: id={session_info()['session_id']} user='{session_info()['user']}' "
+         f"service={session_info()['service_flag']} interaktif={session_info()['interactive']}",
          f"profil dipakai proses lain: {result['profile_in_use']}"]
         + [f"  [{'OK ' if e['ok'] else 'X  '}] {e['mode']}{'' if e['ok'] else ': ' + e['error']}"
            for e in result["results"]]
@@ -1252,6 +1298,23 @@ def open_login_window(wait_seconds: float = 900) -> dict[str, Any]:
             "Playwright belum bisa dipakai. Buka halaman TikTok di Clipper → "
             "klik \"Pasang dukungan TikTok\" (sekali saja), lalu \"Periksa ulang\"."
         )
+    info = session_info()
+    _write_browser_log([
+        f"login TikTok diminta — profil: {_active_profile()}",
+        f"sesi: id={info['session_id']} nama='{info['session_name']}' user='{info['user']}' "
+        f"service={info['service_flag']} interaktif={info['interactive']}",
+    ])
+    if not info["interactive"]:
+        message = (
+            "Jendela login TikTok butuh desktop, tapi Clipper sedang jalan sebagai Windows service. "
+            "Cara paling cepat: buka Clipper lewat run.bat (service boleh tetap jalan, tapi login "
+            "dilakukan dari jendela run.bat), login di sana, lalu tutup. Setelah itu service bisa "
+            "memakai login yang sama untuk upload."
+        )
+        _write_browser_log([f"DITOLAK: {message}"])
+        _say(message)
+        raise TikTokError(message)
+
     with _state_lock:
         if _state["login_window"]:
             return status()
@@ -1268,11 +1331,13 @@ def open_login_window(wait_seconds: float = 900) -> dict[str, Any]:
                 context = _launch(pw, headless=False)
                 try:
                     page = _page(context)
+                    _write_browser_log([f"login: browser terbuka ({_state.get('last_mode') or '?'})"])
                     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=90000)
                     deadline = time.time() + wait_seconds
                     while time.time() < deadline:
                         if _has_session(page):
                             _mark_logged_in(True)
+                            _write_browser_log(["login BERHASIL — cookie tersimpan"])
                             _say("Login TikTok berhasil disimpan.")
                             time.sleep(2)
                             break
@@ -1287,6 +1352,7 @@ def open_login_window(wait_seconds: float = 900) -> dict[str, Any]:
                     except Exception:
                         pass
         except Exception as exc:  # noqa: BLE001
+            _write_browser_log([f"login GAGAL: {_short_error(exc)}"])
             message = " ".join(str(exc).split())
             if len(message) > 420:
                 message = message[:420] + "…"
@@ -1359,6 +1425,14 @@ def upload_video(
         )
     progress = on_progress or (lambda fraction, message: None)
     text = build_caption(caption, "", hashtags)
+
+    info = session_info()
+    if not info["interactive"] and not headless:
+        # Service tidak punya desktop: jendela tidak akan muncul dan browser
+        # langsung tertutup. Upload TikTok Studio tetap jalan tanpa jendela.
+        headless = True
+        _write_browser_log(["upload: tidak ada desktop -> memakai mode headless"])
+        progress(0.02, "Mode service: upload TikTok berjalan tanpa jendela browser…")
 
     from playwright.sync_api import sync_playwright
 
