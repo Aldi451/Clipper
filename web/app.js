@@ -1490,15 +1490,21 @@ async function renderTikTok(quiet = false) {
             <button class="btn ghost" data-action="tt-recheck">Periksa ulang</button>
             <button class="btn ghost" data-action="tt-test-browser" title="Coba buka browser sekarang dan laporkan penyebabnya kalau gagal">Tes buka browser</button>
             <button class="btn ghost" data-action="tt-test-window" title="Uji persis seperti saat login: jendela browser terlihat di layar">Tes jendela</button>
+            <button class="btn ghost" data-action="tt-open-chrome" title="Buka Chrome biasa dengan profil Clipper — paling anti-gagal kalau jendela otomatis diblokir">Buka Chrome manual</button>
+            <button class="btn ghost" data-action="tt-check-login" title="Periksa apakah login sudah tersimpan">Cek login</button>
             ${tt.logged_in ? `<button class="btn ghost danger" data-action="tt-logout">Hapus sesi</button>` : ""}
           </div>
           <div id="tt-test-result"></div>
+          <div id="tt-login-live">${ttLoginLiveHtml(tt)}</div>
           <p class="hint" style="margin-top:12px">
             Jendela browser TikTok akan terbuka di layar kamu. Login sekali di sana (email/kode atau scan QR),
             lalu jendela menutup sendiri. Cookie disimpan lokal di profil di atas.
+            <br /><b>Kalau jendela otomatis tidak muncul/tertutup sendiri</b>: pakai
+            <b>Buka Chrome manual</b> → login di Chrome biasa → <b>tutup jendelanya</b> → <b>Cek login</b>.
           </p>
         </div>`;
 
+  stopLoginWatch();
   view.innerHTML = `
     <div class="page-head">
       <div>
@@ -1581,7 +1587,9 @@ async function renderTikTok(quiet = false) {
   if (tt.installing || state.ttUploading) {
     startPolling(() => renderTikTok(true), 2500);
   }
+  if (tt.login && tt.login.running) startLoginWatch();
 }
+
 
 function ttUploadCardHtml(clips, tt, settings) {
   const off = settings.tt_enabled === false;
@@ -1630,6 +1638,63 @@ function ttUploadCardHtml(clips, tt, settings) {
     ${note}
     ${rows ? `<div class="tt-list">${rows}</div>` : ""}
   </div>`;
+}
+
+let ttLoginTimer = null;
+
+function stopLoginWatch() {
+  if (ttLoginTimer) {
+    clearInterval(ttLoginTimer);
+    ttLoginTimer = null;
+  }
+}
+
+function startLoginWatch() {
+  stopLoginWatch();
+  let ticks = 0;
+  ttLoginTimer = setInterval(async () => {
+    ticks += 1;
+    if (state.route !== "tiktok" || ticks > 600) {
+      stopLoginWatch();
+      return;
+    }
+    try {
+      const live = await api("/api/tiktok/login-state");
+      const box = $("#tt-login-live");
+      if (box) box.innerHTML = ttLoginLiveHtml({ login: live, logged_in: live.logged_in });
+      if (live.logged_in && !live.running) {
+        stopLoginWatch();
+        toast("Login TikTok berhasil ✓", "ok");
+        await renderTikTok();
+      } else if (!live.running) {
+        stopLoginWatch();
+      }
+    } catch (err) {
+      stopLoginWatch();
+    }
+  }, 2000);
+}
+
+function ttLoginLiveHtml(tt) {
+  const live = tt.login || {};
+  if (!live.running) {
+    if (tt.logged_in) {
+      return `<div class="tiny up" style="margin-top:10px">✓ Sesi TikTok tersimpan — siap upload.</div>`;
+    }
+    return live.step === "selesai"
+      ? `<div class="tiny" style="margin-top:10px;color:#fca5a5">
+           Jendela login terakhir sudah ditutup tanpa mendeteksi login.
+           ${live.url ? `URL terakhir: <span class="mono">${esc(live.url)}</span>` : ""}
+           Coba <b>Buka Chrome manual</b> lalu <b>Cek login</b>.
+         </div>`
+      : "";
+  }
+  return `<div class="tiny dim" style="margin-top:10px">
+      <span class="spinner"></span> ${esc(live.step || "menunggu login")}
+      · ${Math.round(live.elapsed || 0)} dtk
+      ${live.url ? `· <span class="mono">${esc(String(live.url).slice(0, 60))}</span>` : ""}
+      ${(live.cookies || []).length ? `· cookie: ${esc((live.cookies || []).join(", "))}` : ""}
+    </div>`;
 }
 
 function ttTestResultHtml(res) {
@@ -2804,9 +2869,43 @@ document.addEventListener("click", async (e) => {
       toast("Mengunduh browser (±130 MB)…", "ok");
       await renderTikTok();
     } else if (action === "tt-login") {
-      await api("/api/tiktok/login", { method: "POST" });
-      toast("Jendela TikTok dibuka — login di sana", "ok");
+      try {
+        const res = await api("/api/tiktok/login", { method: "POST" });
+        const live = (res && res.login) || {};
+        if (live.running) {
+          toast("Jendela login dibuka — silakan login di jendela itu", "ok");
+          startLoginWatch();
+        } else {
+          toast(
+            (res && res.message) || "Jendela login tidak terbuka. Lihat pesan di bawah tombol.",
+            "bad"
+          );
+        }
+      } catch (err) {
+        toast("Gagal membuka jendela login: " + err.message, "bad");
+      }
       await renderTikTok();
+    } else if (action === "tt-open-chrome") {
+      try {
+        const res = await api("/api/tiktok/open-chrome", { method: "POST" });
+        toast(`Chrome dibuka (pid ${res.pid}). Login di sana, tutup jendelanya, lalu klik "Cek login".`, "ok");
+      } catch (err) {
+        toast("Gagal membuka Chrome: " + err.message, "bad");
+      }
+    } else if (action === "tt-check-login") {
+      toast("Memeriksa login…", "ok");
+      try {
+        const res = await api("/api/tiktok/check-login", { method: "POST" });
+        if (res.logged_in) {
+          toast("Login TikTok terdeteksi ✓ — siap upload", "ok");
+        } else {
+          toast("Belum login: " + (res.reason || ""), "bad");
+        }
+        if (res.status) state.tiktok = res.status;
+        await renderTikTok();
+      } catch (err) {
+        toast("Gagal memeriksa login: " + err.message, "bad");
+      }
     } else if (action === "tt-logout") {
       await api("/api/tiktok/logout", { method: "POST" });
       toast("Sesi TikTok dihapus", "ok");

@@ -14,12 +14,15 @@ from __future__ import annotations
 import argparse
 import errno
 import os
+import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
 import traceback
 import webbrowser
+import pathlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -296,6 +299,124 @@ def doctor(host: str, port: int) -> int:
 # --------------------------------------------------------------------------- #
 # start server
 # --------------------------------------------------------------------------- #
+def _local_version() -> str:
+    try:
+        from app.config import VERSION
+
+        return str(VERSION)
+    except Exception:  # noqa: BLE001
+        return "?"
+
+
+def _clipper_version_on_port(host: str, port: int) -> str:
+    """Versi Clipper yang sedang melayani port itu ("" kalau bukan Clipper)."""
+    import json
+    import urllib.request
+
+    target = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    try:
+        with urllib.request.urlopen(f"http://{target}:{port}/api/health", timeout=2.5) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        if isinstance(data, dict) and data.get("app") == "Clipper":
+            return str(data.get("version") or "?")
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def _stop_by_port(port: int | None) -> int:
+    """Cadangan kalau PowerShell diblokir: cari PID pemegang port lewat netstat."""
+    if not port or os.name != "nt":
+        return 0
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=15)
+    except Exception:  # noqa: BLE001
+        return 0
+    pids = set()
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[1].endswith(f":{port}") and parts[3].upper() == "LISTENING":
+            if parts[4].isdigit():
+                pids.add(int(parts[4]))
+    stopped = 0
+    for pid in pids:
+        try:
+            subprocess.run(["taskkill", "/f", "/pid", str(pid)],
+                           capture_output=True, text=True, timeout=15)
+            stopped += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return stopped
+
+
+def _stop_clipper_servers(exclude_self: bool = True, port: int | None = None) -> int:
+    """Hentikan proses Clipper lain dari folder ini. Kembalikan jumlah yang dihentikan."""
+    me = os.getpid()
+    stopped = 0
+    root = str(ROOT).lower().rstrip("\\/")
+    if os.name == "nt":
+        script = (
+            "Get-CimInstance Win32_Process -Filter \"Name='python.exe' or Name='pythonw.exe'\" | "
+            "Where-Object { $_.CommandLine -like '*run.py*' } | "
+            "Select-Object ProcessId,CommandLine | ForEach-Object { "
+            "'{0}|{1}' -f $_.ProcessId, $_.CommandLine }"
+        )
+        try:
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                                 capture_output=True, text=True, timeout=25)
+            for line in out.stdout.splitlines():
+                if "|" not in line:
+                    continue
+                pid_text, cmd = line.split("|", 1)
+                pid_text = pid_text.strip()
+                if not pid_text.isdigit():
+                    continue
+                pid = int(pid_text)
+                if exclude_self and pid == me:
+                    continue
+                if root not in cmd.lower().replace("/", "\\"):
+                    continue
+                if port is not None and f"--port {port}" not in cmd and "--port" in cmd:
+                    continue
+                try:
+                    subprocess.run(["taskkill", "/f", "/pid", str(pid)],
+                                   capture_output=True, text=True, timeout=15)
+                    stopped += 1
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            stopped += _stop_by_port(port)
+        return stopped
+    # POSIX: pakai pgrep + kill
+    try:
+        out = subprocess.run(["pgrep", "-f", "run.py"], capture_output=True, text=True, timeout=10)
+        skip = {me, os.getppid(), os.getpid()}
+        for line in out.stdout.split():
+            if not line.isdigit():
+                continue
+            pid = int(line)
+            if pid in skip:
+                continue
+            try:
+                raw = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
+            except OSError:
+                continue
+            cmdline = raw.replace(b"\x00", b" ").decode("utf-8", "replace")
+            # hanya proses python yang menjalankan run.py (bukan shell/pgrep/timeout)
+            if not cmdline.split(" ")[0].rsplit("/", 1)[-1].startswith("python"):
+                continue
+            if "run.py" not in cmdline:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                stopped += 1
+            except OSError:
+                continue
+    except Exception:  # noqa: BLE001
+        return 0
+    return stopped
+
+
 def open_browser_later(url: str, delay: float = 1.5) -> None:
     def worker() -> None:
         time.sleep(delay)
@@ -601,6 +722,34 @@ def main() -> int:
         return 2
 
     # ---- port ----
+    if not port_free(args.host, args.port):
+        # Kalau yang memegang port adalah Clipper LAIN dari folder yang sama
+        # (mis. service lama masih jalan dengan kode versi sebelumnya), semua
+        # klik di tab browser akan dilayani kode lama — update tidak terasa.
+        # Hentikan instance itu supaya run.bat selalu memakai kode terbaru.
+        taken = _clipper_version_on_port(args.host, args.port)
+        if taken:
+            mine = _local_version()
+            say("")
+            bad(f"Port {args.port} masih dipegang Clipper lain (versi {taken}).")
+            say(f"  Versi di folder ini: {mine}.")
+            if taken != mine:
+                say("  Yang lama dihentikan supaya kamu memakai kode terbaru…")
+            else:
+                say("  Menghentikan instance lama dari folder ini…")
+            if _stop_clipper_servers(exclude_self=True, port=args.port):
+                for _ in range(20):
+                    if port_free(args.host, args.port):
+                        break
+                    time.sleep(0.4)
+                if port_free(args.host, args.port):
+                    ok(f"Port {args.port} sudah bebas.")
+                else:
+                    info("Instance lama belum berhenti; memakai port lain.")
+            else:
+                info("Tidak bisa menghentikan otomatis (mungkin butuh administrator). "
+                     "Tutup jendela Clipper lama, atau tutup service lewat services.msc.")
+
     if not port_free(args.host, args.port):
         alt = pick_port(args.host, args.port + 1)
         head("Port sudah dipakai")
