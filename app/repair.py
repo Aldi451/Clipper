@@ -88,6 +88,51 @@ def venv_healthy(python: Path | None = None, project: Path | None = None) -> tup
     return True, out.strip() or "OK"
 
 
+def playwright_healthy(python: Path | None = None, project: Path | None = None) -> tuple[bool, str]:
+    """Playwright + greenlet bisa di-import? (mesin user pernah kena DLL _greenlet)."""
+    python = python or venv_python(project or ROOT)
+    if python is None:
+        return False, ".venv belum ada"
+    code, out = run([str(python), "-c", "import playwright.sync_api; print('ok')"], timeout=240)
+    if code == 0 and "ok" in out:
+        return True, "OK"
+    lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+    return False, (lines[-1] if lines else "import playwright.sync_api gagal")[:220]
+
+
+def fix_playwright(python: Path | None = None, project: Path | None = None) -> tuple[bool, str]:
+    """Pasang ulang greenlet + playwright di dalam .venv (butuh internet)."""
+    python = python or venv_python(project or ROOT)
+    if python is None:
+        return False, ".venv belum ada"
+    for package in ("greenlet", "playwright"):
+        code, out = run(
+            [str(python), "-m", "pip", "install", "--force-reinstall", "--no-cache-dir",
+             "--disable-pip-version-check", package],
+            timeout=1800,
+        )
+        if code != 0:
+            tail = " ".join(out.strip().splitlines()[-3:])[:300]
+            return False, f"gagal memasang ulang {package}: {tail}"
+    healthy, reason = playwright_healthy(python, project)
+    if healthy:
+        return True, "greenlet + playwright dipasang ulang"
+    return False, f"masih gagal setelah dipasang ulang: {reason}"
+
+
+def vcruntime_ok() -> bool:
+    """VCRUNTIME140.dll tersedia? Kalau tidak, DLL Python lain juga bisa gagal."""
+    if not is_windows():
+        return True
+    try:
+        import ctypes
+
+        ctypes.CDLL("vcruntime140.dll")
+        return True
+    except OSError:
+        return False
+
+
 def venv_origin(project: Path = ROOT) -> str:
     """Path asal venv (dari pyvenv.cfg) — untuk mendeteksi folder yang dipindah."""
     cfg = project / ".venv" / "pyvenv.cfg"
@@ -434,6 +479,34 @@ def repair(project: Path = ROOT, on_step: Callable[[str], None] | None = None,
         step(message, ok)
         if not ok:
             return report
+
+    # 2b. Playwright/greenlet — kalau rusak, login & upload TikTok tidak jalan
+    py_python = venv_python(project)
+    pw_ok, pw_reason = playwright_healthy(py_python, project)
+    if pw_ok:
+        step("Playwright sehat (login & upload TikTok bisa jalan)")
+    else:
+        say(f"        penyebab: {pw_reason}")
+        if not vcruntime_ok():
+            step("Microsoft Visual C++ Redistributable belum terpasang", False)
+            say("        Pasang 'Microsoft Visual C++ Redistributable 2015-2022 (x64)'")
+            say("        dari situs Microsoft, lalu jalankan repair.bat lagi.")
+        else:
+            say("        memasang ulang greenlet + playwright (butuh internet)…")
+            fixed, message = fix_playwright(py_python, project)
+            step(message, fixed)
+            if not fixed:
+                # masih rusak: kemungkinan .venv dibuat Python lain/berkas rusak
+                say("        Membangun ulang .venv dari nol (butuh internet, agak lama)…")
+                rebuilt, rmessage = rebuild_venv(project)
+                step(rmessage, rebuilt)
+                if rebuilt:
+                    py_python = venv_python(project)
+                    fixed, message = playwright_healthy(py_python, project)
+                    step("Playwright di .venv baru: " + ("sehat" if fixed else message), fixed)
+            if not fixed:
+                say("        Jalur 'Buka Chrome manual' + 'Cek login' tetap bisa dipakai,")
+                say("        karena jalur itu tidak memakai Playwright.")
 
     # 3. service Windows
     info = service_info()

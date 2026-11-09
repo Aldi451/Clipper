@@ -52,6 +52,36 @@ echo.
 echo ==========================================================
 echo   Memperbaiki dukungan TikTok Clipper
 echo ==========================================================
+REM --- greenlet rusak? ("DLL load failed while importing _greenlet") ---
+REM Penyebab tersering di Windows. Perbaikan: pasang ulang greenlet +
+REM playwright DI DALAM .venv (bukan di Python sistem).
+echo.
+echo   [1/3] Memeriksa greenlet ^(mesin Playwright^)...
+".venv\Scripts\python.exe" -c "import playwright.sync_api" >nul 2>nul
+if not errorlevel 1 (
+  echo   [OK]  greenlet + playwright bisa dipakai
+  goto :docs
+)
+echo   [!]   greenlet/playwright rusak - memasang ulang...
+echo         ^(butuh internet, sekitar 1-3 menit^)
+".venv\Scripts\python.exe" -m pip install --force-reinstall --no-cache-dir --disable-pip-version-check greenlet playwright
+echo.
+echo   [2/3] Memeriksa ulang...
+".venv\Scripts\python.exe" -c "import playwright.sync_api; print('   [OK]  greenlet + playwright sehat')"
+if errorlevel 1 (
+  echo   [!]   Masih gagal.
+  echo.
+  echo   Kemungkinan Microsoft Visual C++ Redistributable belum terpasang.
+  echo   Unduh "Microsoft Visual C++ Redistributable 2015-2022 x64" dari situs
+  echo   Microsoft ^(gratis^), pasang, restart, lalu jalankan file ini lagi.
+  echo.
+  echo   Catatan: tombol "Buka Chrome manual" + "Cek login" tetap bisa dipakai
+  echo   karena jalur itu TIDAK memakai Playwright.
+)
+
+:docs
+echo.
+echo   [3/3] Melengkapi browser ^& pengaturan lain...
 ".venv\Scripts\python.exe" "tools\doctor.py" --fix --verify
 set "RC=%ERRORLEVEL%"
 

@@ -345,12 +345,35 @@ def _login_marker() -> Path:
     return PROFILE_DIR / ".clipper_login"
 
 
+_profile_login_cache: dict[str, Any] = {"at": 0.0, "ok": False}
+
+
 def logged_in() -> bool:
-    """Login TikTok pernah berhasil (ditandai setelah sesi terdeteksi)."""
+    """Login TikTok siap dipakai?
+
+    Cek penanda sesi, lalu — lebih penting — periksa langsung cookie di berkas
+    profil browser. Dengan begitu login yang dilakukan lewat Chrome manual
+    (tanpa Playwright) tetap terbaca.
+    """
     try:
-        return _login_marker().exists()
+        if _login_marker().exists():
+            return True
     except OSError:
-        return False
+        pass
+    if time.time() - float(_profile_login_cache.get("at") or 0) < 2.0:
+        return bool(_profile_login_cache.get("ok"))
+    ok = False
+    try:
+        ok = _profile_logged_in()
+    except Exception:  # noqa: BLE001
+        ok = False
+    _profile_login_cache.update({"at": time.time(), "ok": ok})
+    if ok:
+        try:
+            _mark_logged_in(True)
+        except Exception:  # noqa: BLE001
+            pass
+    return ok
 
 
 def _mark_logged_in(value: bool = True) -> None:
@@ -443,6 +466,7 @@ def status() -> dict[str, Any]:
         "profile_in_use": _profile_in_use(_active_profile()) if os.name == "nt" else bool(
             _profile_locks(_active_profile())
         ),
+        "deps": playwright_health(),
         "diag": diag(),
     }
 
@@ -1311,6 +1335,94 @@ LOGIN_COOKIES = (
 STRONG_COOKIES = ("sessionid", "sessionid_ss", "sid_tt", "sid_guard", "uid_tt")
 
 
+def _cookie_db_paths(profile: Path | None = None) -> list[Path]:
+    """Lokasi file SQLite cookie Chrome/Edge di dalam folder profil."""
+    base = profile or _active_profile()
+    return [
+        base / "Default" / "Network" / "Cookies",   # Chrome 96+
+        base / "Network" / "Cookies",
+        base / "Default" / "Cookies",               # Chrome lama
+        base / "Cookies",
+    ]
+
+
+def _clock_to_unix(value: Any) -> float:
+    """Chrome menyimpan waktu dalam mikrodetik sejak 1601-01-01."""
+    try:
+        micro = int(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if micro <= 0:
+        return 0.0
+    return micro / 1_000_000 - 11644473600
+
+
+def profile_cookies(profile: Path | None = None) -> list[dict[str, Any]]:
+    """Baca cookie tiktok.com LANGSUNG dari database profil browser.
+
+    Tidak memakai Playwright sama sekali, jadi tetap jalan walau instalasi
+    Playwright/greenlet rusak (kasus nyata: `DLL load failed while importing
+    _greenlet`). Nilai cookie terenkripsi DPAPI tidak perlu didekripsi untuk
+    sekadar tahu apakah login sudah ada — yang dibutuhkan hanya nama + masa
+    berlaku.
+    """
+    import shutil
+    import sqlite3
+    import tempfile
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for db in _cookie_db_paths(profile):
+        try:
+            if not db.exists() or db.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        tmp = ""
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite") as fh:
+                tmp = fh.name
+            shutil.copy2(db, tmp)  # salin dulu: file asli bisa terkunci Chrome
+            con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True, timeout=5)
+            try:
+                rows = con.execute(
+                    "SELECT name, host_key, expires_utc, length(encrypted_value) "
+                    "FROM cookies WHERE host_key LIKE '%tiktok.com'"
+                ).fetchall()
+            finally:
+                con.close()
+        except Exception:  # noqa: BLE001 — DB rusak/versi beda: lewati saja
+            continue
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+        for name, host, expires, size in rows:
+            name = str(name)
+            if not name or name in seen:
+                continue
+            if not (size or 0):
+                continue  # cookie kosong = sudah dihapus
+            exp = _clock_to_unix(expires)
+            if exp and exp < time.time():
+                continue  # kedaluwarsa
+            seen.add(name)
+            out.append({"name": name, "host": str(host), "expires": round(exp)})
+    return out
+
+
+def profile_login_cookies(profile: Path | None = None) -> list[str]:
+    """Nama cookie login yang ada di berkas profil ("" = belum login)."""
+    names = {c["name"] for c in profile_cookies(profile)}
+    return sorted(names & set(LOGIN_COOKIES))
+
+
+def _profile_logged_in(profile: Path | None = None) -> bool:
+    return bool(set(profile_login_cookies(profile)) & set(STRONG_COOKIES))
+
+
 def login_cookies(context: Any) -> list[str]:
     """Nama cookie login yang sudah ada di context (kosong = belum login)."""
     try:
@@ -1325,6 +1437,13 @@ def login_cookies(context: Any) -> list[str]:
 
 def _looks_logged_in(context: Any) -> bool:
     return any(name in STRONG_COOKIES for name in login_cookies(context))
+
+
+def _safe_profile_cookies() -> list[str]:
+    try:
+        return profile_login_cookies()
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def login_state() -> dict[str, Any]:
@@ -1346,6 +1465,7 @@ def login_state() -> dict[str, Any]:
         "cookies": state.get("login_cookies") or [],
         "message": state.get("message") or "",
         "version": _state.get("version") or "",
+        "profile_cookies": _safe_profile_cookies(),
     }
 
 
@@ -1529,6 +1649,18 @@ def open_manual_browser(url: str = LOGIN_URL) -> dict[str, Any]:
     ensure_dirs()
     profile = _active_profile()
     profile.mkdir(parents=True, exist_ok=True)
+    if _profile_busy(profile):
+        # Chrome kedua dengan profil sama cuma "menumpang" proses pertama dan
+        # jendelanya sering tidak muncul — lebih baik memakai yang sudah ada.
+        _write_browser_log(["manual: profil masih dipakai, tidak membuka jendela baru"])
+        _say("Chrome dengan profil Clipper sudah terbuka — pakai jendela itu.")
+        return {
+            "ok": True,
+            "already_open": True,
+            "profile": str(profile),
+            "message": "Chrome/Edge dengan profil Clipper sudah terbuka. Login di jendela itu, "
+                       "tutup jendelanya, lalu klik \"Cek login\".",
+        }
     cmd = [
         str(exe),
         f"--user-data-dir={profile}",
@@ -1536,6 +1668,7 @@ def open_manual_browser(url: str = LOGIN_URL) -> dict[str, Any]:
         "--no-first-run",
         "--no-default-browser-check",
         "--start-maximized",
+        "--new-window",
         url,
     ]
     try:
@@ -1560,47 +1693,174 @@ def open_manual_browser(url: str = LOGIN_URL) -> dict[str, Any]:
     return {"ok": True, "exe": str(exe), "pid": proc.pid, "profile": str(profile)}
 
 
-def check_login_now() -> dict[str, Any]:
-    """Cek apakah login sudah tersimpan (tanpa membuka jendela terlihat)."""
-    if not _ensure_importable()[0]:
-        raise TikTokError("Playwright belum bisa dipakai — klik \"Pasang dukungan TikTok\" dulu.")
-    profile = _active_profile()
-    if _profile_in_use(profile) or _profile_locks(profile):
-        return {
-            "ok": False,
-            "logged_in": False,
-            "reason": "Profil masih dipakai jendela browser. Tutup dulu jendela Chrome/Edge "
-                      "yang dipakai login, lalu klik \"Cek login\" lagi.",
-            "cookies": [],
-        }
-    from playwright.sync_api import sync_playwright
+def _profile_busy(profile: Path | None = None) -> bool:
+    """Profil sedang dipakai proses browser? (lock file dianggap cukup, aman)"""
+    target = profile or _active_profile()
+    if os.name == "nt":
+        if _profile_in_use(target):
+            return True
+    return bool(_profile_locks(target))
 
-    cookies: list[str] = []
+
+def check_login_now() -> dict[str, Any]:
+    """Cek apakah login sudah tersimpan — TANPA membuka jendela.
+
+    Urutan: baca berkas cookie profil browser (tidak butuh Playwright), lalu
+    kalau kosong dan Playwright sehat, coba buka profil secara headless.
+    """
+    profile = _active_profile()
+    busy = _profile_busy(profile)
+    names = profile_login_cookies(profile)
+    ok = bool(set(names) & set(STRONG_COOKIES))
+    source = "berkas profil Chrome"
     detail = ""
-    try:
-        with sync_playwright() as pw:
-            context = _launch(pw, headless=True)
-            try:
-                cookies = login_cookies(context)
-            finally:
-                try:
-                    context.close()
-                except Exception:  # noqa: BLE001
-                    pass
-    except Exception as exc:  # noqa: BLE001
-        detail = _short_error(exc)
-    ok = any(name in STRONG_COOKIES for name in cookies)
     if ok:
         _mark_logged_in(True)
+    elif ensure_playwright():
+        try:
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as pw:
+                context = _launch(pw, headless=True)
+                try:
+                    names = sorted(set(names) | set(login_cookies(context)))
+                finally:
+                    try:
+                        context.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+            ok = bool(set(names) & set(STRONG_COOKIES))
+        except Exception as exc:  # noqa: BLE001
+            detail = _short_error(exc)
+        source = "Playwright (headless)"
+        if ok:
+            _mark_logged_in(True)
+
+    if not ok and busy:
+        reason = (
+            "Chrome/Edge dengan profil Clipper masih terbuka. Cookie baru ditulis ke disk "
+            "setelah jendelanya ditutup — tutup dulu jendela itu, lalu klik \"Cek login\" lagi."
+        )
+    elif not ok:
+        reason = detail or (
+            "Belum ada cookie login TikTok di folder profil Clipper "
+            f"({profile}). Pastikan login dilakukan di jendela yang dibuka tombol "
+            "\"Buka Chrome manual\", lalu jendelanya DITUTUP sebelum klik Cek login."
+        )
+    else:
+        reason = ""
+
     _write_browser_log([
-        f"check-login: cookie {', '.join(cookies) or '(tidak ada)'} -> {'login OK' if ok else 'belum login'}"
-        + (f" · {detail}" if detail else ""),
+        f"check-login: cookie {', '.join(names) or '(tidak ada)'} -> "
+        f"{'login OK' if ok else 'belum login'} · sumber: {source}"
+        + (f" · {detail}" if detail else "")
+        + (f" · profil masih dipakai: {busy}" if busy else ""),
     ])
     return {
         "ok": ok,
         "logged_in": ok,
-        "cookies": cookies,
-        "reason": "" if ok else (detail or "Belum ada cookie login di profil Clipper."),
+        "cookies": names,
+        "source": source,
+        "profile_in_use": busy,
+        "reason": reason,
+        "status": status(),
+    }
+
+
+def _playwright_version(package: str) -> str:
+    try:
+        from importlib.metadata import version
+
+        return version(package)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+_deps_cache: dict[str, Any] = {"at": 0.0, "value": {}}
+
+
+def playwright_health(refresh: bool = False) -> dict[str, Any]:
+    """Status kesehatan Playwright — dipakai UI untuk menawarkan perbaikan."""
+    if not refresh and time.time() - float(_deps_cache.get("at") or 0) < 10:
+        cached = _deps_cache.get("value")
+        if isinstance(cached, dict) and cached:
+            return dict(cached)
+    ok, detail = _ensure_importable()
+    value = {
+        "ok": bool(ok),
+        "error": "" if ok else (detail or "playwright tidak bisa dipakai"),
+        "playwright": _playwright_version("playwright"),
+        "greenlet": _playwright_version("greenlet"),
+        "python": sys.version.split()[0],
+        "exe": sys.executable,
+        "vc_runtime": _has_vc_runtime(),
+    }
+    _deps_cache.update({"at": time.time(), "value": value})
+    return dict(value)
+
+
+def _has_vc_runtime() -> bool:
+    """VCRUNTIME140.dll ada? Kalau tidak, greenlet/pyd lain bisa gagal dimuat."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        ctypes.CDLL("vcruntime140.dll")
+        return True
+    except OSError:
+        return False
+
+
+def repair_playwright() -> dict[str, Any]:
+    """Pasang ulang greenlet + playwright memakai pip milik Python Clipper.
+
+    Kasus nyata di mesin user: `ImportError: DLL load failed while importing
+    _greenlet`. Penyebab tersering: greenlet hasil salin folder/versi Python
+    lain, atau berkasnya rusak. Memasang ulang dari wheel yang cocok
+    menyelesaikannya tanpa user menyentuh terminal.
+    """
+    steps: list[dict[str, Any]] = []
+    if not _has_vc_runtime():
+        steps.append({
+            "cmd": "cek vcruntime140.dll",
+            "ok": False,
+            "out": "VCRUNTIME140.dll tidak ditemukan. Pasang 'Microsoft Visual C++ "
+                   "Redistributable 2015-2022 (x64)' dari situs Microsoft, lalu ulangi.",
+        })
+    targets = [
+        ["greenlet", "--force-reinstall", "--no-cache-dir"],
+        ["playwright", "--force-reinstall", "--no-cache-dir"],
+    ]
+    for args in targets:
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", *args]
+        try:
+            out = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=900, env=_sub_env(),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            )
+            tail = "\n".join((out.stdout or "").strip().splitlines()[-6:])
+            if (out.stderr or "").strip():
+                tail += "\n" + "\n".join(out.stderr.strip().splitlines()[-3:])
+            steps.append({"cmd": " ".join(cmd[1:]), "ok": out.returncode == 0, "out": tail})
+        except Exception as exc:  # noqa: BLE001
+            steps.append({"cmd": " ".join(cmd[1:]), "ok": False, "out": _short_error(exc)})
+    _deps_cache.update({"at": 0.0, "value": {}})
+    health = playwright_health(refresh=True)
+    _write_browser_log([
+        f"perbaiki Playwright: {'berhasil' if health['ok'] else 'gagal'} · "
+        f"greenlet {health.get('greenlet') or '?'} · python {health.get('python')}"
+        + (f" · {health.get('error')}" if not health["ok"] else ""),
+    ])
+    return {
+        "ok": bool(health["ok"]),
+        "steps": steps,
+        "deps": health,
+        "message": (
+            "Playwright sudah sehat — coba lagi."
+            if health["ok"]
+            else "Masih gagal: " + str(health.get("error") or "")[:200]
+        ),
         "status": status(),
     }
 
