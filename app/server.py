@@ -955,6 +955,34 @@ def create_app() -> FastAPI:
         result["status"] = tiktok.status()
         return result
 
+    @app.post("/api/tiktok/browser-pick")
+    def tt_browser_pick(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        """Ingat browser yang terbukti bisa dipakai (dipilih dari hasil tes)."""
+        label = str(payload.get("label") or "").strip()
+        if not label:
+            raise HTTPException(400, "label browser kosong")
+        extra: dict[str, Any] = {}
+        for mode_label, mode_extra in tiktok._launch_modes():  # noqa: SLF001
+            if mode_label == label:
+                extra = dict(mode_extra)
+                break
+        tiktok.set_browser_pick(label, extra)
+        tiktok._say(f"Browser utama diset: {label}")  # noqa: SLF001
+        return {"ok": True, "pick": tiktok.browser_pick(), "status": tiktok.status()}
+
+    @app.delete("/api/tiktok/browser-pick")
+    def tt_browser_pick_clear() -> dict[str, Any]:
+        try:
+            tiktok._pick_file().unlink()  # noqa: SLF001
+        except OSError:
+            pass
+        return {"ok": True}
+
+    @app.post("/api/tiktok/reclaim")
+    def tt_reclaim() -> Any:
+        """Tutup proses browser yang masih memegang profil login Clipper."""
+        return _tt_guard(tiktok.reclaim_profile)
+
     @app.post("/api/tiktok/login")
     def tt_login() -> Any:
         return _tt_guard(tiktok.open_login_window)

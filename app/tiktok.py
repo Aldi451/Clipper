@@ -17,6 +17,7 @@ kredensial yang dikirim ke mana pun.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -397,6 +398,14 @@ def diag() -> dict[str, Any]:
 
 def status() -> dict[str, Any]:
     with _state_lock:
+        # pengaman: kalau proses login mati tanpa sempat mereset penanda
+        # (mis. aplikasi ditutup paksa), jangan biarkan tombol terkunci selamanya
+        started = float(_state.get("login_started") or 0)
+        limit = float(_state.get("login_wait") or 0) or 900
+        if _state.get("login_window") and started and time.time() - started > limit + 120:
+            _state["login_window"] = False
+            _state["login_started"] = 0
+            _state["message"] = "Jendela login ditutup karena waktu habis."
         state = dict(_state)
     browsers = _browser_paths()
     return {
@@ -413,6 +422,7 @@ def status() -> dict[str, Any]:
         "message": state.get("message") or "",
         "log": state.get("log", [])[-12:],
         "last_mode": state.get("last_mode") or "",
+        "browser_pick": browser_pick(),
         "browser_errors": state.get("browser_errors") or [],
         "browser_log": str(BROWSER_LOG),
         "profile_active": str(_active_profile()),
@@ -699,27 +709,130 @@ def _profile_in_use(profile: Path) -> bool:
         return False
 
 
+def _pick_file() -> Path:
+    return DATA_DIR / "tiktok_browser_pick.json"
+
+
+def browser_pick() -> dict[str, Any]:
+    """Browser yang terakhir terbukti bisa dipakai (disimpan antar sesi)."""
+    try:
+        data = json.loads(_pick_file().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def set_browser_pick(label: str, extra: dict[str, Any] | None = None) -> None:
+    """Ingat browser yang berhasil supaya percobaan berikutnya langsung ke situ.
+
+    Kasus nyata: di Windows tertentu Edge gagal dibuka (kebijakan/antivirus)
+    padahal Chrome normal. Tanpa ini Clipper selalu mencoba Edge lebih dulu.
+    """
+    payload = {"label": str(label), "extra": dict(extra or {}), "at": int(time.time()),
+               "channel": _mode_channel(label)}
+    try:
+        _pick_file().parent.mkdir(parents=True, exist_ok=True)
+        _pick_file().write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _mode_channel(label: str) -> str:
+    low = (label or "").lower()
+    for name in ("msedge", "edge", "chrome", "brave", "vivaldi", "chromium"):
+        if name in low:
+            return "msedge" if name == "edge" else name
+    return ""
+
+
+def reclaim_profile() -> dict[str, Any]:
+    """Tutup proses browser yang masih memegang profil login Clipper.
+
+    Aman: hanya proses yang command line-nya memuat folder profil Clipper
+    (``data/tiktok_profile``). Browser yang Bang pakai untuk kegiatan lain
+    tidak disentuh. Berguna kalau jendela login sebelumnya tidak tertutup
+    sempurna sehingga profil "terkunci" dan login berikutnya gagal.
+    """
+    profile = _active_profile()
+    killed: list[str] = []
+    if os.name == "nt":
+        script = (
+            "$p = Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' or Name='chrome.exe'"
+            " or Name='brave.exe' or Name='vivaldi.exe'\" | "
+            f"Where-Object {{ $_.CommandLine -like '*{profile.name}*' }}; "
+            "foreach ($x in $p) { try { Stop-Process -Id $x.ProcessId -Force -ErrorAction Stop; "
+            "Write-Output $x.ProcessId } catch {} }"
+        )
+        try:
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                                 capture_output=True, text=True, timeout=25)
+            killed = [line.strip() for line in out.stdout.split() if line.strip().isdigit()]
+        except Exception as exc:  # noqa: BLE001
+            _say(f"Gagal menutup proses browser lama: {_short_error(exc)}")
+    # hapus sisa file kunci (kalau prosesnya sudah mati)
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"):
+        try:
+            (profile / name).unlink()
+        except OSError:
+            pass
+    time.sleep(0.4)
+    still = _profile_in_use(profile) or bool(_profile_locks(profile))
+    if killed:
+        _say(f"Menutup {len(killed)} proses browser lama yang memegang profil TikTok.")
+    if not still:
+        _say("Profil login TikTok bebas dipakai lagi — coba login sekarang.")
+    return {"ok": not still, "killed": len(killed), "profile": str(profile),
+            "still_in_use": still, "status": status()}
+
+
 def _launch_modes() -> list[tuple[str, dict[str, Any]]]:
-    """Daftar cara membuka browser, dari yang paling diinginkan."""
+    """Daftar cara membuka browser, dari yang paling diinginkan.
+
+    Kalau sebuah browser pernah berhasil dipakai, browser itu didahulukan —
+    jadi mesin yang Edge-nya diblokir langsung memakai Chrome tanpa menunggu.
+    """
     modes: list[tuple[str, dict[str, Any]]] = []
-    seen: set[str] = set()
-    for channel, path in _browser_paths()[:4]:
-        label = f"{channel} → {path}"
-        if str(path) in seen:
-            continue
-        seen.add(str(path))
-        modes.append((label, {"executable_path": str(path)}))
-    for channel, path in _browser_paths()[:3]:
+    seen_paths: set[str] = set()
+    seen_labels: set[str] = set()
+
+    def add(label: str, extra: dict[str, Any]) -> None:
+        key = str(extra.get("executable_path") or extra.get("channel") or label)
+        if key in seen_paths or label in seen_labels:
+            return
+        seen_paths.add(key)
+        seen_labels.add(label)
+        modes.append((label, extra))
+
+    browsers = _browser_paths()
+    preferred = browser_pick()
+    preferred_channel = str(preferred.get("channel") or "")
+
+    # 1) browser yang terakhir berhasil
+    for channel, path in browsers:
+        if str(path) == str((preferred.get("extra") or {}).get("executable_path") or ""):
+            add(f"{channel} → {path}", {"executable_path": str(path)})
+            break
+    if preferred_channel and not modes:
+        for channel, path in browsers:
+            if channel == preferred_channel:
+                add(f"{channel} → {path}", {"executable_path": str(path)})
+                break
+
+    # 2) sisanya: Chrome lebih dulu daripada Edge (Edge paling sering diblokir
+    #    kebijakan kantor/sekolah, Chrome hampir selalu aman)
+    order = {"chrome": 0, "brave": 1, "vivaldi": 2, "msedge": 3}
+    for channel, path in sorted(browsers[:6], key=lambda item: order.get(item[0], 9)):
+        add(f"{channel} → {path}", {"executable_path": str(path)})
+    for channel, path in sorted(browsers[:4], key=lambda item: order.get(item[0], 9)):
         if channel in ("chrome", "msedge"):
-            modes.append((f"kanal {channel}", {"channel": channel}))
-    # sebagian mesin gagal karena driver GPU/antivirus — coba sekali tanpa GPU
-    for channel, path in _browser_paths()[:1]:
-        modes.append((
-            f"{channel} tanpa GPU",
+            add(f"kanal {channel}", {"channel": channel})
+    # 3) sebagian mesin gagal karena driver GPU/antivirus
+    if browsers:
+        channel, path = browsers[0]
+        add(f"{channel} tanpa GPU",
             {"executable_path": str(path),
-             "args": list(BASE_ARGS) + ["--disable-gpu", "--disable-software-rasterizer"]},
-        ))
-    modes.append(("Chromium bawaan Playwright", {}))
+             "args": list(BASE_ARGS) + ["--disable-gpu", "--disable-software-rasterizer"]})
+    add("Chromium bawaan Playwright", {})
     return modes
 
 
@@ -808,6 +921,16 @@ def _launch(playwright: Any, headless: bool = False) -> Any:
     modes = _launch_modes()
     failures: list[tuple[str, str]] = []
 
+    # Profil yang sedang dipegang browser lain tidak akan bisa dibuka sama
+    # sekali ("Target page, context or browser has been closed") — langsung
+    # pakai profil baru supaya tidak menunggu 25 detik x jumlah cara.
+    locked = _profile_in_use(profile) or bool(_profile_locks(profile))
+    if locked:
+        _say(
+            "Profil login TikTok sedang dipakai jendela browser lain — memakai profil baru "
+            "(login lama tetap aman di folder lama)."
+        )
+
     def persistent(target: Path, mode: tuple[str, dict[str, Any]]) -> Any:
         label, extra = mode
         options: dict[str, Any] = dict(
@@ -823,10 +946,11 @@ def _launch(playwright: Any, headless: bool = False) -> Any:
         return playwright.chromium.launch_persistent_context(**options)
 
     # --- 1-3: profil yang sudah ada (login lama tetap terpakai)
-    for mode in modes:
+    for mode in ([] if locked else modes):
         try:
             context = persistent(profile, mode)
             _state["last_mode"] = mode[0]
+            set_browser_pick(mode[0], mode[1])
             return context
         except Exception as exc:  # noqa: BLE001
             failures.append((mode[0], _short_error(exc)))
@@ -839,6 +963,7 @@ def _launch(playwright: Any, headless: bool = False) -> Any:
             context = persistent(fresh, mode)
             _set_active_profile(fresh)
             _state["last_mode"] = mode[0] + " (profil baru)"
+            set_browser_pick(mode[0], mode[1])
             _say(f"Profil browser lama tidak bisa dipakai — memakai profil baru: {fresh.name}")
             return context
         except Exception as exc:  # noqa: BLE001
@@ -849,6 +974,7 @@ def _launch(playwright: Any, headless: bool = False) -> Any:
         try:
             context = _launch_with_state(playwright, mode, headless)
             _state["last_mode"] = mode[0] + " (tanpa profil)"
+            set_browser_pick(mode[0], mode[1])
             _say("Memakai mode cadangan: browser biasa + cookie tersimpan.")
             return context
         except Exception as exc:  # noqa: BLE001
@@ -861,7 +987,8 @@ def _launch(playwright: Any, headless: bool = False) -> Any:
     )
     _state["browser_errors"] = [{"mode": label, "error": msg} for label, msg in failures]
     primary = failures[0][1] if failures else "tidak diketahui"
-    hint = _browser_hint(failures, profile)
+    # jangan salahkan profil kalau profil memang sudah dilewati (terkunci)
+    hint = _browser_hint(failures, profile, profile_skipped=locked)
     raise TikTokError(
         f"Browser tidak bisa dibuka. {hint} "
         f"Penyebab dari {failures[0][0] if failures else 'browser'}: {primary} "
@@ -869,19 +996,27 @@ def _launch(playwright: Any, headless: bool = False) -> Any:
     )
 
 
-def _browser_hint(failures: list[tuple[str, str]], profile: Path) -> str:
+def _browser_hint(failures: list[tuple[str, str]], profile: Path,
+                  profile_skipped: bool = False) -> str:
     """Saran yang cocok dengan pesan error yang benar-benar muncul."""
     joined = " ".join(msg.lower() for _label, msg in failures)
-    if _profile_in_use(profile) or _profile_locks(profile):
+    if not profile_skipped and (_profile_in_use(profile) or _profile_locks(profile)):
         return (
             "Profil browser Clipper sedang dipakai proses browser lain. "
             "Tutup semua jendela Edge/Chrome yang terbuka (atau restart komputer), lalu coba lagi."
         )
-    if "process failed to launch" in joined or "target page, context or browser has been closed" in joined:
+    if "target page, context or browser has been closed" in joined:
         return (
-            "Browser langsung menutup saat dibuka — biasanya karena profil terkunci, "
-            "kebijakan kantor/sekolah, atau antivirus. Coba: tutup semua Edge/Chrome, "
-            "matikan sementara antivirus, atau klik \"Unduh browser\" di halaman TikTok."
+            "Browser langsung menutup saat dibuka — khas Edge yang diblokir kebijakan "
+            "kantor/sekolah atau profilnya rusak. Paling cepat: pakai Chrome. "
+            "Di halaman TikTok klik \"Tes buka browser\", lalu klik cara yang bertanda ✓ "
+            "supaya Clipper selalu memakai browser itu."
+        )
+    if "process failed to launch" in joined:
+        return (
+            "Browser menolak dijalankan — biasanya kebijakan Windows, antivirus, atau profil rusak. "
+            "Coba klik \"Unduh browser Clipper\" (Chromium sendiri, tidak kena kebijakan Edge), "
+            "atau matikan antivirus sementara."
         )
     if "executable doesn't exist" in joined or "is not found at" in joined:
         return (
@@ -1121,6 +1256,8 @@ def open_login_window(wait_seconds: float = 900) -> dict[str, Any]:
         if _state["login_window"]:
             return status()
         _state["login_window"] = True
+        _state["login_started"] = time.time()
+        _state["login_wait"] = float(wait_seconds)
     _say("Membuka jendela TikTok — login di sana, jendela menutup sendiri setelah berhasil.")
 
     def worker() -> None:
