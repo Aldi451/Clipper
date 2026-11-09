@@ -1609,18 +1609,30 @@ function ttUploadCardHtml(clips, tt, settings) {
 }
 
 function ttTestResultHtml(res) {
+  const picked = ((res.status || {}).browser_pick || {}).label || "";
   const rows = (res.results || [])
     .map(
       (r) => `<div class="kv"><span>${r.ok ? "✓" : "✕"} ${esc(r.mode)}</span>
         <b class="${r.ok ? "up" : ""}" style="${r.ok ? "" : "color:#fca5a5"};font-weight:500;text-align:right">
           ${r.ok ? "bisa dibuka" : esc((r.error || "").slice(0, 160))}
-        </b></div>`
+        </b>
+        ${r.ok
+          ? r.mode === picked
+            ? '<span class="tag up" style="margin-left:8px">dipakai</span>'
+            : `<button class="btn small ghost" style="margin-left:8px" data-action="tt-pick-browser"
+                 data-label="${esc(r.mode)}" title="Selalu pakai browser ini">Pakai ini</button>`
+          : ""}
+      </div>`
     )
     .join("");
   const usage = res.profile_in_use
     ? `<div class="tiny" style="color:#fca5a5;margin-top:8px">
-         Profil browser Clipper sedang dipakai proses Edge/Chrome lain — tutup semua jendela browser, lalu tes lagi.
-       </div>`
+         Profil login TikTok Clipper sedang dipakai proses browser lain.
+       </div>
+       <button class="btn small ghost" style="margin-top:8px" data-action="tt-reclaim"
+         title="Hanya menutup browser yang memakai profil Clipper, browser lain tidak disentuh">
+         Tutup browser yang memakai profil Clipper
+       </button>`
     : "";
   return `<div class="card" style="margin-top:12px;background:rgba(255,255,255,0.03)">
     <div class="card-title"><h2>Tes buka browser</h2>
@@ -1634,6 +1646,7 @@ function ttTestResultHtml(res) {
       Detail lengkap disimpan di <span class="mono">${esc(res.log || "")}</span> — kirim file itu
       kalau masih gagal supaya bisa saya periksa.
     </div>
+    ${picked ? `<div class="tiny up" style="margin-top:6px">Browser utama: ${esc(picked)}</div>` : ""}
   </div>`;
 }
 
@@ -2736,6 +2749,30 @@ document.addEventListener("click", async (e) => {
         if (box) box.innerHTML = `<div class="tiny" style="color:#fca5a5;margin-top:10px">${esc(err.message)}</div>`;
       } finally {
         target.disabled = false;
+      }
+    } else if (action === "tt-pick-browser") {
+      const label = (target && target.dataset ? target.dataset.label : "") || "";
+      try {
+        const res = await api("/api/tiktok/browser-pick", { method: "POST", body: { label } });
+        if (res.status) state.tiktok = res.status;
+        toast(`Browser utama: ${label}`, "ok");
+        renderTikTok();
+      } catch (err) {
+        toast("Gagal menyimpan pilihan browser: " + err.message, "bad");
+      }
+    } else if (action === "tt-reclaim") {
+      try {
+        const res = await api("/api/tiktok/reclaim", { method: "POST" });
+        if (res.status) state.tiktok = res.status;
+        toast(
+          res.ok
+            ? `Profil bebas dipakai (${res.killed} proses browser ditutup) — coba login lagi`
+            : "Masih ada proses browser yang memakai profil. Tutup semua jendela Edge/Chrome lalu ulangi.",
+          res.ok ? "ok" : "bad"
+        );
+        renderTikTok();
+      } catch (err) {
+        toast("Gagal: " + err.message, "bad");
       }
     } else if (action === "tt-browser") {
       await api("/api/tiktok/browser", { method: "POST" });

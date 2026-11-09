@@ -805,6 +805,24 @@ Edge/Chrome terdeteksi, tapi jendela login tidak terbuka. Dua hal yang perlu dik
 Kalau cara 4 yang berhasil, folder profil baru diingat (`data/tiktok_profile_dir.txt`) sehingga
 login berikutnya memakai folder yang sama.
 
+**Edge ada tapi tidak mau dibuka? Pakai Chrome (sejak v1.2.3).**
+
+Pesan `Target page, context or browser has been closed` khusus untuk Edge biasanya berarti Edge
+diblokir kebijakan kantor/sekolah atau profilnya rusak — **Chrome di mesin yang sama tetap normal**.
+Sejak v1.2.3:
+
+- **Chrome dicoba lebih dulu daripada Edge** (Edge paling sering diblokir).
+- **Browser yang berhasil diingat** di `data/tiktok_browser_pick.json`, jadi percobaan berikutnya
+  langsung ke browser itu tanpa menunggu Edge gagal lagi.
+- Di hasil **Tes buka browser**, setiap cara yang bertanda ✓ punya tombol **Pakai ini** → jadikan
+  browser utama. Pilihan aktif ditandai badge **dipakai**.
+- Kalau profil login sedang dipegang proses browser lain, Clipper **langsung memakai profil baru**
+  (tidak lagi menunggu 25 detik × jumlah cara), dan ada tombol
+  **Tutup browser yang memakai profil Clipper** — hanya menutup proses yang memakai folder profil
+  Clipper, jendela Edge/Chrome lain milik Bang tidak disentuh.
+- Tombol login tidak bisa "terkunci selamanya" lagi: penanda jendela login otomatis direset kalau
+  prosesnya mati (mis. aplikasi ditutup paksa).
+
 **Penyebab umum yang perlu kamu cek manual:**
 
 - **Profil sedang dipakai browser lain.** Tutup **semua** jendela Edge/Chrome (termasuk yang di
