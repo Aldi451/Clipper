@@ -53,7 +53,12 @@ _state: dict[str, Any] = {
     "installing_browser": False,
     "log": [],
     "login_window": False,
+    "login_thread": None,
+    "login_step": "",
+    "login_url": "",
+    "login_cookies": [],
     "message": "",
+    "version": "",
 }
 
 
@@ -397,6 +402,13 @@ def diag() -> dict[str, Any]:
 
 
 def status() -> dict[str, Any]:
+    if not _state.get("version"):
+        try:
+            from .config import VERSION
+
+            _state["version"] = str(VERSION)
+        except Exception:  # noqa: BLE001
+            pass
     with _state_lock:
         # pengaman: kalau proses login mati tanpa sempat mereset penanda
         # (mis. aplikasi ditutup paksa), jangan biarkan tombol terkunci selamanya
@@ -424,6 +436,7 @@ def status() -> dict[str, Any]:
         "last_mode": state.get("last_mode") or "",
         "browser_pick": browser_pick(),
         "session": session_info(),
+        "login": login_state(),
         "browser_errors": state.get("browser_errors") or [],
         "browser_log": str(BROWSER_LOG),
         "profile_active": str(_active_profile()),
@@ -1168,14 +1181,11 @@ def _page(context: Any) -> Any:
 
 
 def _has_session(page: Any) -> bool:
+    """Sudah login? Cek cookie sesi TikTok (beberapa nama versi web)."""
     try:
-        cookies = page.context.cookies("https://www.tiktok.com")
-    except Exception:
+        return _looks_logged_in(page.context)
+    except Exception:  # noqa: BLE001
         return False
-    return any(
-        c.get("name") in ("sessionid", "sessionid_ss", "sid_tt") and c.get("value")
-        for c in cookies
-    )
 
 
 def _visible_first(page: Any, selectors: tuple[str, ...], timeout: float = 20.0) -> Any | None:
@@ -1291,6 +1301,54 @@ def _wait_published(page: Any, timeout: float) -> str:
 # --------------------------------------------------------------------------- #
 # login manual (tombol di UI)
 # --------------------------------------------------------------------------- #
+# Cookie yang menandakan sesi TikTok sudah masuk (nama berbeda antar versi web).
+LOGIN_COOKIES = (
+    "sessionid", "sessionid_ss", "sid_tt", "sid_guard", "uid_tt", "uid_tt_ss",
+    "passport_csrf_token", "tt_csrf_token", "s_v_web_id",
+)
+# Minimal satu dari ini harus ada; `s_v_web_id` saja tidak cukup (itu dipasang
+# bahkan untuk pengunjung yang belum login).
+STRONG_COOKIES = ("sessionid", "sessionid_ss", "sid_tt", "sid_guard", "uid_tt")
+
+
+def login_cookies(context: Any) -> list[str]:
+    """Nama cookie login yang sudah ada di context (kosong = belum login)."""
+    try:
+        cookies = context.cookies("https://www.tiktok.com")
+    except Exception:  # noqa: BLE001
+        return []
+    return sorted({
+        str(c.get("name")) for c in cookies
+        if c.get("name") in LOGIN_COOKIES and c.get("value")
+    })
+
+
+def _looks_logged_in(context: Any) -> bool:
+    return any(name in STRONG_COOKIES for name in login_cookies(context))
+
+
+def login_state() -> dict[str, Any]:
+    """Status jendela login saat ini (dipakai UI untuk menampilkan progres)."""
+    with _state_lock:
+        state = dict(_state)
+    started = float(state.get("login_started") or 0)
+    running = bool(state.get("login_window"))
+    thread = state.get("login_thread")
+    if running and thread is not None and not getattr(thread, "is_alive", lambda: True)():
+        running = False
+    return {
+        "running": running,
+        "step": state.get("login_step") or "",
+        "url": state.get("login_url") or "",
+        "elapsed": round(time.time() - started, 1) if started and running else 0.0,
+        "wait": float(state.get("login_wait") or 0),
+        "shot": str(SCREENSHOT_FILE) if SCREENSHOT_FILE.exists() else "",
+        "cookies": state.get("login_cookies") or [],
+        "message": state.get("message") or "",
+        "version": _state.get("version") or "",
+    }
+
+
 def open_login_window(wait_seconds: float = 900) -> dict[str, Any]:
     """Buka jendela browser TikTok supaya user bisa login sekali."""
     if not _ensure_importable()[0]:
@@ -1303,6 +1361,7 @@ def open_login_window(wait_seconds: float = 900) -> dict[str, Any]:
         f"login TikTok diminta — profil: {_active_profile()}",
         f"sesi: id={info['session_id']} nama='{info['session_name']}' user='{info['user']}' "
         f"service={info['service_flag']} interaktif={info['interactive']}",
+        f"pid={os.getpid()} versi={_state.get('version') or '?'}",
     ])
     if not info["interactive"]:
         message = (
@@ -1316,40 +1375,104 @@ def open_login_window(wait_seconds: float = 900) -> dict[str, Any]:
         raise TikTokError(message)
 
     with _state_lock:
-        if _state["login_window"]:
+        thread = _state.get("login_thread")
+        if _state["login_window"] and thread is not None and getattr(thread, "is_alive", lambda: False)():
+            _write_browser_log(["login: diabaikan — jendela login sebelumnya masih terbuka"])
             return status()
         _state["login_window"] = True
         _state["login_started"] = time.time()
         _state["login_wait"] = float(wait_seconds)
+        _state["login_step"] = "menyiapkan browser"
+        _state["login_url"] = ""
+        _state["login_cookies"] = []
     _say("Membuka jendela TikTok — login di sana, jendela menutup sendiri setelah berhasil.")
 
+    def set_step(step: str, url: str = "") -> None:
+        with _state_lock:
+            _state["login_step"] = step
+            if url:
+                _state["login_url"] = url
+
     def worker() -> None:
+        log: list[str] = []
+        shots = 0
+        last_url = ""
         try:
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as pw:
+                set_step("membuka browser")
                 context = _launch(pw, headless=False)
                 try:
                     page = _page(context)
-                    _write_browser_log([f"login: browser terbuka ({_state.get('last_mode') or '?'})"])
-                    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=90000)
-                    deadline = time.time() + wait_seconds
+                    mode = _state.get("last_mode") or "?"
+                    log.append(f"login: browser terbuka ({mode})")
+                    _write_browser_log(log)
+                    set_step("membuka halaman login")
+                    try:
+                        page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=90000)
+                    except Exception as exc:  # noqa: BLE001
+                        log.append(f"login: gagal membuka halaman login — {_short_error(exc)}")
+                        _write_browser_log(log)
+                    deadline = time.time() + float(wait_seconds)
+                    next_shot = time.time() + 6
+                    found: list[str] = []
                     while time.time() < deadline:
-                        if _has_session(page):
+                        try:
+                            url = page.url or ""
+                        except Exception:  # noqa: BLE001
+                            url = ""
+                        if url and url != last_url:
+                            last_url = url
+                            set_step(f"di halaman TikTok ({url[:90]})", url)
+                            log.append(f"login: URL -> {url[:120]}")
+                            _write_browser_log(log)
+                            log = []
+                        found = login_cookies(context)
+                        with _state_lock:
+                            _state["login_cookies"] = found
+                        if any(name in STRONG_COOKIES for name in found):
                             _mark_logged_in(True)
-                            _write_browser_log(["login BERHASIL — cookie tersimpan"])
-                            _say("Login TikTok berhasil disimpan.")
+                            _screenshot(page)
+                            _write_browser_log([
+                                f"login BERHASIL — cookie: {', '.join(found)}",
+                                f"login: URL akhir {last_url[:120]}",
+                            ])
+                            _say(f"Login TikTok berhasil disimpan (cookie: {', '.join(found)}).")
+                            set_step("berhasil")
                             time.sleep(2)
                             break
                         if page.is_closed():
+                            _write_browser_log(["login: jendela ditutup sebelum selesai"])
+                            _say("Jendela login ditutup sebelum login selesai.")
                             break
+                        # tangkapan layar berkala: bukti apa yang tampil di jendela
+                        if time.time() >= next_shot and shots < 8:
+                            shots += 1
+                            next_shot = time.time() + 25
+                            try:
+                                _screenshot(page)
+                                _write_browser_log([
+                                    f"login: tangkapan layar #{shots} — URL {last_url[:100]}",
+                                    f"login: cookie terlihat: {', '.join(found) or '(belum ada)'}",
+                                ])
+                            except Exception:  # noqa: BLE001
+                                pass
                         time.sleep(2)
                     else:
-                        _say("Jendela login ditutup karena waktu habis.")
+                        _write_browser_log([
+                            "login: WAKTU HABIS — login tidak terdeteksi",
+                            f"login: URL terakhir {last_url[:120]}",
+                            f"login: cookie terlihat: {', '.join(found) or '(tidak ada)'}",
+                        ])
+                        _say(
+                            "Waktu login habis. Jendela ditutup. Kalau kamu sudah login di jendela itu, "
+                            "coba tombol \"Buka Chrome manual\" di halaman TikTok (login di Chrome biasa)."
+                        )
                 finally:
                     try:
                         context.close()
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         pass
         except Exception as exc:  # noqa: BLE001
             _write_browser_log([f"login GAGAL: {_short_error(exc)}"])
@@ -1362,9 +1485,124 @@ def open_login_window(wait_seconds: float = 900) -> dict[str, Any]:
         finally:
             with _state_lock:
                 _state["login_window"] = False
+                _state["login_thread"] = None
+                if _state.get("login_step") != "berhasil":
+                    _state["login_step"] = "selesai"
 
-    threading.Thread(target=worker, daemon=True).start()
+    thread = threading.Thread(target=worker, daemon=True, name="tiktok-login")
+    with _state_lock:
+        _state["login_thread"] = thread
+    thread.start()
     return status()
+
+
+# --------------------------------------------------------------------------- #
+# jalur cadangan: Chrome biasa (tanpa automasi Playwright)
+# --------------------------------------------------------------------------- #
+def _chrome_exe() -> Path | None:
+    for channel, path in _browser_paths():
+        if channel == "chrome":
+            return path
+    for channel, path in _browser_paths():
+        if channel in ("msedge", "brave", "vivaldi"):
+            return path
+    return None
+
+
+def open_manual_browser(url: str = LOGIN_URL) -> dict[str, Any]:
+    """Buka Chrome/Edge biasa dengan profil Clipper (tanpa Playwright sama sekali).
+
+    Tidak ada flag automasi, tidak ada CDP — jadi kalau jendela login versi
+    Playwright diblokir/tertutup sendiri, cara ini hampir selalu bisa. Setelah
+    login selesai, tutup jendelanya lalu klik "Cek login" di Clipper.
+    """
+    if not session_info()["interactive"]:
+        raise TikTokError(
+            "Tidak ada desktop (Clipper jalan sebagai service), jadi jendela browser "
+            "tidak bisa dibuka. Jalankan run.bat lalu login dari sana."
+        )
+    exe = _chrome_exe()
+    if exe is None:
+        raise TikTokError(
+            "Chrome/Edge tidak ditemukan. Klik \"Unduh browser Clipper\" dulu, lalu coba lagi."
+        )
+    ensure_dirs()
+    profile = _active_profile()
+    profile.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        str(exe),
+        f"--user-data-dir={profile}",
+        "--profile-directory=Default",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--start-maximized",
+        url,
+    ]
+    try:
+        flags = 0
+        if os.name == "nt":
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+                subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+            )
+        proc = subprocess.Popen(cmd, close_fds=True, creationflags=flags)  # noqa: S603
+    except Exception as exc:  # noqa: BLE001
+        message = f"Gagal membuka {exe.name}: {_short_error(exc)}"
+        _write_browser_log([f"manual: {message}"])
+        raise TikTokError(message) from exc
+    _write_browser_log([
+        f"manual: membuka {exe} dengan profil {profile} (pid {proc.pid})",
+        "manual: login di jendela itu, tutup jendelanya, lalu klik 'Cek login'",
+    ])
+    _say(
+        f"Jendela {exe.name} dibuka dengan profil Clipper. Login di sana, TUTUP jendelanya, "
+        "lalu klik \"Cek login\"."
+    )
+    return {"ok": True, "exe": str(exe), "pid": proc.pid, "profile": str(profile)}
+
+
+def check_login_now() -> dict[str, Any]:
+    """Cek apakah login sudah tersimpan (tanpa membuka jendela terlihat)."""
+    if not _ensure_importable()[0]:
+        raise TikTokError("Playwright belum bisa dipakai — klik \"Pasang dukungan TikTok\" dulu.")
+    profile = _active_profile()
+    if _profile_in_use(profile) or _profile_locks(profile):
+        return {
+            "ok": False,
+            "logged_in": False,
+            "reason": "Profil masih dipakai jendela browser. Tutup dulu jendela Chrome/Edge "
+                      "yang dipakai login, lalu klik \"Cek login\" lagi.",
+            "cookies": [],
+        }
+    from playwright.sync_api import sync_playwright
+
+    cookies: list[str] = []
+    detail = ""
+    try:
+        with sync_playwright() as pw:
+            context = _launch(pw, headless=True)
+            try:
+                cookies = login_cookies(context)
+            finally:
+                try:
+                    context.close()
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        detail = _short_error(exc)
+    ok = any(name in STRONG_COOKIES for name in cookies)
+    if ok:
+        _mark_logged_in(True)
+    _write_browser_log([
+        f"check-login: cookie {', '.join(cookies) or '(tidak ada)'} -> {'login OK' if ok else 'belum login'}"
+        + (f" · {detail}" if detail else ""),
+    ])
+    return {
+        "ok": ok,
+        "logged_in": ok,
+        "cookies": cookies,
+        "reason": "" if ok else (detail or "Belum ada cookie login di profil Clipper."),
+        "status": status(),
+    }
 
 
 def logout() -> None:

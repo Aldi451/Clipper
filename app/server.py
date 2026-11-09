@@ -980,6 +980,21 @@ def create_app() -> FastAPI:
             pass
         return {"ok": True}
 
+    @app.get("/api/tiktok/login-state")
+    def tt_login_state() -> dict[str, Any]:
+        """Progres jendela login (dipantau UI tiap 2 detik)."""
+        return {"ok": True, **tiktok.login_state(), "logged_in": tiktok.logged_in()}
+
+    @app.post("/api/tiktok/open-chrome")
+    def tt_open_chrome() -> Any:
+        """Jalur cadangan: buka Chrome/Edge biasa dengan profil Clipper."""
+        return _tt_guard(tiktok.open_manual_browser)
+
+    @app.post("/api/tiktok/check-login")
+    def tt_check_login() -> Any:
+        """Periksa apakah login sudah tersimpan (tanpa jendela)."""
+        return _tt_guard(tiktok.check_login_now)
+
     @app.post("/api/tiktok/reclaim")
     def tt_reclaim() -> Any:
         """Tutup proses browser yang masih memegang profil login Clipper."""

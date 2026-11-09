@@ -805,6 +805,32 @@ Edge/Chrome terdeteksi, tapi jendela login tidak terbuka. Dua hal yang perlu dik
 Kalau cara 4 yang berhasil, folder profil baru diingat (`data/tiktok_profile_dir.txt`) sehingga
 login berikutnya memakai folder yang sama.
 
+**Login tetap gagal? Pakai jalur "Buka Chrome manual" (sejak v1.2.5).**
+
+Jalur ini **tidak memakai Playwright/CDP sama sekali** — jadi bebas dari semua penyebab di bawah
+(profil terkunci, service tanpa desktop, kebijakan browser). Clipper menjalankan **Google Chrome
+yang sudah terpasang di Windows** seperti kamu klik sendiri, hanya dengan folder profil milik
+Clipper supaya cookie-nya bisa dibaca Clipper.
+
+1. Halaman **TikTok** → klik **`Buka Chrome manual`**. Chrome terbuka di halaman login TikTok.
+2. Login seperti biasa (email/sandi atau scan QR).
+3. **Tutup jendela Chrome itu** (penting — cookie baru tersimpan ke disk setelah jendela ditutup).
+4. Klik **`Cek login`** di Clipper. Kalau muncul **"Login TikTok terdeteksi ✓"**, upload sudah siap.
+
+Kalau langkah 4 masih bilang belum login, kirim file `data\logs\tiktok_browser.log` — sejak v1.2.5
+log itu mencatat **versi server, pid, sesi Windows, setiap URL yang dibuka, perubahan cookie, dan
+tangkapan layar** setiap percobaan login (`data\logs\login_step*.png`), jadi penyebabnya bisa
+dilihat langsung tanpa menebak.
+
+Selama **`Buka TikTok & login`** (jalur otomatis) berjalan, panel status di bawah tombol ikut
+diperbarui tiap 2 detik: langkah yang sedang dijalankan, URL terakhir, detik berjalan, dan apakah
+cookie login sudah masuk.
+
+> **Port 8420 sudah dipakai?** Sejak v1.2.5 `run.bat`/`run.py` memeriksa dulu: kalau yang memegang
+> port itu **Clipper lain dari folder yang sama** (misalnya instance versi lama), instance itu
+> **dihentikan otomatis** lalu kode terbaru yang dipakai. Jadi tab browser tidak lagi "nyangkut" di
+> UI versi lama. Versi yang benar terlihat di pojok kanan atas UI dan di baris `Versi` saat start.
+
 **Login tidak bisa padahal browser bisa dibuka? Cek Clipper jalan dari mana (sejak v1.2.4).**
 
 Log `data\logs\tiktok_browser.log` menyebut lokasi profil Chromium seperti ini:
