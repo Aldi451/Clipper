@@ -805,6 +805,39 @@ Edge/Chrome terdeteksi, tapi jendela login tidak terbuka. Dua hal yang perlu dik
 Kalau cara 4 yang berhasil, folder profil baru diingat (`data/tiktok_profile_dir.txt`) sehingga
 login berikutnya memakai folder yang sama.
 
+**`DLL load failed while importing _greenlet` — Playwright rusak (sejak v1.2.6).**
+
+Pesan ini di `data\logs\tiktok_browser.log` artinya **mesin Playwright di dalam `.venv` tidak bisa
+dimuat**, dan selama itu Clipper tidak bisa membuka browser TikTok sendiri: login otomatis gagal,
+upload TikTok juga gagal. Penyebab tersering:
+
+1. **greenlet rusak** karena folder `.venv` pernah disalin/dipindah (mis. drive C → D) atau
+   diperbarui setengah jalan.
+2. **Microsoft Visual C++ Redistributable** belum terpasang (greenlet butuh `vcruntime140.dll`).
+
+Sejak v1.2.6 halaman TikTok menampilkan kartu merah **"Playwright rusak"** berisi pesan asli, versi
+greenlet & Python, status `VCRUNTIME140.dll`, dan tombol **`Perbaiki otomatis`** (memasang ulang
+greenlet + playwright; kalau masih gagal, `.venv` dibangun ulang). Setara dengan itu:
+
+```
+perbaiki_tiktok.bat            (klik dua kali; tanpa Administrator)
+```
+
+atau manual dari folder Clipper:
+
+```
+.venv\Scripts\python.exe -m pip install --force-reinstall --no-cache-dir greenlet playwright
+.venv\Scripts\python.exe -c "import playwright.sync_api; print('OK')"
+```
+
+`repair.bat` dan `python run.py --repair` juga sekarang menguji `playwright.sync_api` (bukan hanya
+`import playwright`) sehingga kerusakan greenlet ikut tertangani.
+
+> **Penting:** tombol **`Buka Chrome manual`** dan **`Cek login`** tetap berfungsi walau Playwright
+> rusak — keduanya tidak memakai Playwright. `Cek login` membaca berkas cookie Chrome
+> (`Default\Network\Cookies`) langsung dengan SQLite, jadi login bisa diverifikasi tanpa Python
+> browser sama sekali. Yang tetap butuh Playwright hanya **upload** otomatis ke TikTok.
+
 **Login tetap gagal? Pakai jalur "Buka Chrome manual" (sejak v1.2.5).**
 
 Jalur ini **tidak memakai Playwright/CDP sama sekali** — jadi bebas dari semua penyebab di bawah

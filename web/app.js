@@ -1443,7 +1443,12 @@ async function renderTikTok(quiet = false) {
       </div>`
     : "";
 
-  const setup = !tt.installed
+  const depsCard = ttDepsHtml(tt);
+  // Playwright rusak TIDAK boleh menyembunyikan jalur login manual:
+  // "Buka Chrome manual" + "Cek login" berjalan tanpa Playwright sama sekali.
+  const depsBroken = !!(tt.deps && tt.deps.ok === false);
+
+  const setup = !tt.installed && !depsBroken
     ? `<div class="card">
         <div class="card-title"><h2>1 · Pasang dukungan TikTok</h2><span class="tag">sekali saja</span></div>
         <p class="hint">
@@ -1457,7 +1462,7 @@ async function renderTikTok(quiet = false) {
         </div>
         ${ttDiagHtml(tt)}
       </div>`
-    : !tt.ready
+    : !tt.ready && !depsBroken
       ? `<div class="card">
           <div class="card-title"><h2>1 · Pilih browser</h2><span class="tag err">belum siap</span></div>
           <p class="hint">
@@ -1517,6 +1522,7 @@ async function renderTikTok(quiet = false) {
     </div>
 
     ${serviceBanner}
+    ${depsCard}
 
     <div id="tt-progress">${ttProgressHtml(tt)}</div>
 
@@ -1681,13 +1687,21 @@ function ttLoginLiveHtml(tt) {
     if (tt.logged_in) {
       return `<div class="tiny up" style="margin-top:10px">✓ Sesi TikTok tersimpan — siap upload.</div>`;
     }
+    const found = live.profile_cookies || [];
+    const foundHtml = found.length
+      ? `<div class="tiny" style="margin-top:10px;color:#fbbf24">
+           Cookie TikTok terbaca di profil Clipper: <span class="mono">${esc(found.join(", "))}</span> —
+           tapi belum ada <span class="mono">sessionid</span>, artinya login belum selesai.
+           Buka <b>Buka Chrome manual</b>, login sampai masuk beranda TikTok, lalu tutup jendelanya.
+         </div>`
+      : "";
     return live.step === "selesai"
       ? `<div class="tiny" style="margin-top:10px;color:#fca5a5">
            Jendela login terakhir sudah ditutup tanpa mendeteksi login.
            ${live.url ? `URL terakhir: <span class="mono">${esc(live.url)}</span>` : ""}
            Coba <b>Buka Chrome manual</b> lalu <b>Cek login</b>.
          </div>`
-      : "";
+      : foundHtml;
   }
   return `<div class="tiny dim" style="margin-top:10px">
       <span class="spinner"></span> ${esc(live.step || "menunggu login")}
@@ -1736,6 +1750,43 @@ function ttTestResultHtml(res) {
       kalau masih gagal supaya bisa saya periksa.
     </div>
     ${picked ? `<div class="tiny up" style="margin-top:6px">Browser utama: ${esc(picked)}</div>` : ""}
+  </div>`;
+}
+
+function ttDepsHtml(tt) {
+  const d = (tt && tt.deps) || {};
+  if (!d || d.ok !== false) return "";
+  const steps = (state.ttFixSteps || [])
+    .map((s) => `<div class="mono tiny">${s.ok ? "✓" : "✕"} ${esc(s.cmd)}</div>
+       <pre class="mono diag-cmd">${esc(String(s.out || "").slice(0, 900))}</pre>`)
+    .join("");
+  return `<div class="card" style="border-color:#f87171;background:rgba(248,113,113,0.08)">
+    <div class="card-title"><h2>⚠ Playwright rusak di komputer ini</h2>
+      <span class="tag err">perlu perbaikan</span></div>
+    <p class="hint">
+      Clipper tidak bisa membuka browser TikTok dari sisi Python. Pesan aslinya:
+    </p>
+    <pre class="mono diag-cmd">${esc(d.error || "tidak diketahui")}</pre>
+    <div class="kv-list" style="margin-top:8px">
+      <div class="kv"><span>greenlet</span><b class="mono">${esc(d.greenlet || "tidak terpasang")}</b></div>
+      <div class="kv"><span>playwright</span><b class="mono">${esc(d.playwright || "tidak terpasang")}</b></div>
+      <div class="kv"><span>Python</span><b class="mono">${esc(d.python || "?")}</b></div>
+      <div class="kv"><span>VCRUNTIME140.dll</span><b>${d.vc_runtime ? "ada" : "TIDAK ADA"}</b></div>
+    </div>
+    <p class="hint" style="margin-top:10px">
+      ${d.vc_runtime === false
+        ? "Penyebabnya kemungkinan <b>Microsoft Visual C++ Redistributable</b> belum terpasang. Pasang dulu (gratis, dari situs Microsoft), lalu klik tombol di bawah."
+        : "Klik tombol di bawah — Clipper memasang ulang <b>greenlet</b> dan <b>playwright</b> dengan Python miliknya sendiri (butuh internet, sekali saja)."}
+    </p>
+    <div class="row" style="margin-top:10px">
+      <button class="btn tt" data-action="tt-fix-playwright">Perbaiki otomatis</button>
+      <button class="btn ghost" data-action="tt-recheck">Periksa ulang</button>
+    </div>
+    ${steps}
+    <p class="hint" style="margin-top:10px">
+      <b>Tombol "Buka Chrome manual" + "Cek login" tetap bisa dipakai sekarang</b> —
+      jalur itu tidak memakai Playwright sama sekali.
+    </p>
   </div>`;
 }
 
@@ -2888,7 +2939,14 @@ document.addEventListener("click", async (e) => {
     } else if (action === "tt-open-chrome") {
       try {
         const res = await api("/api/tiktok/open-chrome", { method: "POST" });
-        toast(`Chrome dibuka (pid ${res.pid}). Login di sana, tutup jendelanya, lalu klik "Cek login".`, "ok");
+        if (res.already_open) {
+          toast(res.message || "Chrome dengan profil Clipper sudah terbuka — pakai jendela itu.", "ok");
+        } else {
+          toast(
+            `Chrome dibuka (pid ${res.pid}). Login di sana, TUTUP jendelanya, lalu klik "Cek login".`,
+            "ok"
+          );
+        }
       } catch (err) {
         toast("Gagal membuka Chrome: " + err.message, "bad");
       }
@@ -2899,12 +2957,25 @@ document.addEventListener("click", async (e) => {
         if (res.logged_in) {
           toast("Login TikTok terdeteksi ✓ — siap upload", "ok");
         } else {
-          toast("Belum login: " + (res.reason || ""), "bad");
+          // tampilkan alasan lengkap, bukan sepotong: ini yang bikin user bingung
+          toast((res.reason || "Belum login.").slice(0, 400), "bad");
         }
         if (res.status) state.tiktok = res.status;
         await renderTikTok();
       } catch (err) {
         toast("Gagal memeriksa login: " + err.message, "bad");
+      }
+    } else if (action === "tt-fix-playwright") {
+      toast("Memasang ulang greenlet + playwright… (bisa 1–3 menit)", "ok");
+      state.ttFixSteps = [];
+      try {
+        const res = await api("/api/tiktok/fix-playwright", { method: "POST" });
+        state.ttFixSteps = res.steps || [];
+        toast(res.message || (res.ok ? "Selesai" : "Masih gagal"), res.ok ? "ok" : "bad");
+        if (res.status) state.tiktok = res.status;
+        await renderTikTok();
+      } catch (err) {
+        toast("Perbaikan gagal: " + err.message, "bad");
       }
     } else if (action === "tt-logout") {
       await api("/api/tiktok/logout", { method: "POST" });

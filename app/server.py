@@ -995,6 +995,16 @@ def create_app() -> FastAPI:
         """Periksa apakah login sudah tersimpan (tanpa jendela)."""
         return _tt_guard(tiktok.check_login_now)
 
+    @app.get("/api/tiktok/deps")
+    def tt_deps() -> dict[str, Any]:
+        """Kesehatan Playwright/greenlet (UI menawarkan perbaikan kalau rusak)."""
+        return {"ok": True, **tiktok.playwright_health(refresh=True)}
+
+    @app.post("/api/tiktok/fix-playwright")
+    def tt_fix_playwright() -> Any:
+        """Pasang ulang greenlet + playwright (jalur sembuh sekali klik)."""
+        return _tt_guard(tiktok.repair_playwright)
+
     @app.post("/api/tiktok/reclaim")
     def tt_reclaim() -> Any:
         """Tutup proses browser yang masih memegang profil login Clipper."""

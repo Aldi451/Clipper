@@ -402,8 +402,16 @@ def diagnose(check_update: bool = False) -> dict[str, Any]:
 # perbaikan
 # --------------------------------------------------------------------------- #
 def _venv_has_playwright(vpy: Path) -> tuple[bool, str]:
-    """Cek langsung di Python .venv (bukan di proses script ini)."""
-    code, out = run_capture([str(vpy), "-c", "import playwright, sys; print(playwright.__file__)"], 120)
+    """Cek langsung di Python .venv (bukan di proses script ini).
+
+    Yang diuji `playwright.sync_api`, bukan sekadar `import playwright`:
+    paketnya bisa ada tapi `greenlet`-nya rusak
+    (`DLL load failed while importing _greenlet`) — dan itu baru ketahuan
+    saat sync_api diimpor.
+    """
+    code, out = run_capture(
+        [str(vpy), "-c", "import playwright.sync_api as m; print(m.__file__)"], 240
+    )
     return code == 0, out.strip()
 
 
@@ -438,7 +446,16 @@ def fix() -> bool:
     if in_venv:
         log(f"Playwright sudah ada di .venv ({where})", OK)
     else:
-        log("Playwright belum ada di .venv — memasang sekarang…")
+        # greenlet rusak paling sering: pasang ulang, bukan sekadar 'upgrade'
+        log("Playwright/greenlet belum bisa dipakai di .venv — memasang ulang…")
+        for pkg in ("greenlet", "playwright"):
+            code, out = run_capture(
+                [str(vpy), "-m", "pip", "install", "--force-reinstall", "--no-cache-dir",
+                 "--disable-pip-version-check", pkg],
+                1800,
+            )
+            for line in useful_tail(out):
+                log(f"   {line}")
         code, out = run_capture([str(vpy), "-m", "pip", "install", "--upgrade", "playwright"], 1800)
         for line in useful_tail(out):
             log(f"   {line}")
