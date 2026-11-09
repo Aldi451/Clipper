@@ -1423,6 +1423,26 @@ async function renderTikTok(quiet = false) {
       ? "Chromium bawaan Playwright"
       : "belum ada";
 
+  const session = tt.session || {};
+  const serviceBanner = session.interactive === false
+    ? `<div class="card" style="border-color:#f87171;background:rgba(248,113,113,0.08)">
+        <div class="card-title"><h2>⚠ Clipper jalan sebagai Windows service</h2>
+          <span class="tag err">tanpa desktop</span></div>
+        <p class="hint">
+          Login TikTok butuh <b>jendela browser di layar</b>, dan service Windows tidak punya desktop —
+          jadi jendela login tidak akan pernah muncul dari sini. Upload tetap bisa berjalan
+          (tanpa jendela) asalkan login sudah pernah dilakukan.
+        </p>
+        <p class="hint" style="margin-top:8px"><b>Cara login:</b></p>
+        <ol class="hint" style="margin:6px 0 10px 18px;padding:0">
+          <li>Jalankan <span class="mono">run.bat</span> (service boleh tetap jalan).</li>
+          <li>Di Clipper yang dibuka run.bat, klik <b>Buka TikTok &amp; login</b> → login di jendela yang muncul.</li>
+          <li>Tutup Clipper itu. Login tersimpan di folder profil yang sama, jadi service ikut memakainya.</li>
+        </ol>
+        <div class="tiny dim">Sesi: user "${esc(String(session.user || "?"))}" · session id ${esc(String(session.session_id ?? "?"))}</div>
+      </div>`
+    : "";
+
   const setup = !tt.installed
     ? `<div class="card">
         <div class="card-title"><h2>1 · Pasang dukungan TikTok</h2><span class="tag">sekali saja</span></div>
@@ -1450,6 +1470,7 @@ async function renderTikTok(quiet = false) {
               Unduh browser Clipper</button>
             <button class="btn ghost" data-action="tt-recheck" ${tt.installing ? "disabled" : ""}>Periksa ulang</button>
             <button class="btn ghost" data-action="tt-test-browser" ${tt.installing ? "disabled" : ""}>Tes buka browser</button>
+            <button class="btn ghost" data-action="tt-test-window" ${tt.installing ? "disabled" : ""}>Tes jendela</button>
           </div>
           <div id="tt-test-result"></div>
           ${ttDiagHtml(tt)}
@@ -1468,6 +1489,7 @@ async function renderTikTok(quiet = false) {
             </button>
             <button class="btn ghost" data-action="tt-recheck">Periksa ulang</button>
             <button class="btn ghost" data-action="tt-test-browser" title="Coba buka browser sekarang dan laporkan penyebabnya kalau gagal">Tes buka browser</button>
+            <button class="btn ghost" data-action="tt-test-window" title="Uji persis seperti saat login: jendela browser terlihat di layar">Tes jendela</button>
             ${tt.logged_in ? `<button class="btn ghost danger" data-action="tt-logout">Hapus sesi</button>` : ""}
           </div>
           <div id="tt-test-result"></div>
@@ -1487,6 +1509,8 @@ async function renderTikTok(quiet = false) {
         ${tt.ready && tt.logged_in ? "siap upload" : tt.ready ? "siap, belum login" : "belum dipasang"}
       </span>
     </div>
+
+    ${serviceBanner}
 
     <div id="tt-progress">${ttProgressHtml(tt)}</div>
 
@@ -2736,12 +2760,13 @@ document.addEventListener("click", async (e) => {
         res && res.ready ? "ok" : "bad"
       );
       await renderTikTok();
-    } else if (action === "tt-test-browser") {
+    } else if (action === "tt-test-browser" || action === "tt-test-window") {
+      const headless = action === "tt-test-browser";
       const box = $("#tt-test-result");
-      if (box) box.innerHTML = `<div class="tiny dim" style="margin-top:10px"><span class="spinner"></span> Menguji browser…</div>`;
+      if (box) box.innerHTML = `<div class="tiny dim" style="margin-top:10px"><span class="spinner"></span> ${headless ? "Menguji browser…" : "Membuka jendela uji (lihat layar)…"}</div>`;
       target.disabled = true;
       try {
-        const res = await api("/api/tiktok/browser-test", { method: "POST" });
+        const res = await api("/api/tiktok/browser-test", { method: "POST", body: { headless } });
         if (box) box.innerHTML = ttTestResultHtml(res);
         toast(res.ok ? "Browser bisa dibuka" : "Browser gagal dibuka — lihat detailnya di bawah", res.ok ? "ok" : "bad");
         if (res.status) state.tiktok = res.status;

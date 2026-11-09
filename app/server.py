@@ -938,14 +938,16 @@ def create_app() -> FastAPI:
         return _tt_guard(tiktok.install_browser)
 
     @app.post("/api/tiktok/browser-test")
-    def tt_browser_test() -> dict[str, Any]:
-        """Tes buka browser sungguhan (headless) dan laporkan hasil per cara.
+    def tt_browser_test(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        """Tes buka browser sungguhan dan laporkan hasil per cara.
 
-        Read-only: memakai profil sementara, tidak menyentuh profil/login user.
+        ``{"headless": false}`` menguji persis seperti saat login (jendela
+        terlihat). Read-only: profil sementara, tidak menyentuh login user.
         """
-        result = tiktok.diagnose_browser(headless=True)
+        headless = bool(payload.get("headless", True))
+        result = tiktok.diagnose_browser(headless=headless)
         tiktok._say(  # noqa: SLF001 - tampilkan ringkas di log halaman TikTok
-            "Tes browser: "
+            ("Tes jendela: " if not headless else "Tes browser: ")
             + ("berhasil — " if result.get("ok") else "gagal — ")
             + "; ".join(
                 f"{item['mode']}: {'OK' if item['ok'] else item['error'][:70]}"
