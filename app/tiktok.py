@@ -1978,9 +1978,13 @@ def upload_video(
                 raise TikTokError("Kolom caption TikTok tidak muncul — coba lagi sebentar lagi.")
             try:
                 box.click(timeout=10000)
-                page.keyboard.press("Control+A")
+                select_all = "Meta+A" if sys.platform == "darwin" else "Control+A"
+                page.keyboard.press(select_all)
+                page.keyboard.press("Backspace")
                 page.keyboard.press("Delete")
-                page.keyboard.insert_text(text[:2200])
+                caption_text = text[:2199].rstrip() + " "
+                page.keyboard.insert_text(caption_text)
+                page.keyboard.press("Escape")
             except Exception:
                 pass
             progress(0.62, "Caption terisi")

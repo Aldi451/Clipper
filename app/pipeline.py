@@ -168,7 +168,9 @@ def _run_analysis(job_id: str) -> None:
 
         # 5b) auto-framing: kamera mengikuti pembicara (hanya kalau layout crop)
         framing_results: dict[int, dict[str, Any]] = {}
-        if settings.get("auto_framing") and str(settings.get("layout") or "") == "crop" and candidates:
+        tpl = editor.template_by_id(str(settings.get("default_template") or "")) or {}
+        effective_layout = str(tpl.get("layout") or settings.get("layout") or "")
+        if settings.get("auto_framing") and effective_layout == "crop" and candidates:
             try:
                 from . import framing as framing_module
 
@@ -194,9 +196,10 @@ def _run_analysis(job_id: str) -> None:
         # 6) simpan clip
         existing = db.list_clips(job_id)
         for clip in existing:
-            old_file = resolve_media_path(clip["file"], (WORK_DIR / clip["job_id"],))
-            if old_file is not None:
-                safe_unlink(old_file)
+            for old_ref in (clip.get("file"), clip.get("thumb"), (clip.get("meta") or {}).get("srt")):
+                old_file = resolve_media_path(old_ref, (WORK_DIR / clip["job_id"],))
+                if old_file is not None:
+                    safe_unlink(old_file)
             db.delete_clip(clip["id"])
 
         # 5c) hook vs ucapan: kalau hook hasil parafrase tidak ada di ucapan,
@@ -350,9 +353,15 @@ def _run_render(clip_id: str) -> None:
         editor.cleanup_workdir(job["id"], clip_id)
 
         if settings.get("auto_pipeline"):
-            if settings.get("yt_auto_upload") and youtube.is_connected():
+            want_yt = bool(settings.get("yt_auto_upload") and youtube.is_connected())
+            want_tt = bool(
+                settings.get("tt_enabled") and settings.get("tt_auto_upload") and tiktok.ready()
+            )
+            if want_yt and want_tt:
+                start_upload(clip_id, "both")
+            elif want_yt:
                 start_upload(clip_id, "youtube")
-            elif settings.get("tt_enabled") and settings.get("tt_auto_upload") and tiktok.ready():
+            elif want_tt:
                 start_upload(clip_id, "tiktok")
     except Exception as exc:
         traceback.print_exc()
@@ -398,7 +407,10 @@ def _run_upload(clip_id: str, target: str = "youtube") -> None:
         detail = youtube.friendly_error(str(exc), "Upload gagal")
         if target == "tiktok":
             detail = str(exc)[:700]
-        db.update_clip(clip_id, status="rendered" if clip.get("file") else "suggested",
+        latest = db.get_clip(clip_id) or clip
+        already = bool(latest.get("yt_url") or latest.get("tk_url"))
+        fallback_status = "uploaded" if already else ("rendered" if latest.get("file") else "suggested")
+        db.update_clip(clip_id, status=fallback_status,
                        message=f"Upload {_target_label(target)} gagal", error=detail[:700])
     finally:
         _release(key)
@@ -418,7 +430,8 @@ def _upload_youtube(clip: dict[str, Any], clip_file: Path, settings: dict[str, A
     def on_progress(fraction: float, message: str) -> None:
         db.update_clip(clip_id, progress=round(fraction, 4), message=message)
 
-    srt = (clip.get("meta") or {}).get("srt") or ""
+    srt_raw = (clip.get("meta") or {}).get("srt") or ""
+    srt_resolved = resolve_media_path(srt_raw, (WORK_DIR / clip["job_id"],)) if srt_raw else None
     result = youtube.upload_video(
         str(clip_file),
         title=clip.get("title") or "Clip",
@@ -426,7 +439,7 @@ def _upload_youtube(clip: dict[str, Any], clip_file: Path, settings: dict[str, A
         hashtags=clip.get("hashtags") or settings.get("yt_hashtags") or "#Shorts",
         privacy=settings.get("yt_privacy") or "public",
         on_progress=on_progress,
-        srt_path=srt if srt and Path(srt).exists() else None,
+        srt_path=str(srt_resolved) if srt_resolved and srt_resolved.exists() else None,
         category_id=str(settings.get("yt_category") or "24"),
         notify_subscribers=bool(settings.get("yt_notify_subscribers")),
     )
@@ -435,8 +448,6 @@ def _upload_youtube(clip: dict[str, Any], clip_file: Path, settings: dict[str, A
         yt_id=result["id"], yt_url=result["url"],
         yt_privacy=result["privacy"], error="",
     )
-    if settings.get("tt_enabled") and settings.get("tt_auto_upload"):
-        start_upload(clip_id, "tiktok")
 
 
 def _upload_tiktok(clip: dict[str, Any], clip_file: Path, settings: dict[str, Any]) -> None:
