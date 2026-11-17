@@ -1548,7 +1548,7 @@ def render_spec(
     except Exception:
         thumb_value = ""
 
-    srt_path = workdir / "subtitles.srt"
+    srt_path = CLIP_DIR / f"{clip_id}.srt"
     try:
         srt_path.write_text(subtitles_to_srt(spec.get("subtitles") or []), encoding="utf-8")
         srt_value = str(srt_path) if srt_path.exists() else ""

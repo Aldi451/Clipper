@@ -10,6 +10,7 @@ semua tetap jalan dengan heuristik saja.
 """
 from __future__ import annotations
 
+import bisect
 import json
 import math
 import re
@@ -177,12 +178,51 @@ def _tokens(text: str) -> list[str]:
     return re.findall(r"[a-zA-ZÀ-ÿ']+", text.lower())
 
 
+_energy_cache: tuple[int, int, float, float, list[float], list[float], list[float]] | None = None
+
+
+def _build_energy_index(
+    energy: list[tuple[float, float]],
+) -> tuple[list[float], list[float], list[float]]:
+    global _energy_cache
+    first_t = float(energy[0][0]) if energy else 0.0
+    last_t = float(energy[-1][0]) if energy else 0.0
+    cache = _energy_cache
+    if (
+        cache is not None
+        and cache[0] == id(energy)
+        and cache[1] == len(energy)
+        and cache[2] == first_t
+        and cache[3] == last_t
+    ):
+        return cache[4], cache[5], cache[6]
+
+    times: list[float] = []
+    psum: list[float] = [0.0]
+    psq: list[float] = [0.0]
+    acc = 0.0
+    acc_sq = 0.0
+    for t, db in sorted((t, db) for t, db in energy if db > -90):
+        times.append(t)
+        acc += db
+        acc_sq += db * db
+        psum.append(acc)
+        psq.append(acc_sq)
+    _energy_cache = (id(energy), len(energy), first_t, last_t, times, psum, psq)
+    return times, psum, psq
+
+
 def _energy_stats(energy: list[tuple[float, float]], start: float, end: float) -> tuple[float, float]:
-    values = [db for t, db in energy if start <= t <= end and db > -90]
-    if not values:
+    if not energy:
         return -60.0, 0.0
-    mean = sum(values) / len(values)
-    var = sum((v - mean) ** 2 for v in values) / len(values)
+    times, psum, psq = _build_energy_index(energy)
+    lo = bisect.bisect_left(times, start)
+    hi = bisect.bisect_right(times, end)
+    count = hi - lo
+    if count <= 0:
+        return -60.0, 0.0
+    mean = (psum[hi] - psum[lo]) / count
+    var = max(0.0, (psq[hi] - psq[lo]) / count - mean * mean)
     return mean, math.sqrt(var)
 
 
@@ -469,19 +509,23 @@ def _hashtags(keywords: Iterable[str], base: str) -> str:
 # pemilihan kandidat
 # --------------------------------------------------------------------------- #
 def _window_score(cand: Candidate, energy: list[tuple[float, float]], base_db: float,
-                  min_len: float, max_len: float) -> tuple[float, dict[str, float]]:
+                  min_len: float, max_len: float,
+                  opening_hook: float | None = None,
+                  token_count: int | None = None) -> tuple[float, dict[str, float]]:
     text = cand.text
-    tokens = _tokens(text)
+    n_tokens = token_count if token_count is not None else len(_tokens(text))
     dur = max(1.0, cand.duration)
-    density = _clamp((len(tokens) / dur) / 3.0)            # ~3 kata/detik = ideal
+    density = _clamp((n_tokens / dur) / 3.0)               # ~3 kata/detik = ideal
     hook = _hook_score(text)
-    opening_hook = _hook_score(" ".join(s.text for s in cand.sentences[:2]))
+    if opening_hook is None:
+        opening_hook = _hook_score(" ".join(s.text for s in cand.sentences[:2]))
     mean_db, std_db = _energy_stats(energy, cand.start, cand.end)
     loud = _clamp((mean_db - (base_db - 12)) / 14.0) if base_db > -90 else 0.5
     lively = _clamp(std_db / 6.0)
-    ideal = (min_len + 1.4 * min_len) / 2.4
-    ideal = max(ideal, min_len)
-    length_fit = _clamp(1.0 - abs(dur - ideal) / max(ideal, 1.0))
+    ideal = (1.4 * min_len + max(min_len, max_len)) / 2.4
+    ideal = max(min_len, min(max(min_len, max_len), ideal))
+    span = max(15.0, max_len - min_len, ideal * 0.6)
+    length_fit = _clamp(1.0 - abs(dur - ideal) / span)
     gaps = [cand.sentences[i + 1].start - cand.sentences[i].end
             for i in range(len(cand.sentences) - 1)]
     silence = sum(g for g in gaps if g > 0.7)
@@ -514,15 +558,24 @@ def find_candidates(
     min_len = float(settings.get("min_clip_seconds") or 60)
     max_len = float(settings.get("max_clip_seconds") or 180)
     target = int(settings.get("target_clips") or 5)
-    # 1 menit .. 3 menit (batas keras, walau settings diubah manual)
-    min_len = max(60.0, min(180.0, min_len))
+    # 1 menit .. 3 menit untuk video panjang; adaptif bila video sumber lebih pendek dari 60d
+    min_len = max(15.0, min(180.0, min_len))
     max_len = max(min_len, min(180.0, max_len))
     target = max(1, min(20, target))
 
     sentences = build_sentences(transcript)
     if not sentences:
         return []
+    total_span = max(0.0, sentences[-1].end - sentences[0].start)
+    if total_span >= 60.0 and float(settings.get("min_clip_seconds") or 60) >= 60.0:
+        min_len = max(60.0, min_len)
+        max_len = max(min_len, max_len)
+    elif 0.0 < total_span < min_len:
+        min_len = max(5.0, total_span * 0.5)
+        max_len = max(min_len + 1.0, total_span + 1.0)
+
     base_db = _global_loudness(energy)
+    sent_tokens = [len(_tokens(s.text)) for s in sentences]
 
     raw: list[Candidate] = []
     total_starts = len(sentences)
@@ -530,16 +583,23 @@ def find_candidates(
         if on_progress and i % 25 == 0:
             on_progress(0.9 * i / total_starts, f"Menilai {i}/{total_starts} kandidat…")
         chunk: list[Sentence] = []
+        chunk_tokens = 0
+        opening_hook: float | None = None
         for j in range(i, len(sentences)):
             chunk.append(sentences[j])
+            chunk_tokens += sent_tokens[j]
+            if len(chunk) == 2:
+                opening_hook = _hook_score(" ".join(s.text for s in chunk[:2]))
             dur = sentences[j].end - start_sentence.start
             if dur > max_len:
                 break
             if dur < min_len:
                 continue
-            text = " ".join(s.text for s in chunk)
-            if len(_tokens(text)) < 12:
+            if chunk_tokens < 12:
                 continue
+            text = " ".join(s.text for s in chunk)
+            if opening_hook is None:
+                opening_hook = _hook_score(" ".join(s.text for s in chunk[:2]))
             cand = Candidate(
                 start=start_sentence.start,
                 end=sentences[j].end,
@@ -551,7 +611,10 @@ def find_candidates(
                 hashtags="",
                 sentences=list(chunk),
             )
-            score, features = _window_score(cand, energy, base_db, min_len, max_len)
+            score, features = _window_score(
+                cand, energy, base_db, min_len, max_len,
+                opening_hook=opening_hook, token_count=chunk_tokens,
+            )
             cand.score = score
             cand.features = features
             raw.append(cand)
@@ -671,7 +734,12 @@ def _snap_start(start: float, sentences: list[Sentence], energy: list[tuple[floa
 def _snap_end(end: float, sentences: list[Sentence], energy: list[tuple[float, float]]) -> float:
     if not sentences:
         return end
-    return max(sentences[0].start + 3, end + 0.25)
+    last = sentences[-1]
+    new_end = max(end, last.end)
+    for t, db in energy:
+        if last.end - 0.2 <= t <= last.end + 0.45 and db > -35:
+            new_end = max(new_end, t)
+    return max(sentences[0].start + 3, new_end + 0.25)
 
 
 def _build_description(cand: Candidate, keywords: list[str]) -> str:

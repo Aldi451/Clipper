@@ -182,6 +182,13 @@ def crop_expression(segments: list[dict[str, Any]], pan: float = PAN_SECONDS,
     if not items:
         return f"{_clamp(default):.4f}"
     items = sorted(items, key=lambda seg: _f(seg.get("at")))
+    # Batasi kedalaman ekspresi bersarang agar parser libavutil/eval.c ffmpeg tidak overflow
+    while len(items) > 20:
+        min_idx = min(
+            range(1, len(items)),
+            key=lambda i: abs(_f(items[i].get("x"), default) - _f(items[i - 1].get("x"), default)),
+        )
+        items.pop(min_idx)
     if len(items) == 1:
         return f"{_clamp(_f(items[0].get('x'), default)):.4f}"
 
@@ -256,6 +263,9 @@ def _read_frames(path: Path, start: float, duration: float, step: float,
         return []
     frames: list[tuple[float, Any]] = []
     try:
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        use_grab = 1.0 < fps <= 120.0 and 0.05 <= step <= 2.0
+        skip_count = max(0, int(round(step * fps)) - 1) if use_grab else 0
         capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, start) * 1000.0)
         offset = 0.0
         while offset <= duration + 1e-6:
@@ -269,8 +279,18 @@ def _read_frames(path: Path, start: float, duration: float, step: float,
                     frame = cv2.resize(frame, (max_width, int(height * scale)))
                 frames.append((round(offset, 3), frame))
             offset += step
-            # lompat langsung ke posisi berikutnya (jauh lebih cepat dari membaca semua frame)
-            capture.set(cv2.CAP_PROP_POS_MSEC, (start + offset) * 1000.0)
+            if offset > duration + 1e-6:
+                break
+            if use_grab and skip_count > 0:
+                grabbed = True
+                for _ in range(skip_count):
+                    if not capture.grab():
+                        grabbed = False
+                        break
+                if not grabbed:
+                    break
+            else:
+                capture.set(cv2.CAP_PROP_POS_MSEC, (start + offset) * 1000.0)
     finally:
         capture.release()
     return frames
@@ -286,13 +306,16 @@ def detect_faces(cv2: Any, frame: Any, cascade: Any) -> list[tuple[float, float,
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     min_size = max(28, int(frame.shape[1] * 0.05))
-    # (gambar, skala, minNeighbors) — coba yang paling ketat dulu.
-    # equalizeHist membantu video gelap, tapi bisa juga menghilangkan wajah yang
-    # sudah kontras, jadi keduanya dicoba.
-    candidates = (
-        (gray, 1.1, 6), (gray, 1.1, 4), (gray, 1.05, 3),
-        (cv2.equalizeHist(gray), 1.1, 4),
-    )
+    candidates: list[tuple[Any, float, int]] = [
+        (gray, 1.1, 5),
+        (gray, 1.06, 3),
+    ]
+    # equalizeHist membantu video gelap/kontras rendah, hanya dijalankan bila perlu
+    try:
+        if float(gray.mean()) < 95.0 or float(gray.std()) < 45.0:
+            candidates.append((cv2.equalizeHist(gray), 1.1, 4))
+    except Exception:
+        candidates.append((cv2.equalizeHist(gray), 1.1, 4))
     for source, scale, neighbors in candidates:
         boxes = cascade.detectMultiScale(
             source, scaleFactor=scale, minNeighbors=neighbors, minSize=(min_size, min_size)

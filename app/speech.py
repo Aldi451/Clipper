@@ -291,11 +291,26 @@ def align_words(
 
     if words:
         pos = 0
+        next_keys = [
+            next(( keys[m] for m in range(i + 1, min(len(keys), i + 3)) if keys[m] ), "")
+            for i in range(len(keys))
+        ]
         for i, key in enumerate(keys):
             if not key:
                 continue
+            nxt = next_keys[i]
             for j in range(pos, len(words)):
+                if end is not None and _f(words[j].get("start")) > float(end) + 1.5:
+                    break
                 if similar(key, norm_token(words[j]["text"])):
+                    # Cegah kata parafrase di awal melompat jauh melewati kata berikutnya
+                    if j - pos > 2 and nxt:
+                        skipped_next = any(
+                            similar(nxt, norm_token(words[k]["text"]))
+                            for k in range(pos, j)
+                        )
+                        if skipped_next:
+                            break
                     matched[i] = words[j]
                     pos = j + 1
                     break
