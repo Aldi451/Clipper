@@ -219,6 +219,11 @@ function edUpdateCamLabel() {
   const label = edEl("ed-cam-label");
   if (!label || !ED.spec) return;
   const info = ((ED.clip && ED.clip.meta) || {}).framing || {};
+  if (ED.spec.layout === "gameplay" || info.kind === "gameplay") {
+    const corner = (ED.spec.gameplay && ED.spec.gameplay.corner) || (info.facecam && info.facecam.corner) || "pojok";
+    label.textContent = `Gameplay · host ${corner}`;
+    return;
+  }
   const on = !!info.ok && ED.spec.framing && ED.spec.framing.mode === "auto";
   if (!info.ok) label.textContent = "Deteksi pembicara";
   else if (on) label.textContent = `Ikuti pembicara${info.moves ? " · " + info.moves + "×" : ""}`;
@@ -719,13 +724,41 @@ function panelLayoutHtml() {
   const spec = ED.spec;
   const bg = spec.background || {};
   const logo = spec.logo || {};
+  const gp = spec.gameplay || { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.32, game_x: 0.56, split: 0.62 };
   return `
     ${fieldRow("Layout video", `<select class="select" data-spec="layout">
-      ${[["fit", "Video utuh + background"], ["crop", "Crop penuh 9:16"], ["black", "Letterbox hitam"]]
+      ${[
+        ["fit", "Video utuh + background (fokus topik)"],
+        ["crop", "Crop penuh 9:16 (fokus pembicara / podcast)"],
+        ["gameplay", "Gameplay (atas game, bawah facecam host)"],
+        ["black", "Letterbox hitam"],
+      ]
         .map(([v, l]) => `<option value="${v}" ${spec.layout === v ? "selected" : ""}>${l}</option>`)
         .join("")}
     </select>`)}
-    ${fieldRow("Fokus crop horizontal", `<input type="range" min="0" max="1" step="0.01" data-spec="crop_focus" value="${Number(spec.crop_focus)}" />`, "0% kiri · 50% tengah · 100% kanan")}
+    ${
+      spec.layout === "gameplay"
+        ? `
+    <div class="ed-hook-box" style="margin-bottom:10px">
+      <div class="tiny" style="margin-bottom:6px"><b>Mode Gameplay:</b> Bagian atas menampilkan gameplay, bagian bawah menampilkan facecam host YouTuber.</div>
+      <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">
+        <button class="btn small ghost" data-gp-preset="0.16,0.78,0.56,kiri bawah">Facecam Kiri Bawah</button>
+        <button class="btn small ghost" data-gp-preset="0.16,0.22,0.56,kiri atas">Facecam Kiri Atas</button>
+        <button class="btn small ghost" data-gp-preset="0.84,0.78,0.44,kanan bawah">Facecam Kanan Bawah</button>
+        <button class="btn small ghost" data-gp-preset="0.84,0.22,0.44,kanan atas">Facecam Kanan Atas</button>
+      </div>
+      <div class="ed-two">
+        ${fieldRow("Facecam X (kiri–kanan)", `<input type="range" min="0.04" max="0.96" step="0.01" data-gameplay="cam_x" value="${Number(gp.cam_x ?? 0.16)}" />`)}
+        ${fieldRow("Facecam Y (atas–bawah)", `<input type="range" min="0.06" max="0.94" step="0.01" data-gameplay="cam_y" value="${Number(gp.cam_y ?? 0.78)}" />`)}
+      </div>
+      <div class="ed-two">
+        ${fieldRow("Ukuran area facecam", `<input type="range" min="0.18" max="0.60" step="0.01" data-gameplay="cam_scale" value="${Number(gp.cam_scale ?? 0.32)}" />`, "Kecil = zoom dekat ke wajah host")}
+        ${fieldRow("Tinggi bagian gameplay", `<input type="range" min="0.48" max="0.72" step="0.01" data-gameplay="split" value="${Number(gp.split ?? 0.62)}" />`, "Default 62% atas game, 38% bawah host")}
+      </div>
+      ${fieldRow("Fokus horizontal gameplay (atas)", `<input type="range" min="0" max="1" step="0.01" data-gameplay="game_x" value="${Number(gp.game_x ?? 0.5)}" />`)}
+    </div>`
+        : fieldRow("Fokus crop horizontal", `<input type="range" min="0" max="1" step="0.01" data-spec="crop_focus" value="${Number(spec.crop_focus)}" />`, "0% kiri · 50% tengah · 100% kanan")
+    }
     ${fieldRow("Jenis background", `<select class="select" data-bg="type">
       ${[["blur", "Blur video"], ["gradient", "Gradien warna"], ["color", "Warna solid"]]
         .map(([v, l]) => `<option value="${v}" ${bg.type === v ? "selected" : ""}>${l}</option>`)
@@ -789,20 +822,24 @@ function panelExportHtml() {
     ${fieldRow("Hook (teks overlay pertama)", `<input class="input" data-clip-meta="hook" value="${esc(clip.hook || "")}" />`)}
     ${(() => {
       const f = (clip.meta || {}).framing || {};
+      const isGameplay = spec.layout === "gameplay" || f.kind === "gameplay";
       const on = f.ok && spec.framing && spec.framing.mode === "auto";
       const moves = Number(f.moves || 0);
-      const label = !f.ok
-        ? "kamera tetap di tengah"
-        : on
-          ? `kamera mengikuti pembicara${moves ? " · " + moves + "× pindah" : ""}`
-          : "kamera tetap di tengah (auto-framing dimatikan)";
+      const corner = (spec.gameplay && spec.gameplay.corner) || (f.facecam && f.facecam.corner) || "pojok";
+      const label = isGameplay
+        ? `mode gameplay aktif · gameplay di atas, host di bawah (${corner})`
+        : !f.ok
+          ? "fokus topik & hook video (kamera di tengah)"
+          : on
+            ? `kamera mengikuti pembicara${moves ? " · " + moves + "× pindah" : ""}`
+            : "kamera tetap di tengah (auto-framing dimatikan)";
       return `<div class="field">
         <label>Kamera / framing</label>
         <div class="tiny dim" style="margin-bottom:8px">${esc(label)}</div>
         <div class="row" style="gap:8px;flex-wrap:wrap">
-          <button class="btn small ghost" data-ed="detect-speaker">Deteksi pembicara</button>
+          <button class="btn small ghost" data-ed="detect-speaker">Deteksi pembicara / gameplay</button>
           ${
-            f.ok
+            f.ok && !isGameplay
               ? `<button class="btn small ghost" data-ed="toggle-framing">${on ? "Matikan auto-framing" : "Nyalakan auto-framing"}</button>`
               : ""
           }
@@ -1017,9 +1054,47 @@ function bindPanelEvents() {
     el.addEventListener("input", () => {
       const key = el.dataset.spec;
       ED.spec[key] = el.type === "range" ? Number(el.value) : el.value;
+      if (key === "layout" && ED.spec.layout === "gameplay") {
+        if (!ED.spec.gameplay) {
+          ED.spec.gameplay = { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.32, game_x: 0.56, split: 0.62, corner: "kiri bawah" };
+        }
+        if (ED.spec.captions) ED.spec.captions.y = Number((ED.spec.gameplay.split || 0.62).toFixed(2));
+      }
       scheduleSave();
       renderOverlay();
       refreshChrome();
+      if (key === "layout") renderPanel();
+    });
+  });
+  $$("[data-gameplay]").forEach((el) => {
+    el.addEventListener("input", () => {
+      if (!ED.spec.gameplay) {
+        ED.spec.gameplay = { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.32, game_x: 0.56, split: 0.62, corner: "kiri bawah" };
+      }
+      const key = el.dataset.gameplay;
+      ED.spec.gameplay[key] = Number(el.value);
+      if (key === "split" && ED.spec.captions) {
+        ED.spec.captions.y = Number(Number(el.value).toFixed(2));
+      }
+      scheduleSave();
+      renderOverlay();
+      refreshChrome();
+    });
+  });
+  $$("[data-gp-preset]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const parts = String(btn.dataset.gpPreset || "").split(",");
+      if (parts.length < 3) return;
+      if (!ED.spec.gameplay) ED.spec.gameplay = { cam_scale: 0.32, split: 0.62 };
+      ED.spec.gameplay.cam_x = Number(parts[0]);
+      ED.spec.gameplay.cam_y = Number(parts[1]);
+      ED.spec.gameplay.game_x = Number(parts[2]);
+      ED.spec.gameplay.corner = parts[3] || "";
+      scheduleSave();
+      renderPanel();
+      renderOverlay();
+      refreshChrome();
+      toast(`Facecam diatur ke ${parts[3] || "pojok"}`, "ok");
     });
   });
   $$("[data-bg]").forEach((el) => {
@@ -1135,17 +1210,34 @@ async function editorAction(action, target) {
     toast("Masuk antrean TikTok — jendela browser akan terbuka", "ok");
     return res;
   } else if (action === "detect-speaker") {
-    toast("Mendeteksi wajah pembicara…", "ok");
+    toast("Mendeteksi pembicara / gameplay…", "ok");
     const res = await api(`/api/clips/${ED.clipId}/framing`, { method: "POST" });
     await loadEditor(ED.clipId);
-    if (res.framing && res.framing.ok) {
+    if (res.framing && res.framing.kind === "gameplay") {
+      const fc = res.framing.facecam || {};
+      ED.spec.layout = "gameplay";
+      ED.spec.gameplay = {
+        cam_x: fc.x ?? 0.16,
+        cam_y: fc.y ?? 0.78,
+        cam_scale: fc.scale ?? 0.32,
+        game_x: fc.game_x ?? 0.56,
+        split: 0.62,
+        corner: fc.corner || "pojok",
+      };
+      if (ED.spec.captions) ED.spec.captions.y = 0.62;
+      ED.dirty = true;
+      renderPanel();
+      await refreshChrome();
+      toast(`${res.summary} — layout gameplay dinyalakan`, "ok");
+    } else if (res.framing && res.framing.ok) {
       ED.spec.framing = { mode: "auto", segments: res.framing.segments, faces: res.framing.faces,
                           coverage: res.framing.coverage, moves: res.framing.moves };
       ED.dirty = true;
+      renderPanel();
       await refreshChrome();
       toast(`${res.summary} — auto-framing dinyalakan`, "ok");
     } else {
-      toast(res.summary || "Wajah tidak terdeteksi, kamera tetap di tengah", "bad");
+      toast(res.summary || "Fokus topik & hook video (kamera di tengah)", "ok");
     }
     return res;
   } else if (action === "cam-toggle") {

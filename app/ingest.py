@@ -1,10 +1,11 @@
 """Ambil sumber video: upload file dari browser atau download dari link (yt-dlp)."""
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
-from typing import BinaryIO, Callable
+from typing import Any, BinaryIO, Callable
 
 from .config import UPLOAD_DIR, WORK_DIR, ensure_dirs, ffmpeg_for_ytdlp, load_settings
 from .fsutil import safe_rmtree
@@ -443,6 +444,36 @@ def _clean_partials(out_dir: Path) -> None:
             safe_unlink(path)
 
 
+def _save_source_meta(out_dir: Path, info: dict[str, Any]) -> None:
+    """Simpan metadata yt-dlp (judul, kategori, tag, channel) untuk deteksi jenis video."""
+    try:
+        meta = {
+            "title": str(info.get("title") or "").strip()[:200],
+            "uploader": str(info.get("uploader") or info.get("channel") or "").strip()[:120],
+            "categories": [str(c).strip() for c in (info.get("categories") or []) if c][:10],
+            "tags": [str(t).strip() for t in (info.get("tags") or [])[:40] if t],
+            "description": str(info.get("description") or "").strip()[:1200],
+            "webpage_url": str(info.get("webpage_url") or "").strip()[:300],
+        }
+        (out_dir / "source_meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def load_source_meta(out_dir: str | Path) -> dict[str, Any]:
+    """Baca metadata yt-dlp dari folder kerja job bila tersedia."""
+    path = Path(out_dir) / "source_meta.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _extract(yt_dlp, url: str, opts: dict, out_dir: Path) -> Path:
     """Satu percobaan unduh; mengembalikan path file hasil."""
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -451,6 +482,8 @@ def _extract(yt_dlp, url: str, opts: dict, out_dir: Path) -> Path:
             info = info["entries"][0]
         if not info:
             raise DownloadError("Hasil unduhan kosong (video tidak bisa diambil)")
+        if isinstance(info, dict):
+            _save_source_meta(out_dir, info)
         path = Path(ydl.prepare_filename(info))
         if not path.exists():
             candidates = sorted(out_dir.glob("source.*"))

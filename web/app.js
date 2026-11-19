@@ -289,8 +289,9 @@ function quickSettingsHtml() {
     <div class="field">
       <label>Gaya video</label>
       <select class="select" data-setting="layout">
-        <option value="fit" ${s.layout === "fit" ? "selected" : ""}>Blur background (video utuh)</option>
-        <option value="crop" ${s.layout === "crop" ? "selected" : ""}>Crop penuh 9:16 (fokus orang)</option>
+        <option value="fit" ${s.layout === "fit" ? "selected" : ""}>Otomatis / Blur background</option>
+        <option value="crop" ${s.layout === "crop" ? "selected" : ""}>Crop penuh 9:16 (fokus pembicara)</option>
+        <option value="gameplay" ${s.layout === "gameplay" ? "selected" : ""}>Gameplay (atas game, bawah host)</option>
       </select>
     </div>
   `;
@@ -992,8 +993,14 @@ function hookSpeechBoxHtml(clip) {
 function framingBadge(clip) {
   const info = (clip.meta || {}).framing;
   if (!info) return "";
+  if (info.kind === "gameplay") {
+    const corner = (info.facecam && info.facecam.corner) || "pojok";
+    return `<span class="tag up" title="Video gameplay terdeteksi — atas gameplay, bawah facecam host (${esc(
+      corner
+    )})">🎮 gameplay: atas game · bawah host</span>`;
+  }
   if (!info.ok) {
-    return `<span class="tag" title="${esc(info.reason || "")}">kamera: tengah</span>`;
+    return `<span class="tag" title="${esc(info.reason || "")}">fokus topik &amp; hook</span>`;
   }
   const moves = Number(info.moves || 0);
   return `<span class="tag up" title="Wajah terdeteksi di ${Math.round(
@@ -2406,8 +2413,9 @@ async function renderSettings() {
         <div class="field">
           <label>Gaya video</label>
           <select class="select" data-setting="layout">
-            <option value="fit" ${s.layout === "fit" ? "selected" : ""}>Blur background</option>
-            <option value="crop" ${s.layout === "crop" ? "selected" : ""}>Crop penuh 9:16</option>
+            <option value="fit" ${s.layout === "fit" ? "selected" : ""}>Otomatis / Blur background</option>
+            <option value="crop" ${s.layout === "crop" ? "selected" : ""}>Crop penuh 9:16 (fokus pembicara)</option>
+            <option value="gameplay" ${s.layout === "gameplay" ? "selected" : ""}>Gameplay (atas game, bawah host)</option>
           </select>
         </div>
         <div class="field">
@@ -2451,7 +2459,7 @@ async function renderSettings() {
         <label class="switch">
           <input type="checkbox" data-setting="auto_framing" ${s.auto_framing ? "checked" : ""} />
           <span class="track"></span>
-          <span>Kamera mengikuti pembicara (auto-framing podcast)</span>
+          <span>Deteksi otomatis (Gameplay: atas game + bawah host · Podcast: ikuti pembicara)</span>
         </label>
         <label class="switch">
           <input type="checkbox" data-setting="hook_overlay" ${s.hook_overlay ? "checked" : ""} />

@@ -106,6 +106,13 @@ TEMPLATES: list[dict[str, Any]] = [
         "captions": "tiktok-neon",
     },
     {
+        "id": "gameplay-split", "name": "Streamer Gameplay",
+        "desc": "Atas gameplay, bawah facecam host + caption di tengah",
+        "accent": ["#7c5cff", "#22d3ee"],
+        "layout": "gameplay", "background": {"type": "color", "color1": "#080910"},
+        "captions": "karaoke-yellow",
+    },
+    {
         "id": "gradient-studio", "name": "Gradient Studio", "desc": "Video utuh + background gradien",
         "accent": ["#7c5cff", "#22d3ee"],
         "layout": "fit", "background": {"type": "gradient", "color1": "#160f2e", "color2": "#7c5cff"},
@@ -578,12 +585,23 @@ def default_spec(
         clip, source_duration,
     )
     focus = clip_meta.get("focus")
+    framing_raw = clip_meta.get("framing") if isinstance(clip_meta.get("framing"), dict) else {}
+    framing_kind = str(framing_raw.get("kind") or "")
+    gameplay_spec = _gameplay_from_meta(framing_raw)
+
     layout = str(settings.get("layout") or "fit")
+    if settings.get("auto_framing", True):
+        if framing_kind == "gameplay":
+            layout = "gameplay"
+        elif framing_kind == "speaker" and framing_raw.get("ok") and layout not in ("black", "gameplay"):
+            layout = "crop"
+
     background = {"type": "blur", "blur": 30, "color1": "#0B0B12", "color2": "#7C5CFF", "darken": 0.12}
-    if layout == "crop":
+    if layout in ("crop", "gameplay"):
         background["type"] = "color"
 
     caption_style = dict(CAPTION_STYLES["karaoke-yellow"])
+    default_cap_y = round(gameplay_spec["split"], 2) if layout == "gameplay" else 0.76
     captions = {
         "enabled": bool(settings.get("captions", True)) and clip_meta.get("captions") is not False,
         "word_level": True,
@@ -595,7 +613,7 @@ def default_spec(
         "highlight": _hex(settings.get("caption_highlight"), "#FFE02B"),
         "stroke": 9,
         "stroke_color": "#0B0B10",
-        "y": 0.76,
+        "y": default_cap_y,
         "mode": "caption",
         "style": "karaoke-yellow",
         "mute_during_hook": True,
@@ -631,10 +649,11 @@ def default_spec(
     }
     spec = {
         "version": 1,
-        "layout": layout if layout in ("fit", "crop", "black") else "fit",
+        "layout": layout if layout in ("fit", "crop", "gameplay", "black") else "fit",
         "background": background,
         "crop_focus": _clamp(_f(focus, _f(settings.get("crop_focus"), 0.5)), 0.0, 1.0),
-        "framing": _framing_from_meta(clip_meta.get("framing")),
+        "framing": _framing_from_meta(framing_raw),
+        "gameplay": gameplay_spec,
         "segments": segments,
         "captions": captions,
         "subtitles": subtitles,
@@ -647,8 +666,53 @@ def default_spec(
     default_template = str(settings.get("default_template") or "")
     if default_template and template_by_id(default_template):
         spec = apply_template(spec, default_template)
+        if settings.get("auto_framing", True) and framing_kind == "gameplay":
+            spec["layout"] = "gameplay"
+            spec["captions"]["y"] = round(gameplay_spec["split"], 2)
         spec["output"] = output
     return spec
+
+
+def _gameplay_from_meta(raw: Any) -> dict[str, Any]:
+    """Ambil koordinat facecam host dari meta framing untuk layout gameplay."""
+    fc = (raw.get("facecam") if isinstance(raw, dict) else None) or {}
+    if not isinstance(fc, dict):
+        fc = {}
+    cam_x = _clamp(_f(fc.get("x"), 0.16), 0.04, 0.96)
+    cam_y = _clamp(_f(fc.get("y"), 0.78), 0.06, 0.94)
+    cam_scale = _clamp(_f(fc.get("scale"), 0.32), 0.18, 0.65)
+    default_game_x = 0.56 if cam_x < 0.35 else (0.44 if cam_x > 0.65 else 0.50)
+    game_x = _clamp(_f(fc.get("game_x"), default_game_x), 0.0, 1.0)
+    split = _clamp(_f(fc.get("split"), 0.62), 0.45, 0.75)
+    corner = str(fc.get("corner") or ("kiri bawah" if cam_x < 0.5 else "kanan bawah"))[:32]
+    return {
+        "cam_x": round(cam_x, 4),
+        "cam_y": round(cam_y, 4),
+        "cam_scale": round(cam_scale, 4),
+        "game_x": round(game_x, 4),
+        "split": round(split, 3),
+        "corner": corner,
+    }
+
+
+def _gameplay_from_spec(raw: Any, base: Any) -> dict[str, Any]:
+    default = base if isinstance(base, dict) else _gameplay_from_meta({})
+    if not isinstance(raw, dict):
+        return dict(default)
+    cam_x = _clamp(_f(raw.get("cam_x"), _f(default.get("cam_x"), 0.16)), 0.04, 0.96)
+    cam_y = _clamp(_f(raw.get("cam_y"), _f(default.get("cam_y"), 0.78)), 0.06, 0.94)
+    cam_scale = _clamp(_f(raw.get("cam_scale"), _f(default.get("cam_scale"), 0.32)), 0.18, 0.65)
+    game_x = _clamp(_f(raw.get("game_x"), _f(default.get("game_x"), 0.5)), 0.0, 1.0)
+    split = _clamp(_f(raw.get("split"), _f(default.get("split"), 0.62)), 0.45, 0.75)
+    corner = str(raw.get("corner") or default.get("corner") or "")[:32]
+    return {
+        "cam_x": round(cam_x, 4),
+        "cam_y": round(cam_y, 4),
+        "cam_scale": round(cam_scale, 4),
+        "game_x": round(game_x, 4),
+        "split": round(split, 3),
+        "corner": corner,
+    }
 
 
 def _framing_from_meta(raw: Any) -> dict[str, Any]:
@@ -729,9 +793,14 @@ def normalize_spec(
         return base
 
     result = dict(base)
-    result["layout"] = spec.get("layout") if spec.get("layout") in ("fit", "crop", "black") else base["layout"]
+    result["layout"] = (
+        spec.get("layout")
+        if spec.get("layout") in ("fit", "crop", "gameplay", "black")
+        else base["layout"]
+    )
     result["crop_focus"] = _clamp(_f(spec.get("crop_focus"), base["crop_focus"]), 0.0, 1.0)
     result["framing"] = _framing_from_spec(spec.get("framing"), base.get("framing"))
+    result["gameplay"] = _gameplay_from_spec(spec.get("gameplay"), base.get("gameplay"))
     result["template"] = str(spec.get("template") or "")[:40]
     result["segments"] = normalize_segments(spec.get("segments"), clip, source_duration)
 
@@ -912,6 +981,11 @@ def apply_template(spec: dict[str, Any], template_id: str) -> dict[str, Any]:
     spec["layout"] = template["layout"]
     spec["background"] = {**spec.get("background", {}), **template.get("background", {})}
     captions = spec.setdefault("captions", {})
+    cap_y = (
+        round(_f((spec.get("gameplay") or {}).get("split"), 0.62), 2)
+        if template["layout"] == "gameplay"
+        else style["y"]
+    )
     captions.update({
         "size": style["size"],
         "uppercase": style["uppercase"],
@@ -919,7 +993,7 @@ def apply_template(spec: dict[str, Any], template_id: str) -> dict[str, Any]:
         "highlight": style["highlight"],
         "stroke": style["stroke"],
         "stroke_color": style["stroke_color"],
-        "y": style["y"],
+        "y": cap_y,
         "words_per_line": style["words_per_line"],
         "style": style_id,
         "mode": "caption",
@@ -1174,7 +1248,8 @@ def _hook_word_lines(
 # --------------------------------------------------------------------------- #
 def _layout_chain(layout: str, focus: float, background: dict[str, Any], fps: int,
                   width: int = CANVAS_W, height: int = CANVAS_H,
-                  framing: list[dict[str, Any]] | None = None) -> str:
+                  framing: list[dict[str, Any]] | None = None,
+                  gameplay: dict[str, Any] | None = None) -> str:
     """Filter chain yang menghasilkan [vbase] berukuran canvas (1080x1920)."""
     focus = _clamp(focus, 0.0, 1.0)
     bg_type = background.get("type", "blur")
@@ -1183,6 +1258,33 @@ def _layout_chain(layout: str, focus: float, background: dict[str, Any], fps: in
         f"[0:v]fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease:"
         f"force_divisible_by=2,setsar=1[fgs]"
     )
+
+    if layout == "gameplay":
+        # Mode Gameplay (Streamer / YouTuber Gamer):
+        # Bagian ATAS menampilkan gameplay, bagian BAWAH menampilkan facecam host.
+        gp = gameplay if isinstance(gameplay, dict) else {}
+        split_ratio = _clamp(_f(gp.get("split"), 0.62), 0.45, 0.75)
+        top_h = max(200, min(height - 200, int(round(height * split_ratio / 2) * 2)))
+        bot_h = height - top_h
+        game_x = _clamp(_f(gp.get("game_x"), 0.5), 0.0, 1.0)
+        cam_x = _clamp(_f(gp.get("cam_x"), 0.16), 0.04, 0.96)
+        cam_y = _clamp(_f(gp.get("cam_y"), 0.78), 0.06, 0.94)
+        cam_scale = _clamp(_f(gp.get("cam_scale"), 0.32), 0.18, 0.65)
+        norm_w, norm_h = 1920, 1080
+        crop_w = max(160, min(norm_w, int(round(norm_w * cam_scale / 2) * 2)))
+        crop_h = max(120, min(norm_h, int(round(crop_w * bot_h / max(1, width) / 2) * 2)))
+        crop_x = int(round(_clamp(cam_x * norm_w - crop_w / 2.0, 0.0, float(norm_w - crop_w))))
+        crop_y = int(round(_clamp(cam_y * norm_h - crop_h / 2.0, 0.0, float(norm_h - crop_h))))
+        return (
+            f"[0:v]fps={fps},split=2[topsrc][botsrc];"
+            f"[topsrc]scale={width}:{top_h}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{top_h}:x='(iw-{width})*{game_x:.4f}':y='(ih-{top_h})/2',setsar=1[vtop];"
+            f"[botsrc]scale={norm_w}:{norm_h}:force_original_aspect_ratio=increase,"
+            f"crop={norm_w}:{norm_h},crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
+            f"scale={width}:{bot_h}:flags=lanczos,setsar=1[vbot];"
+            f"[vtop][vbot]vstack=inputs=2,"
+            f"drawbox=x=0:y={top_h - 2}:w={width}:h=4:color=0x7C5CFF@0.85:t=fill,setsar=1[vbase]"
+        )
 
     if layout == "crop":
         # Framing otomatis: kamera mengikuti pembicara (ekspresi berbasis waktu).
@@ -1314,6 +1416,7 @@ def _render_segment(
     chain = _layout_chain(
         layout, _f(spec.get("crop_focus"), 0.5), spec["background"], fps,
         framing=framing_segments,
+        gameplay=spec.get("gameplay") if isinstance(spec.get("gameplay"), dict) else None,
     )
     if speed != 1.0:
         chain += f";[vbase]setpts=PTS/{speed:.4f}[vseg]"

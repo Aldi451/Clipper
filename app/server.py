@@ -1158,15 +1158,17 @@ def create_app() -> FastAPI:
                 "available": analyze.ollama_available(settings)}
 
     def _store_framing(clip: dict[str, Any], result: dict[str, Any]) -> None:
-        """Simpan hasil deteksi pembicara ke meta clip *dan* ke spec editor.
+        """Simpan hasil deteksi pembicara / gameplay ke meta clip *dan* ke spec editor.
 
         Spec ikut diubah supaya membuka editor setelah deteksi langsung
-        menampilkan "Ikuti pembicara" (bukan harus klik tombol 🎯 lagi).
+        menampilkan "Ikuti pembicara" atau "Mode Gameplay" (bukan harus klik lagi).
         """
         meta = dict(clip.get("meta") or {})
         meta["framing"] = result
         features = dict(meta.get("features") or {})
         features["framing_moves"] = float(result.get("moves") or 0)
+        if result.get("kind") == "gameplay":
+            features["gameplay"] = 1.0
         meta["features"] = features
         fields: dict[str, Any] = {"meta": meta}
         raw_spec = clip.get("spec")
@@ -1177,14 +1179,34 @@ def create_app() -> FastAPI:
                 spec = None
             if isinstance(spec, dict) and spec:
                 spec["framing"] = editor._framing_from_meta(result)  # noqa: SLF001
+                spec["gameplay"] = editor._gameplay_from_meta(result)  # noqa: SLF001
+                if result.get("kind") == "gameplay":
+                    spec["layout"] = "gameplay"
+                    spec.setdefault("captions", {})["y"] = round(
+                        float(spec["gameplay"].get("split") or 0.62), 2
+                    )
+                elif result.get("ok") and spec.get("layout") == "fit":
+                    spec["layout"] = "crop"
                 fields["spec"] = json.dumps(spec, ensure_ascii=False)
                 meta["dirty"] = True
                 fields["meta"] = meta
         db.update_clip(clip["id"], **fields)
 
+    def _clip_framing_context(job: dict[str, Any], clip: dict[str, Any]) -> dict[str, Any]:
+        job_meta = (job.get("meta") or {}) if isinstance(job, dict) else {}
+        src_meta = job_meta.get("source_meta") if isinstance(job_meta.get("source_meta"), dict) else {}
+        if not src_meta and job.get("id"):
+            src_meta = ingest.load_source_meta(WORK_DIR / str(job["id"]))
+        clip_meta = (clip.get("meta") or {}) if isinstance(clip, dict) else {}
+        return {
+            **src_meta,
+            "job_title": str(job.get("title") or ""),
+            "transcript": str(clip_meta.get("transcript") or "")[:1500],
+        }
+
     @app.post("/api/clips/{clip_id}/framing")
     def analyze_framing(clip_id: str) -> dict[str, Any]:
-        """Deteksi pembicara untuk satu clip → simpan hasilnya di meta clip."""
+        """Deteksi pembicara / gameplay untuk satu clip → simpan hasilnya di meta clip."""
         from . import framing as framing_module
 
         clip = db.get_clip(clip_id)
@@ -1201,14 +1223,17 @@ def create_app() -> FastAPI:
         if source is None:
             raise HTTPException(400, "File sumber tidak ditemukan — jalankan repair.bat atau analisis ulang")
 
-        result = framing_module.analyze(source, clip.get("start") or 0, clip.get("duration") or 0)
+        ctx = _clip_framing_context(job, clip)
+        result = framing_module.analyze(
+            source, clip.get("start") or 0, clip.get("duration") or 0, context=ctx,
+        )
         _store_framing(clip, result)
         return {"ok": True, "clip_id": clip_id, "framing": result,
                 "summary": framing_module.summary(result)}
 
     @app.post("/api/jobs/{job_id}/framing")
     def analyze_framing_job(job_id: str) -> dict[str, Any]:
-        """Deteksi pembicara untuk semua clip di satu project (satu klik)."""
+        """Deteksi pembicara / gameplay untuk semua clip di satu project (satu klik)."""
         from . import framing as framing_module
 
         job = db.get_job(job_id)
@@ -1225,11 +1250,15 @@ def create_app() -> FastAPI:
 
         results: list[dict[str, Any]] = []
         for clip in db.list_clips(job_id):
-            result = framing_module.analyze(source, clip.get("start") or 0, clip.get("duration") or 0)
+            ctx = _clip_framing_context(job, clip)
+            result = framing_module.analyze(
+                source, clip.get("start") or 0, clip.get("duration") or 0, context=ctx,
+            )
             _store_framing(clip, result)
             results.append({
                 "id": clip["id"], "title": clip.get("title", ""),
-                "ok": bool(result.get("ok")), "moves": int(result.get("moves") or 0),
+                "ok": bool(result.get("ok")), "kind": result.get("kind", ""),
+                "moves": int(result.get("moves") or 0),
                 "summary": framing_module.summary(result),
             })
         detected = sum(1 for item in results if item["ok"])
