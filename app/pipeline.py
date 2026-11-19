@@ -97,17 +97,21 @@ def _run_analysis(job_id: str) -> None:
         # 2) probe
         _job_set(job_id, stage="probe", progress=0.24, message="Membaca metadata video…")
         info = media.probe(source_path)
+        source_meta = ingest.load_source_meta(workdir) or (job.get("meta") or {}).get("source_meta") or {}
         _job_set(job_id,
                  duration=info.duration, width=info.width, height=info.height,
-                 meta={**(job.get("meta") or {}), "info": {
+                 meta={**(job.get("meta") or {}), "source_meta": source_meta, "info": {
                      "duration": info.duration, "width": info.width, "height": info.height,
                      "fps": info.fps, "has_audio": info.has_audio,
                      "has_video": info.has_video, "audio_codec": info.audio_codec,
                  }})
         if info.duration <= 3:
             raise RuntimeError("Video terlalu pendek (minimal 3 detik)")
-        if not job.get("title"):
-            _job_set(job_id, title=source_path.stem[:80])
+        current_title = (job.get("title") or "").strip()
+        if not current_title or current_title.lower() == "source":
+            best_title = str(source_meta.get("title") or source_path.stem)[:80]
+            _job_set(job_id, title=best_title)
+            job["title"] = best_title
 
         # 3) audio + energi
         audio_path = workdir / "audio.wav"
@@ -166,26 +170,38 @@ def _run_analysis(job_id: str) -> None:
         if not candidates:
             candidates = analyze.fixed_windows(info.duration, settings)
 
-        # 5b) auto-framing: kamera mengikuti pembicara (hanya kalau layout crop)
+        # 5b) auto-framing & deteksi jenis video (gameplay vs podcast/pembicara vs topik)
         framing_results: dict[int, dict[str, Any]] = {}
         tpl = editor.template_by_id(str(settings.get("default_template") or "")) or {}
         effective_layout = str(tpl.get("layout") or settings.get("layout") or "")
-        if settings.get("auto_framing") and effective_layout == "crop" and candidates:
+        if (settings.get("auto_framing", True) or effective_layout in ("crop", "gameplay")) and candidates:
             try:
                 from . import framing as framing_module
 
                 if framing_module.available() and source_path:
+                    gameplay_count = 0
                     for index, cand in enumerate(candidates):
                         _job_set(job_id, stage="framing",
                                  progress=0.94 + 0.03 * index / max(1, len(candidates)),
-                                 message=f"Mendeteksi pembicara clip {index + 1}/{len(candidates)}…")
+                                 message=f"Mendeteksi pembicara / gameplay clip {index + 1}/{len(candidates)}…")
+                        ctx = {
+                            **(source_meta if isinstance(source_meta, dict) else {}),
+                            "job_title": str(job.get("title") or ""),
+                            "transcript": cand.text[:1500],
+                        }
                         result = framing_module.analyze(
-                            source_path, cand.start, cand.duration
+                            source_path, cand.start, cand.duration, context=ctx,
                         )
                         framing_results[index] = result
-                        if result.get("ok"):
+                        if result.get("kind") == "gameplay":
+                            gameplay_count += 1
+                            cand.features["gameplay"] = 1.0
+                        elif result.get("ok"):
                             cand.features["framing_moves"] = float(result.get("moves") or 0)
-                    _job_set(job_id, message="Pembicara terdeteksi, kamera akan mengikuti…")
+                    if gameplay_count:
+                        _job_set(job_id, message="Video gameplay terdeteksi: atas gameplay, bawah host…")
+                    else:
+                        _job_set(job_id, message="Pembicara terdeteksi, kamera akan mengikuti…")
             except Exception:  # noqa: BLE001 - framing opsional, jangan gagalkan job
                 traceback.print_exc()
 

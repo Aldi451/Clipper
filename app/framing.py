@@ -26,6 +26,7 @@ Prinsip aman:
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -41,6 +42,90 @@ PAN_SECONDS = 0.45
 DEADBAND = 0.07
 # Segmen lebih pendek dari ini digabung ke tetangganya
 MIN_SEGMENT = 1.1
+
+GAMEPLAY_STRONG_HINTS = (
+    "gameplay", "walkthrough", "playthrough", "let's play", "lets play",
+    "mabar", "push rank", "mobile legends", "mlbb", "valorant", "pubg",
+    "free fire", "genshin", "minecraft", "roblox", "gta", "elden ring",
+    "fortnite", "dota", "cs2", "csgo", "apex legends", "warzone",
+    "call of duty", "resident evil", "horror game", "boss fight",
+    "speedrun", "facecam", "windah", "miawaug", "jess no limit",
+    "rrq", "evos", "onic", "steam", "ps5", "main game", "rank mythic",
+)
+
+GAMEPLAY_SUB_HINTS = {
+    "gamer", "gaming", "streamer", "livestream", "npc", "respawn",
+    "cooldown", "damage", "healer", "ulti", "turret", "mythic",
+    "clutch", "headshot", "loot", "lobby", "matchmaking", "boss",
+    "checkpoint", "gacha", "skin", "ranked", "noob", "pro player",
+}
+
+PODCAST_HINTS = (
+    "podcast", "wawancara", "interview", "talkshow", "talk show",
+    "close the door", "deddy corbuzier", "ceramah", "kajian", "ustadz",
+    "motivasi", "seminar", "kuliah", "debat", "diskusi", "obrolan",
+    "bintang tamu", "narasumber", "monolog",
+)
+
+
+def classify_content_context(context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Klasifikasi konteks video (gameplay vs podcast/pembicara vs topik umum)."""
+    ctx = context or {}
+    categories = [str(c).lower() for c in (ctx.get("categories") or []) if c]
+    tags = [str(t).lower() for t in (ctx.get("tags") or []) if t]
+    title = str(ctx.get("title") or ctx.get("job_title") or "").lower()
+    uploader = str(ctx.get("uploader") or "").lower()
+    description = str(ctx.get("description") or "").lower()[:600]
+    transcript = str(ctx.get("transcript") or "").lower()[:1500]
+
+    blob_meta = " ".join([title, uploader, " ".join(tags), description])
+    blob_all = f"{blob_meta} {transcript}"
+
+    gameplay_score = 0.0
+    podcast_score = 0.0
+    reasons: list[str] = []
+
+    if any("gaming" in c or c == "game" for c in categories):
+        gameplay_score += 0.65
+        reasons.append("kategori Gaming")
+    if any("people" in c or "education" in c or "news" in c for c in categories):
+        podcast_score += 0.15
+
+    strong_hits = [kw for kw in GAMEPLAY_STRONG_HINTS if kw in blob_all]
+    if strong_hits:
+        gameplay_score += min(0.65, 0.35 + 0.15 * len(strong_hits))
+        reasons.append(f"kata kunci gameplay ({strong_hits[0]})")
+
+    words = set(re.findall(r"[a-z0-9]+", blob_all))
+    sub_hits = [w for w in GAMEPLAY_SUB_HINTS if w in words or w in blob_meta]
+    if len(sub_hits) >= 2:
+        gameplay_score += min(0.35, 0.12 * len(sub_hits))
+    elif len(sub_hits) == 1:
+        gameplay_score += 0.12
+
+    pod_hits = [kw for kw in PODCAST_HINTS if kw in blob_all]
+    if pod_hits:
+        podcast_score += min(0.75, 0.4 + 0.18 * len(pod_hits))
+        reasons.append(f"konteks {pod_hits[0]}")
+
+    gameplay_score = _clamp(gameplay_score, 0.0, 1.0)
+    podcast_score = _clamp(podcast_score, 0.0, 1.0)
+    is_gameplay = gameplay_score >= 0.42 and gameplay_score > podcast_score
+    return {
+        "is_gameplay_hint": is_gameplay,
+        "gameplay_score": round(gameplay_score, 3),
+        "podcast_score": round(podcast_score, 3),
+        "reasons": reasons[:3],
+    }
+
+
+def _corner_label(nx: float, ny: float) -> str:
+    horiz = "kiri" if nx < 0.5 else "kanan"
+    if ny < 0.38:
+        return f"{horiz} atas"
+    if ny > 0.58:
+        return f"{horiz} bawah"
+    return horiz
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -325,49 +410,200 @@ def detect_faces(cv2: Any, frame: Any, cascade: Any) -> list[tuple[float, float,
     return []
 
 
+def _detect_edge_facecam(
+    cv2: Any,
+    frame: Any,
+    cascade: Any,
+    upscale: float = 1.75,
+) -> list[tuple[float, float, float]]:
+    """Deteksi wajah ukuran kecil pada pojok/tepi kiri & kanan (khusus facecam gamer).
+
+    Pada video gameplay 16:9 yang diperkecil ke lebar 640px, kotak webcam host di
+    pojok sering membuat ukuran wajah < 28px sehingga terlewat oleh ``detect_faces``
+    standar. Fungsi ini memeriksa strip tepi kiri & kanan yang diperbesar 1.75×.
+    """
+    h, w = frame.shape[:2]
+    if w < 120 or h < 90:
+        return []
+    strip_w = int(round(w * 0.36))
+    results: list[tuple[float, float, float]] = []
+    for x_offset, x_end in ((0, strip_w), (w - strip_w, w)):
+        roi = frame[:, x_offset:x_end]
+        if roi.size == 0:
+            continue
+        up_w = int(round(roi.shape[1] * upscale))
+        up_h = int(round(roi.shape[0] * upscale))
+        resized = cv2.resize(roi, (up_w, up_h))
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        for source, scale, neighbors in (
+            (gray, 1.08, 4),
+            (cv2.equalizeHist(gray), 1.08, 4),
+        ):
+            boxes = cascade.detectMultiScale(
+                source, scaleFactor=scale, minNeighbors=neighbors, minSize=(24, 24)
+            )
+            if len(boxes):
+                for bx, by, bw, bh in boxes:
+                    cx = x_offset + (bx + bw / 2.0) / upscale
+                    cy = (by + bh / 2.0) / upscale
+                    fw = float(bw) / upscale
+                    results.append((cx, cy, fw))
+                break
+    return results
+
+
+def _evaluate_facecam(
+    records: list[dict[str, float]],
+    total_frames: int,
+    moves: int,
+    ctx_info: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Tentukan apakah wajah yang terdeteksi adalah facecam host gameplay.
+
+    Facecam gameplay memiliki ciri khas:
+    - Posisi wajah berada di pojok/tepi layar (kiri/kanan/atas/bawah) dan relatif
+      diam di dalam kotak webcam OBS (simpangan baku posisi kecil).
+    - Ukuran wajah relatif kecil terhadap lebar layar 16:9 (<= 21%, atau <= 25%
+      bila konteks video memang Gaming).
+    """
+    is_hint = bool(ctx_info.get("is_gameplay_hint"))
+    gameplay_score = float(ctx_info.get("gameplay_score") or 0.0)
+    podcast_score = float(ctx_info.get("podcast_score") or 0.0)
+
+    if podcast_score >= 0.48 and gameplay_score < 0.35:
+        return None
+
+    # Saring kandidat wajah yang berada di zona facecam / berukuran kecil
+    edge_records = [
+        r for r in records
+        if (r["nx"] <= 0.36 or r["nx"] >= 0.64 or r["ny"] <= 0.38 or r["ny"] >= 0.58)
+        and r["nw"] <= (0.26 if is_hint else 0.20)
+    ]
+    pool = edge_records if len(edge_records) >= max(1, int(len(records) * 0.45)) else (
+        records if is_hint else []
+    )
+    if not pool:
+        if is_hint and gameplay_score >= 0.65 and not records:
+            # Video jelas gameplay tapi wajah host terlalu kecil/tertutup headset:
+            # default ke pojok kiri bawah standar streamer
+            return {
+                "x": 0.16,
+                "y": 0.78,
+                "w": 0.11,
+                "scale": 0.32,
+                "game_x": 0.55,
+                "corner": "kiri bawah",
+                "confidence": round(gameplay_score, 3),
+            }
+        return None
+
+    # Kelompokkan berdasarkan sisi kiri vs kanan supaya 1 false-positive di sisi
+    # seberang tidak menggeser titik tengah facecam
+    left_pool = [r for r in pool if r["nx"] < 0.5]
+    right_pool = [r for r in pool if r["nx"] >= 0.5]
+    cluster = left_pool if len(left_pool) >= len(right_pool) else right_pool
+    if not cluster:
+        return None
+
+    min_hits = 1 if is_hint else max(2, int(round(total_frames * 0.18)))
+    if len(cluster) < min_hits:
+        return None
+
+    xs = sorted(r["nx"] for r in cluster)
+    ys = sorted(r["ny"] for r in cluster)
+    ws = sorted(r["nw"] for r in cluster)
+    mid = len(cluster) // 2
+    med_x, med_y, med_w = xs[mid], ys[mid], ws[mid]
+
+    mean_x = sum(xs) / len(xs)
+    mean_y = sum(ys) / len(ys)
+    std_x = math.sqrt(sum((v - mean_x) ** 2 for v in xs) / len(xs))
+    std_y = math.sqrt(sum((v - mean_y) ** 2 for v in ys) / len(ys))
+
+    in_corner_or_edge = (
+        med_x <= 0.35 or med_x >= 0.65 or med_y <= 0.36 or med_y >= 0.60
+    )
+    in_strict_corner = (
+        (med_x <= 0.32 or med_x >= 0.68) and (med_y <= 0.38 or med_y >= 0.58)
+    )
+    is_pinned = std_x <= 0.075 and std_y <= 0.08
+    is_small = med_w <= (0.25 if is_hint else 0.17)
+
+    # Tanpa hint gaming, syarat visual harus ketat (pojok + ukuran kecil + diam + tidak pindah pembicara)
+    if not is_hint:
+        if not (in_strict_corner and is_pinned and is_small and moves <= 1):
+            return None
+    else:
+        if not ((in_corner_or_edge or is_small) and std_x <= 0.11):
+            return None
+
+    cam_scale = _clamp(max(0.26, med_w * 2.85), 0.24, 0.44)
+    game_x = 0.56 if med_x < 0.35 else (0.44 if med_x > 0.65 else 0.50)
+    corner = _corner_label(med_x, med_y)
+    return {
+        "x": round(_clamp(med_x, 0.04, 0.96), 4),
+        "y": round(_clamp(med_y, 0.06, 0.94), 4),
+        "w": round(med_w, 4),
+        "scale": round(cam_scale, 4),
+        "game_x": round(game_x, 4),
+        "corner": corner,
+        "confidence": round(max(gameplay_score, len(cluster) / max(1, total_frames)), 3),
+    }
+
+
 def analyze(
     source_path: str | Path,
     start: float = 0.0,
     duration: float | None = None,
     sample_step: float = 0.4,
     on_progress: Callable[[float, str], None] | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Analisa satu klip → segmen fokus kamera.
+    """Analisa satu klip → segmen fokus kamera (podcast/pembicara vs gameplay vs topik).
 
     Kembalian::
 
-        {"ok": True, "faces": 12, "coverage": 0.83, "moves": 2,
-         "segments": [{"at": 0.0, "x": 0.31}, ...], "reason": ""}
+        {"ok": True, "kind": "speaker" | "gameplay" | "topic",
+         "faces": 12, "coverage": 0.83, "moves": 2,
+         "segments": [{"at": 0.0, "x": 0.31}, ...],
+         "facecam": {...}, "reason": ""}
     """
     progress = on_progress or (lambda fraction, message: None)
     cv2 = _cv()
     path = Path(source_path)
+    ctx_info = classify_content_context(context)
     if not path.exists():
-        return {"ok": False, "reason": "File sumber tidak ditemukan", "segments": []}
+        return {"ok": False, "kind": "topic", "reason": "File sumber tidak ditemukan", "segments": []}
     if cv2 is None or not available():
-        return {"ok": False, "reason": "OpenCV belum terpasang (deteksi wajah nonaktif)", "segments": []}
+        return {"ok": False, "kind": "topic", "reason": "OpenCV belum terpasang (deteksi wajah nonaktif)", "segments": []}
 
     info = media.probe(path)
     length = _f(duration, 0.0) or _f(info.duration, 0.0)
     length = min(length, float(CLIP_MAX_SECONDS) + 1.0)
     if length <= 0:
-        return {"ok": False, "reason": "Durasi klip tidak diketahui", "segments": []}
+        return {"ok": False, "kind": "topic", "reason": "Durasi klip tidak diketahui", "segments": []}
 
     cascade = _cascade()
     progress(0.05, "Membaca frame video…")
     frames = _read_frames(path, max(0.0, _f(start)), length, sample_step)
     if not frames:
-        return {"ok": False, "reason": "Video tidak bisa dibaca", "segments": []}
+        return {"ok": False, "kind": "topic", "reason": "Video tidak bisa dibaca", "segments": []}
 
-    source_w = int(info.width or 0) or int(frames[0][1].shape[1])
-    source_h = int(info.height or 0) or int(frames[0][1].shape[0])
-    scale_x = source_w / float(frames[0][1].shape[1])
+    frame_h, frame_w = frames[0][1].shape[:2]
+    source_w = int(info.width or 0) or int(frame_w)
+    source_h = int(info.height or 0) or int(frame_h)
+    scale_x = source_w / float(max(1, frame_w))
+    scale_y = source_h / float(max(1, frame_h))
+    is_landscape = source_w > source_h * 1.15
 
     samples: list[dict[str, Any]] = []
+    face_records: list[dict[str, float]] = []
     detected = 0
     previous_x = 0.5
     for index, (offset, frame) in enumerate(frames):
         faces = detect_faces(cv2, frame, cascade)
+        if not faces and is_landscape and (ctx_info["is_gameplay_hint"] or index % 3 == 0):
+            faces = _detect_edge_facecam(cv2, frame, cascade)
         if faces:
             detected += 1
             # wajah dominan: paling besar, tapi diberi bonus kalau dekat posisi kamera sekarang
@@ -377,6 +613,10 @@ def analyze(
                 return width * (1.35 if abs(norm - previous_x) < 0.22 else 1.0)
 
             best = max(faces, key=score)
+            nx = _clamp((best[0] * scale_x) / max(1.0, source_w))
+            ny = _clamp((best[1] * scale_y) / max(1.0, source_h))
+            nw = _clamp((best[2] * scale_x) / max(1.0, source_w))
+            face_records.append({"at": offset, "nx": nx, "ny": ny, "nw": nw})
             focus = focus_from_face(best[0] * scale_x, source_w, source_h)
             previous_x = focus
             samples.append({"at": offset, "x": round(focus, 4)})
@@ -388,8 +628,25 @@ def analyze(
     progress(0.9, "Menyusun pergerakan kamera…")
     segments = plan_segments(samples)
     moves = max(0, len(segments) - 1)
-    result = {
-        "ok": bool(segments) and coverage >= 0.35 and len(segments) > 0,
+
+    facecam = (
+        _evaluate_facecam(face_records, len(frames), moves, ctx_info)
+        if is_landscape
+        else None
+    )
+    if facecam is not None:
+        kind = "gameplay"
+        ok = True
+    elif bool(segments) and coverage >= 0.35 and len(segments) > 0:
+        kind = "speaker"
+        ok = True
+    else:
+        kind = "topic"
+        ok = False
+
+    result: dict[str, Any] = {
+        "ok": ok,
+        "kind": kind,
         "faces": detected,
         "coverage": round(coverage, 3),
         "segments": segments,
@@ -397,13 +654,20 @@ def analyze(
         "start": round(max(0.0, _f(start)), 3),
         "duration": round(length, 3),
         "source_size": [source_w, source_h],
+        "facecam": facecam or {},
+        "context": ctx_info,
         "reason": "",
     }
-    if not segments:
-        result["reason"] = "Tidak ada wajah yang terdeteksi — kamera tetap di tengah"
+    if kind == "gameplay" and facecam:
+        result["reason"] = (
+            f"Video gameplay terdeteksi (facecam host di {facecam.get('corner', 'pojok')}) — "
+            "atas gameplay, bawah host"
+        )
+    elif not segments:
+        result["reason"] = "Tidak ada wajah pembicara — fokus pada topik & hook video"
     elif coverage < 0.35:
         result["reason"] = (
-            f"Wajah hanya terdeteksi di {coverage * 100:.0f}% frame — kamera tetap di tengah"
+            f"Wajah hanya terdeteksi di {coverage * 100:.0f}% frame — fokus pada topik & hook video"
         )
     progress(1.0, "Analisa pembicara selesai")
     return result
@@ -413,12 +677,15 @@ def summary(result: dict[str, Any] | None) -> str:
     """Kalimat singkat untuk ditampilkan di UI."""
     if not result:
         return "Belum dianalisa"
+    if result.get("kind") == "gameplay" and result.get("facecam"):
+        corner = (result.get("facecam") or {}).get("corner") or "pojok"
+        return f"Mode Gameplay · atas game, bawah host ({corner})"
     if not result.get("ok"):
-        return result.get("reason") or "Kamera tetap di tengah"
+        return result.get("reason") or "Fokus topik & hook video (kamera di tengah)"
     moves = int(result.get("moves") or 0)
     faces = int(result.get("faces") or 0)
     if moves == 0:
-        return f"Pembicara terkunci di satu posisi ({faces} frame berisi wajah)"
+        return f"Fokus pembicara di satu posisi ({faces} frame berisi wajah)"
     return f"Kamera mengikuti pembicara · {moves}× pindah · {faces} frame berisi wajah"
 
 
