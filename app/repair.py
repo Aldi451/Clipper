@@ -5,8 +5,7 @@ Kenapa perlu: `.venv` menyimpan path absolut. Begitu folder dipindah,
 dan Windows service / autostart masih menunjuk path lama. Gejalanya: Clipper
 "blank" atau langsung tertutup tanpa pesan.
 
-Modul ini dipakai oleh `repair.bat`, `python run.py --repair`, dan GUI
-`service_manager.py`.
+Modul ini dipakai oleh `repair.bat` dan `python run.py --repair`.
 """
 from __future__ import annotations
 

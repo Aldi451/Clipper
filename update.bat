@@ -96,10 +96,10 @@ if "!GOT!"=="0" (
     goto :failed
   )
   echo        Menyalin kode baru ^(data\ tidak disentuh^)...
-  for %%D in (app web tools assets) do (
+  for %%D in (app web assets) do (
     if exist "!SRC!\%%D" robocopy "!SRC!\%%D" "%%D" /e /nfl /ndl /njh /njs /nc /ns >nul
   )
-  for %%F in (run.py requirements.txt README.md run.bat repair.bat service.bat build_service_exe.bat diagnosa_tiktok.bat perbaiki_tiktok.bat backup_youtube.bat service_manager.py) do (
+  for %%F in (run.py requirements.txt README.md run.bat run.sh repair.bat service.bat) do (
     if exist "!SRC!\%%F" copy /y "!SRC!\%%F" "%%F" >nul
   )
   REM update.bat diperbarui paling akhir, setelah file lain selesai
