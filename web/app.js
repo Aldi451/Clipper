@@ -8,6 +8,8 @@ const state = {
   param: "",
   job: null,
   clips: [],
+  projectMode: {},
+  modeModalPoll: null,
   poll: null,
   yt: null,
   editing: null,
@@ -231,10 +233,18 @@ const saveSettingsDebounced = debounce((patch) => saveSettings(patch), 600);
 /* router                                                             */
 /* ------------------------------------------------------------------ */
 function parseRoute() {
-  const hash = location.hash.replace(/^#\/?/, "");
-  const parts = hash.split("/").filter(Boolean);
+  const rawHash = location.hash.replace(/^#\/?/, "");
+  const [pathPart, queryPart] = rawHash.split("?");
+  const parts = (pathPart || "").split("/").filter(Boolean);
   if (!parts.length) return { route: "new", param: "" };
-  if (parts[0] === "project" && parts[1]) return { route: "project", param: parts[1] };
+  if (parts[0] === "project" && parts[1]) {
+    if (queryPart) {
+      const qs = new URLSearchParams(queryPart);
+      const m = qs.get("mode");
+      if (m === "ai" || m === "manual") state.projectMode[parts[1]] = m;
+    }
+    return { route: "project", param: parts[1] };
+  }
   if (parts[0] === "editor" && parts[1]) return { route: "editor", param: parts[1] };
   if (["new", "viral", "projects", "youtube", "tiktok", "settings"].includes(parts[0])) {
     return { route: parts[0], param: "" };
@@ -402,8 +412,12 @@ async function submitUrl() {
   btn.innerHTML = `<span class="spinner"></span> Menyiapkan…`;
   try {
     const job = await api("/api/jobs/url", { method: "POST", body: { url } });
-    toast("Video masuk antrean. Menganalisa momen terbaik…", "ok");
-    location.hash = "#/project/" + job.id;
+    el.value = "";
+    btn.disabled = false;
+    btn.innerHTML = "Buat Clip →";
+    toast("Mengunduh video full — silakan pilih Mode Editing", "ok");
+    await loadRecent();
+    await openProjectModeModal(job.id, job);
   } catch (err) {
     toast(err.message, "bad");
     btn.disabled = false;
@@ -432,17 +446,17 @@ function uploadFile(file) {
     fill.style.width = pct.toFixed(1) + "%";
     label.textContent = "Mengunggah " + pct.toFixed(0) + "% · " + (e.loaded / 1048576).toFixed(1) + " / " + (e.total / 1048576).toFixed(1) + " MB";
   };
-  xhr.onload = () => {
+  xhr.onload = async () => {
     fill.style.width = "100%";
     if (xhr.status >= 200 && xhr.status < 300) {
       let job = null;
       try {
         job = JSON.parse(xhr.responseText);
       } catch (err) {}
-      label.textContent = "Upload selesai — mulai analisa…";
-      toast("File terunggah. Menganalisa momen terbaik…", "ok");
-      if (job && job.id) location.hash = "#/project/" + job.id;
-      else loadRecent();
+      label.textContent = "Upload selesai — pilih Mode Editing…";
+      toast("File video full siap — pilih Render Hook AI atau Edit Manual", "ok");
+      await loadRecent();
+      if (job && job.id) await openProjectModeModal(job.id, job);
     } else {
       let msg = "Upload gagal";
       try {
@@ -463,6 +477,9 @@ function uploadFile(file) {
 }
 
 function statusTag(job) {
+  if (job.status === "done" && job.stage === "siap_pilih" && !job.clip_count) {
+    return `<span class="tag run">Siap Dipilih</span>`;
+  }
   const map = {
     queued: ["Antrean", ""],
     running: ["Diproses", "run"],
@@ -478,14 +495,18 @@ function jobCardHtml(job) {
   const thumb = job.thumb_clip
     ? `<img src="/api/clips/${esc(job.thumb_clip)}/thumb?v=${Math.round(job.updated_at || 0)}" onerror="this.remove()" />`
     : `<span>${job.kind === "url" ? "🔗" : "🎬"}</span>`;
+  const aiCount = Number(job.ai_clip_count || 0);
+  const manualCount = Number(job.manual_clip_count || 0);
   return `
-    <div class="project" data-action="open-job" data-id="${esc(job.id)}">
+    <div class="project" data-action="open-job" data-id="${esc(job.id)}" title="Klik untuk pilih Render Hook AI atau Edit Manual">
       <div class="pthumb">${thumb}</div>
       <div class="pbody">
         <div class="ptitle">${esc(job.title || job.source || "Tanpa judul")}</div>
         <div class="meta-row">
           ${statusTag(job)}
-          ${job.clip_count ? `<span>${job.clip_count} clip</span>` : ""}
+          ${aiCount ? `<span class="tag" style="border-color:rgba(124,92,255,.45);color:#c4b5fd">🪄 ${aiCount} AI</span>` : ""}
+          ${manualCount ? `<span class="tag" style="border-color:rgba(0,210,255,.45);color:#67e8f9">✂ ${manualCount} Manual</span>` : ""}
+          ${!aiCount && !manualCount && job.clip_count ? `<span>${job.clip_count} clip</span>` : ""}
           ${job.uploaded_count ? `<span class="tag up">${job.uploaded_count} upload</span>` : ""}
           ${job.duration ? `<span>${fmtDur(job.duration)}</span>` : ""}
         </div>
@@ -493,7 +514,7 @@ function jobCardHtml(job) {
           job.status === "running" || job.status === "queued"
             ? `<div class="bar thin"><i style="width:${progress}%"></i></div>
                <div class="tiny dim">${esc(job.message || job.stage || "")}</div>`
-            : `<div class="tiny dim">${new Date(job.created_at * 1000).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" })}</div>`
+            : `<div class="tiny dim">${new Date(job.created_at * 1000).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" })} · Klik untuk pilih mode</div>`
         }
       </div>
     </div>`;
@@ -1092,12 +1113,175 @@ function needsCookies(message) {
 
 
 
+function isClipManual(clip) {
+  if (!clip) return false;
+  if (clip.is_manual === true) return true;
+  const meta = clip.meta || {};
+  return Boolean(meta.manual || meta.origin === "manual");
+}
+
+function renderModeModalContent(job) {
+  const aiCount = Number(job.ai_clip_count || 0);
+  const manualCount = Number(job.manual_clip_count || 0);
+  const aiRendered = Number(job.ai_rendered_count || 0);
+  const manualRendered = Number(job.manual_rendered_count || 0);
+  const running = job.status === "running" || job.status === "queued";
+  const pct = Math.round((job.progress || 0) * 100);
+  const isDownloading = running && ["memuat", "download", "probe"].includes(job.stage || "");
+  const isAiRunning = running && !isDownloading;
+
+  return `
+    <div class="modal-back">
+      <div class="modal mode-modal">
+        <div class="mode-modal-head">
+          <div>
+            <h2 class="mode-modal-title">Pilih Mode Editing: ${esc(job.title || job.source || "Project")}</h2>
+            <p class="mode-modal-sub">
+              Tentukan bagaimana Anda ingin mengedit klip untuk proyek ini.
+              ${job.duration ? ` · Durasi video full: <b>${fmtDur(job.duration)}</b>` : ""}
+            </p>
+          </div>
+          <button class="btn small ghost" data-action="close-modal" title="Tutup">✕</button>
+        </div>
+
+        ${
+          running
+            ? `<div class="mode-modal-status">
+                <div class="status-line">
+                  <span><span class="spinner"></span> ${esc(job.message || job.stage || "Menyiapkan video full…")}</span>
+                  <span class="mono">${pct}%</span>
+                </div>
+                <div class="bar thin"><i style="width:${pct}%"></i></div>
+              </div>`
+            : ""
+        }
+
+        <div class="mode-cards-grid">
+          <div class="mode-card mode-card-ai" data-action="choose-mode-ai" data-id="${esc(job.id)}">
+            <div class="mode-card-icon ai">
+              <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m15 4-1 1 4 4 1-1a2.83 2.83 0 1 0-4-4Z"/>
+                <path d="m13 6-8.5 8.5a2.12 2.12 0 1 0 3 3L16 9"/>
+                <path d="M9 3v2"/><path d="M3 9h2"/><path d="M19 13v2"/><path d="M18 14h2"/>
+              </svg>
+            </div>
+            <h3 class="mode-card-title ai">Render Hook AI Otomatis</h3>
+            <p class="mode-card-desc">
+              AI mencari momen viral, pasang hook otomatis, subtitle karaoke, dan auto-framing
+            </p>
+            <div class="mode-card-badges">
+              ${
+                aiCount > 0
+                  ? `<span class="tag up">✓ ${aiCount} Clip AI tersimpan${aiRendered ? ` · ${aiRendered} siap upload` : ""}</span>`
+                  : isAiRunning
+                    ? `<span class="tag run">Sedang memproses AI (${pct}%)</span>`
+                    : `<span class="tag">Deteksi Hook &amp; Auto-Framing</span>`
+              }
+            </div>
+            <button class="mode-cta-btn ai" data-action="choose-mode-ai" data-id="${esc(job.id)}">
+              ${aiCount > 0 ? `Lanjutkan Hasil AI (${aiCount} Clip)` : isAiRunning ? "Lihat Proses AI" : "Mulai Proses AI"}
+            </button>
+          </div>
+
+          <div class="mode-card mode-card-manual" data-action="choose-mode-manual" data-id="${esc(job.id)}">
+            <div class="mode-card-icon manual">
+              <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="12" rx="2"/>
+                <path d="M3 8h18"/><path d="m7 4-2 4"/><path d="m13 4-2 4"/><path d="m19 4-2 4"/>
+                <circle cx="7.5" cy="19.5" r="2"/><circle cx="16.5" cy="19.5" r="2"/>
+                <path d="M9.2 18.5 16 14"/><path d="M14.8 18.5 8 14"/>
+              </svg>
+            </div>
+            <h3 class="mode-card-title manual">Edit Manual Full Video (Gaya OpenCut)</h3>
+            <p class="mode-card-desc">
+              Buka video utuh di timeline multi-track, geser fokus kamera host di bawah &amp; gameplay di atas secara bebas
+            </p>
+            <div class="mode-card-badges">
+              ${
+                manualCount > 0
+                  ? `<span class="tag up">✓ ${manualCount} Clip Manual tersimpan${manualRendered ? ` · ${manualRendered} siap upload` : ""}</span>`
+                  : `<span class="tag">Full Video · Drag Kamera &amp; Timeline</span>`
+              }
+            </div>
+            <button class="mode-cta-btn manual" data-action="choose-mode-manual" data-id="${esc(job.id)}">
+              ${manualCount > 0 ? `Lanjutkan Project Manual (${manualCount} Clip)` : "Buka Editor Manual"}
+            </button>
+            ${
+              manualCount > 0
+                ? `<button class="btn small ghost" style="margin-top:8px;width:100%" data-action="open-manual-editor-direct" data-id="${esc(job.id)}">
+                     🎬 Langsung Buka di Kanvas Editor OpenCut →
+                   </button>`
+                : ""
+            }
+          </div>
+        </div>
+
+        <div class="tiny dim" style="text-align:center;margin-top:14px">
+          💡 Hasil <b>Render Hook AI</b> dan hasil <b>Edit Manual</b> disimpan terpisah di project ini — memilih salah satu <b>tidak akan menghapus</b> hasil mode lainnya.
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function openProjectModeModal(jobId, initialJob = null) {
+  if (state.modeModalPoll) {
+    clearInterval(state.modeModalPoll);
+    state.modeModalPoll = null;
+  }
+  const root = $("#modal-root");
+  if (!root) return;
+  let job = initialJob;
+  if (!job || job.ai_clip_count === undefined) {
+    root.innerHTML = `<div class="modal-back"><div class="modal mode-modal"><div class="empty"><div class="spinner"></div><div style="margin-top:8px">Memuat pilihan mode project…</div></div></div></div>`;
+    try {
+      job = await api("/api/jobs/" + encodeURIComponent(jobId));
+    } catch (err) {
+      closeModal();
+      toast(err.message, "bad");
+      return;
+    }
+  }
+  root.innerHTML = renderModeModalContent(job);
+
+  if (job.status === "running" || job.status === "queued") {
+    state.modeModalPoll = setInterval(async () => {
+      const modalEl = $(".mode-modal", root);
+      if (!modalEl) {
+        clearInterval(state.modeModalPoll);
+        state.modeModalPoll = null;
+        return;
+      }
+      try {
+        const fresh = await api("/api/jobs/" + encodeURIComponent(jobId));
+        root.innerHTML = renderModeModalContent(fresh);
+        if (fresh.status !== "running" && fresh.status !== "queued") {
+          clearInterval(state.modeModalPoll);
+          state.modeModalPoll = null;
+        }
+      } catch (err) {}
+    }, 1600);
+  }
+}
+
 async function renderProject(jobId) {
   const view = $("#view");
   const job = await api("/api/jobs/" + encodeURIComponent(jobId));
-  const clips = job.clips || [];
+  const allClips = job.clips || [];
   state.job = job;
-  state.clips = clips;
+  state.clips = allClips;
+
+  const aiClips = allClips.filter((c) => !isClipManual(c));
+  const manualClips = allClips.filter((c) => isClipManual(c));
+
+  let activeMode = state.projectMode[jobId];
+  if (!activeMode) {
+    if (manualClips.length > 0 && aiClips.length === 0) activeMode = "manual";
+    else activeMode = "ai";
+    state.projectMode[jobId] = activeMode;
+  }
+
+  const clips = activeMode === "manual" ? manualClips : aiClips;
   const running = job.status === "running" || job.status === "queued";
   const pct = Math.round((job.progress || 0) * 100);
   const dirtyCount = clips.filter((c) => c.meta && c.meta.dirty && c.status !== "uploaded").length;
@@ -1110,7 +1294,7 @@ async function renderProject(jobId) {
   view.innerHTML = `
     <div class="page-head">
       <div style="min-width:0">
-        <div class="tiny dim" style="margin-bottom:6px"><a href="#/projects">← Project</a></div>
+        <div class="tiny dim" style="margin-bottom:6px"><a href="#/projects">← Daftar Project</a></div>
         <h1 style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(60vw,600px)">${esc(job.title || job.source || "Project")}</span>
           ${statusTag(job)}
@@ -1123,17 +1307,43 @@ async function renderProject(jobId) {
         </p>
       </div>
       <div class="row">
-        <button class="btn" data-action="render-all" ${!clips.length || running ? "disabled" : ""}>Render semua</button>
+        <button class="btn ghost" data-action="open-mode-modal" data-id="${esc(job.id)}">⇄ Pilih Mode Editing</button>
+        <button class="btn" data-action="render-all" data-mode="${activeMode}" ${!clips.length || running ? "disabled" : ""}>Render semua (${clips.length})</button>
         ${clips.length ? `<button class="btn ghost" data-action="detect-all-speakers" ${running ? "disabled" : ""}
-          title="Deteksi wajah pembicara untuk semua clip di project ini">Deteksi pembicara ${clips.length} clip</button>` : ""}
-        ${clips.length ? `<button class="btn ghost" data-action="hooks-from-speech-all" ${running ? "disabled" : ""}
+          title="Deteksi wajah pembicara / gameplay untuk semua clip di project ini">Deteksi pembicara ${clips.length} clip</button>` : ""}
+        ${activeMode === "ai" && clips.length ? `<button class="btn ghost" data-action="hooks-from-speech-all" ${running ? "disabled" : ""}
           title="Ganti hook semua clip dengan kata yang benar-benar diucapkan (paling anti-melenceng)">Hook dari ucapan ${clips.length} clip</button>` : ""}
-        ${clips.length ? `<button class="btn ghost" data-action="refresh-hooks" ${running ? "disabled" : ""}
+        ${activeMode === "ai" && clips.length ? `<button class="btn ghost" data-action="refresh-hooks" ${running ? "disabled" : ""}
           title="Hitung ulang kekuatan hook & variannya untuk semua clip di project ini">Perbarui hook ${clips.length} clip</button>` : ""}
-        ${dirtyCount ? `<button class="btn ghost" data-action="render-dirty" ${running ? "disabled" : ""}>Render ulang ${dirtyCount} clip berubah</button>` : ""}
-        <button class="btn yt" data-action="upload-all" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload YT</button>
-        ${ttOn ? `<button class="btn tt" data-action="upload-all-tt" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload TikTok</button>` : ""}
+        ${dirtyCount ? `<button class="btn ghost" data-action="render-dirty" data-mode="${activeMode}" ${running ? "disabled" : ""}>Render ulang ${dirtyCount} clip berubah</button>` : ""}
+        <button class="btn yt" data-action="upload-all" data-mode="${activeMode}" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload YT</button>
+        ${ttOn ? `<button class="btn tt" data-action="upload-all-tt" data-mode="${activeMode}" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload TikTok</button>` : ""}
         <button class="btn ghost danger" data-action="delete-job" data-id="${esc(job.id)}">Hapus project</button>
+      </div>
+    </div>
+
+    <div class="mode-switch-bar">
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="mode-switch-tab ${activeMode === "ai" ? "active ai" : ""}" data-action="switch-project-mode" data-id="${esc(job.id)}" data-mode="ai">
+          🪄 Render Hook AI Otomatis <span class="badge">${aiClips.length}</span>
+        </button>
+        <button class="mode-switch-tab ${activeMode === "manual" ? "active manual" : ""}" data-action="switch-project-mode" data-id="${esc(job.id)}" data-mode="manual">
+          🎬 Edit Manual Full Video (OpenCut) <span class="badge">${manualClips.length}</span>
+        </button>
+      </div>
+      <div class="row" style="gap:8px">
+        ${
+          activeMode === "manual"
+            ? `<button class="btn small primary" data-action="open-manual-editor-direct" data-id="${esc(job.id)}">
+                 ✂ Buka Kanvas Editor Full Video (OpenCut)
+               </button>
+               <button class="btn small ghost" data-action="create-manual-clip-open" data-id="${esc(job.id)}">
+                 + Potongan Manual Baru
+               </button>`
+            : `<button class="btn small ghost" data-action="start-ai-rerun" data-id="${esc(job.id)}" ${running ? "disabled" : ""}>
+                 ${aiClips.length ? "↻ Analisa Ulang Hook AI" : "🪄 Mulai Proses Hook AI"}
+               </button>`
+        }
       </div>
     </div>
 
@@ -1157,13 +1367,17 @@ async function renderProject(jobId) {
     <div class="card tight" style="margin-bottom:18px">
       <div class="row" style="justify-content:space-between">
         <div class="row" style="gap:18px">
-          <div class="stat"><span class="v">${clips.length}</span><span class="k">clip</span></div>
+          <div class="stat"><span class="v">${clips.length}</span><span class="k">${activeMode === "manual" ? "clip manual" : "clip AI"}</span></div>
           <div class="stat"><span class="v">${clips.filter((c) => c.has_file).length}</span><span class="k">dirender</span></div>
           <div class="stat"><span class="v">${clips.filter((c) => c.status === "uploaded").length}</span><span class="k">terupload</span></div>
         </div>
         <div class="row">
-          <button class="btn small ghost" data-action="add-manual">+ Clip manual</button>
-          ${job.source_path ? `<a class="btn small ghost" href="/api/jobs/${esc(job.id)}/source" target="_blank" rel="noopener">Lihat sumber</a>` : ""}
+          ${
+            activeMode === "manual"
+              ? `<button class="btn small" data-action="create-manual-clip-open" data-id="${esc(job.id)}">+ Buat Clip Manual di OpenCut</button>`
+              : `<button class="btn small ghost" data-action="add-manual">+ Clip manual</button>`
+          }
+          ${job.source_path ? `<a class="btn small ghost" href="/api/jobs/${esc(job.id)}/source" target="_blank" rel="noopener">Lihat video full sumber</a>` : ""}
         </div>
       </div>
     </div>
@@ -1172,16 +1386,41 @@ async function renderProject(jobId) {
       ${
         clips.length
           ? `<div class="clips">${clips.map(clipCardHtml).join("")}</div>`
-          : `<div class="card"><div class="empty"><div class="big">🔍</div>
-              ${running ? "Sedang mencari momen terbaik…" : "Belum ada clip. Klik coba lagi atau tambah clip manual."}
-            </div></div>`
+          : activeMode === "manual"
+            ? `<div class="card"><div class="empty">
+                 <div class="big">🎬</div>
+                 <div style="max-width:460px;margin:0 auto 12px">
+                   Belum ada potongan di <b>Edit Manual Full Video</b> untuk project ini.
+                   Klik tombol di bawah untuk membuka <b>Video Full (${job.duration ? fmtDur(job.duration) : "utuh"})</b> di Editor gaya OpenCut.
+                 </div>
+                 <button class="btn primary" data-action="open-manual-editor-direct" data-id="${esc(job.id)}">
+                   ✂ Buka Video Full di Editor Manual (OpenCut)
+                 </button>
+               </div></div>`
+            : `<div class="card"><div class="empty">
+                 <div class="big">🪄</div>
+                 <div style="max-width:460px;margin:0 auto 12px">
+                   ${
+                     running
+                       ? "Sedang mencari momen viral & menyusun Hook AI…"
+                       : "Mode Render Hook AI belum dijalankan untuk project ini (atau belum ada clip AI)."
+                   }
+                 </div>
+                 ${
+                   running
+                     ? ""
+                     : `<button class="btn primary" data-action="choose-mode-ai" data-id="${esc(job.id)}">
+                          🪄 Mulai Proses Render Hook AI Otomatis
+                        </button>`
+                 }
+               </div></div>`
       }
     </div>
   `;
 
   bindClipFieldHandlers();
 
-  if (clips.some((c) => ["rendering", "uploading"].includes(c.status)) || running) {
+  if (allClips.some((c) => ["rendering", "uploading"].includes(c.status)) || running) {
     startPolling(async () => {
       if (document.activeElement && document.activeElement.closest && document.activeElement.closest(".clip")) return;
       const fresh = await api("/api/jobs/" + encodeURIComponent(jobId));
@@ -1219,6 +1458,10 @@ function bindClipFieldHandlers() {
 /* modal editor                                                       */
 /* ------------------------------------------------------------------ */
 function closeModal() {
+  if (state.modeModalPoll) {
+    clearInterval(state.modeModalPoll);
+    state.modeModalPoll = null;
+  }
   const root = $("#modal-root");
   if (root) root.innerHTML = "";
   state.editing = null;
@@ -2785,7 +3028,87 @@ document.addEventListener("click", async (e) => {
 
   try {
     if (action === "open-job") {
-      location.hash = "#/project/" + id;
+      e.preventDefault();
+      await openProjectModeModal(id);
+    } else if (action === "open-mode-modal") {
+      e.preventDefault();
+      await openProjectModeModal(id || (state.job && state.job.id));
+    } else if (action === "choose-mode-ai") {
+      e.preventDefault();
+      const jobId = id || (state.job && state.job.id);
+      if (!jobId) return;
+      const btn = target.classList.contains("mode-cta-btn") ? target : target.querySelector(".mode-cta-btn");
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner"></span> Menyiapkan AI…`;
+      }
+      const res = await api("/api/jobs/" + encodeURIComponent(jobId) + "/start-ai", {
+        method: "POST",
+        body: { force: false },
+      });
+      state.projectMode[jobId] = "ai";
+      closeModal();
+      if (res.already_exists) {
+        toast(`Membuka ${res.ai_clip_count} clip hasil Render Hook AI yang tersimpan`, "ok");
+      } else {
+        toast("Memulai proses Render Hook AI Otomatis…", "ok");
+      }
+      if (state.route === "project" && state.param === jobId) {
+        await renderProject(jobId);
+      } else {
+        location.hash = "#/project/" + jobId + "?mode=ai";
+      }
+    } else if (action === "start-ai-rerun") {
+      e.preventDefault();
+      const jobId = id || (state.job && state.job.id);
+      if (!jobId) return;
+      const hasAi = (state.clips || []).some((c) => !isClipManual(c));
+      if (hasAi && !confirm("Analisa ulang akan memperbarui daftar clip Hook AI (clip Edit Manual tidak akan dihapus). Lanjutkan?")) {
+        return;
+      }
+      await api("/api/jobs/" + encodeURIComponent(jobId) + "/start-ai", {
+        method: "POST",
+        body: { force: true },
+      });
+      state.projectMode[jobId] = "ai";
+      toast("Memulai analisa ulang Render Hook AI…", "ok");
+      await renderProject(jobId);
+    } else if (action === "choose-mode-manual" || action === "open-manual-editor-direct" || action === "create-manual-clip-open") {
+      e.preventDefault();
+      const jobId = id || (state.job && state.job.id);
+      if (!jobId) return;
+      const createNew = action === "create-manual-clip-open";
+      const forceEditor = action === "open-manual-editor-direct" || createNew;
+      const btn = target.classList.contains("mode-cta-btn") ? target : target.querySelector(".mode-cta-btn");
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner"></span> Menyiapkan Editor Manual…`;
+      }
+      const res = await api("/api/jobs/" + encodeURIComponent(jobId) + "/start-manual", {
+        method: "POST",
+        body: { create_new: createNew },
+      });
+      state.projectMode[jobId] = "manual";
+      closeModal();
+      const targetClipId = (res.clip && res.clip.id) || res.active_clip_id;
+      if ((res.created || forceEditor) && targetClipId) {
+        toast(createNew ? "Potongan manual baru dibuat — membuka Editor OpenCut" : "Membuka Full Video di Editor Manual (Gaya OpenCut)", "ok");
+        location.hash = "#/editor/" + targetClipId;
+      } else {
+        toast(`Membuka ${res.manual_clip_count || 1} clip Edit Manual yang tersimpan (siap lanjut edit / upload)`, "ok");
+        if (state.route === "project" && state.param === jobId) {
+          await renderProject(jobId);
+        } else {
+          location.hash = "#/project/" + jobId + "?mode=manual";
+        }
+      }
+    } else if (action === "switch-project-mode") {
+      e.preventDefault();
+      const jobId = id || (state.job && state.job.id);
+      const nextMode = target.dataset.mode === "manual" ? "manual" : "ai";
+      if (!jobId) return;
+      state.projectMode[jobId] = nextMode;
+      await renderProject(jobId);
     } else if (action === "new-job") {
       location.hash = "#/new";
     } else if (action === "edit") {
@@ -2857,15 +3180,17 @@ document.addEventListener("click", async (e) => {
       toast(`${res.updated} dari ${res.clips} hook diperbarui`, "ok");
       await renderProject(state.job.id);
     } else if (action === "render-dirty") {
+      const mode = (target && target.dataset && target.dataset.mode) || (state.job && state.projectMode[state.job.id]) || "";
       const res = await api("/api/jobs/" + state.job.id + "/render", {
         method: "POST",
-        body: { only_dirty: true },
+        body: { only_dirty: true, mode },
       });
       toast(res.queued + " clip masuk antrean render ulang", "ok");
       renderProject(state.job.id);
     } else if (action === "render-all") {
-      await api("/api/jobs/" + state.job.id + "/render", { method: "POST" });
-      toast("Semua clip masuk antrean render", "ok");
+      const mode = (target && target.dataset && target.dataset.mode) || (state.job && state.projectMode[state.job.id]) || "";
+      await api("/api/jobs/" + state.job.id + "/render", { method: "POST", body: { mode } });
+      toast("Semua clip pada mode ini masuk antrean render", "ok");
       renderProject(state.job.id);
     } else if (action === "whisper-download") {
       const model = target.dataset.model || "";
@@ -3051,11 +3376,13 @@ document.addEventListener("click", async (e) => {
       if (state.route === "tiktok") await renderTikTok();
       else if (state.job) renderProject(state.job.id);
     } else if (action === "upload-all-tt") {
-      const res = await api("/api/clips/upload-all", { method: "POST", body: { job_id: state.job.id, target: "tiktok" } });
+      const mode = (target && target.dataset && target.dataset.mode) || (state.job && state.projectMode[state.job.id]) || "";
+      const res = await api("/api/clips/upload-all", { method: "POST", body: { job_id: state.job.id, target: "tiktok", mode } });
       toast(res.queued + " clip masuk antrean TikTok", "ok");
       renderProject(state.job.id);
     } else if (action === "upload-all") {
-      const res = await api("/api/clips/upload-all", { method: "POST", body: { job_id: state.job.id } });
+      const mode = (target && target.dataset && target.dataset.mode) || (state.job && state.projectMode[state.job.id]) || "";
+      const res = await api("/api/clips/upload-all", { method: "POST", body: { job_id: state.job.id, mode } });
       toast(res.queued + " clip masuk antrean upload", "ok");
       renderProject(state.job.id);
     } else if (action === "add-manual") {
