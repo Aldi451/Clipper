@@ -563,6 +563,23 @@ def create_app() -> FastAPI:
                                      "analisis ulang project")
         info = media.probe(source_path)
         transcript = transcribe.load_transcript(job["id"])
+        if settings.get("auto_framing", True):
+            try:
+                from . import framing as framing_module
+
+                cur_framing = ((clip.get("meta") or {}).get("framing") or {})
+                if (
+                    framing_module.available()
+                    and int(cur_framing.get("detector_v") or 0) < framing_module.DETECTOR_VERSION
+                ):
+                    ctx = _clip_framing_context(job, clip)
+                    f_res = framing_module.analyze(
+                        source_path, clip.get("start") or 0, clip.get("duration") or 0, context=ctx,
+                    )
+                    _store_framing(clip, f_res)
+                    clip = db.get_clip(clip_id) or clip
+            except Exception:
+                pass
         spec = editor.load_or_create_spec(clip, transcript, float(info.duration or 0), settings)
         return {
             "clip": {**clip, "has_file": bool(clip.get("file")) and paths.media_exists(clip["file"])},
@@ -1178,6 +1195,7 @@ def create_app() -> FastAPI:
             except (ValueError, TypeError):
                 spec = None
             if isinstance(spec, dict) and spec:
+                spec["framing_v"] = int(result.get("detector_v") or 0)
                 spec["framing"] = editor._framing_from_meta(result)  # noqa: SLF001
                 spec["gameplay"] = editor._gameplay_from_meta(result)  # noqa: SLF001
                 if result.get("kind") == "gameplay":
@@ -1187,6 +1205,8 @@ def create_app() -> FastAPI:
                     )
                 elif result.get("ok") and spec.get("layout") == "fit":
                     spec["layout"] = "crop"
+                elif not result.get("ok") and spec.get("layout") == "crop" and not spec.get("template"):
+                    spec["layout"] = "fit"
                 fields["spec"] = json.dumps(spec, ensure_ascii=False)
                 meta["dirty"] = True
                 fields["meta"] = meta
@@ -1201,6 +1221,8 @@ def create_app() -> FastAPI:
         return {
             **src_meta,
             "job_title": str(job.get("title") or ""),
+            "clip_title": str(clip.get("title") or ""),
+            "hook": str(clip.get("hook") or ""),
             "transcript": str(clip_meta.get("transcript") or "")[:1500],
         }
 

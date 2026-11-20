@@ -165,6 +165,10 @@ async function renderEditor(clipId) {
           <div class="ed-preview-wrap">
             <div class="ed-preview" id="ed-preview">
               <video id="ed-video" playsinline preload="auto"></video>
+              <div id="ed-gp-divider" class="ed-gp-divider" hidden></div>
+              <div id="ed-cam-wrap" class="ed-cam-wrap" hidden>
+                <video id="ed-video-cam" muted playsinline preload="auto"></video>
+              </div>
               <div class="ed-overlay" id="ed-overlay">
                 <div class="ed-caption" id="ed-caption"></div>
                 <div id="ed-texts"></div>
@@ -269,6 +273,56 @@ function durationGateHtml(dur) {
 /* ------------------------------------------------------------------ */
 /* preview                                                           */
 /* ------------------------------------------------------------------ */
+function updateGameplayPreviewLayout() {
+  const video = edEl("ed-video");
+  const camWrap = edEl("ed-cam-wrap");
+  const camVideo = edEl("ed-video-cam");
+  const divider = edEl("ed-gp-divider");
+  if (!video || !ED.spec) return;
+
+  const hasFile = ED.clip && ED.clip.has_file && !ED.dirty;
+  const isLiveGameplay = ED.spec.layout === "gameplay" && !hasFile;
+  if (!isLiveGameplay) {
+    video.style.height = "100%";
+    video.style.objectFit = "contain";
+    video.style.objectPosition = "50% 50%";
+    if (camWrap) camWrap.hidden = true;
+    if (divider) divider.hidden = true;
+    if (camVideo && !camVideo.paused) camVideo.pause();
+    return;
+  }
+
+  const gp = ED.spec.gameplay || {};
+  const split = Math.max(0.45, Math.min(0.75, Number(gp.split || 0.62)));
+  const gameX = Math.max(0, Math.min(1, Number(gp.game_x ?? 0.56)));
+  const camX = Math.max(0.04, Math.min(0.96, Number(gp.cam_x ?? 0.16)));
+  const camY = Math.max(0.06, Math.min(0.94, Number(gp.cam_y ?? 0.78)));
+  const camScale = Math.max(0.18, Math.min(0.65, Number(gp.cam_scale ?? 0.26)));
+
+  video.style.height = (split * 100).toFixed(2) + "%";
+  video.style.objectFit = "cover";
+  video.style.objectPosition = `${(gameX * 100).toFixed(1)}% 50%`;
+
+  if (divider) {
+    divider.hidden = false;
+    divider.style.top = `calc(${(split * 100).toFixed(2)}% - 1.5px)`;
+  }
+  if (camWrap && camVideo) {
+    camWrap.hidden = false;
+    camWrap.style.height = ((1 - split) * 100).toFixed(2) + "%";
+    const src = `/api/jobs/${ED.clip.job_id}/source`;
+    if (camVideo.dataset.src !== src) {
+      camVideo.dataset.src = src;
+      camVideo.src = src;
+    }
+    const zoom = Math.max(1.4, Math.min(4.8, 1 / camScale));
+    const tx = (0.5 - camX) * 100 * zoom;
+    const ty = (0.47 - camY) * 100 * zoom;
+    camVideo.style.transformOrigin = "50% 50%";
+    camVideo.style.transform = `translate(${tx.toFixed(1)}%, ${ty.toFixed(1)}%) scale(${zoom.toFixed(2)})`;
+  }
+}
+
 function renderPreviewSource() {
   const video = edEl("ed-video");
   if (!video) return;
@@ -284,12 +338,14 @@ function renderPreviewSource() {
   if (preview) preview.classList.toggle("no-video", !!(ED.source && !ED.source.has_video));
   video.muted = false;
   video.volume = 0.85;
+  updateGameplayPreviewLayout();
   // posisi awal = awal segmen pertama
   seekTo(0);
 }
 
 function seekTo(outTime) {
   const video = edEl("ed-video");
+  const camVideo = edEl("ed-video-cam");
   if (!video || !ED.spec) return;
   const dur = specDuration(ED.spec);
   const t = Math.max(0, Math.min(dur, outTime));
@@ -298,6 +354,11 @@ function seekTo(outTime) {
   if (Math.abs((video.currentTime || 0) - srcTime) > 0.15) {
     try {
       video.currentTime = srcTime;
+    } catch (err) {}
+  }
+  if (camVideo && !camVideo.closest("[hidden]") && Math.abs((camVideo.currentTime || 0) - srcTime) > 0.2) {
+    try {
+      camVideo.currentTime = srcTime;
     } catch (err) {}
   }
   renderOverlay();
@@ -341,6 +402,7 @@ function edSnapWordTimes(words, start, end) {
 
 function renderOverlay() {
   if (!ED.spec) return;
+  updateGameplayPreviewLayout();
   const t = ED.time;
   const caps = ED.spec.captions || {};
   const capBox = edEl("ed-caption");
@@ -896,6 +958,12 @@ function bindEditorEvents() {
       return;
     }
     ED.time = active.outStart + (srcTime - active.start) / Math.max(0.5, Number(active.speed) || 1);
+    const camVideo = edEl("ed-video-cam");
+    if (camVideo && !camVideo.closest("[hidden]") && Math.abs((camVideo.currentTime || 0) - srcTime) > 0.25) {
+      try {
+        camVideo.currentTime = srcTime;
+      } catch (err) {}
+    }
     renderOverlay();
     updatePlayhead();
   });
@@ -904,11 +972,18 @@ function bindEditorEvents() {
     ED.playing = true;
     const btn = document.querySelector('[data-ed="play"]');
     if (btn) btn.textContent = "❚❚";
+    const camVideo = edEl("ed-video-cam");
+    if (camVideo && !camVideo.closest("[hidden]")) {
+      camVideo.currentTime = video.currentTime;
+      camVideo.play().catch(() => {});
+    }
   });
   video.addEventListener("pause", () => {
     ED.playing = false;
     const btn = document.querySelector('[data-ed="play"]');
     if (btn) btn.textContent = "▶";
+    const camVideo = edEl("ed-video-cam");
+    if (camVideo && !camVideo.paused) camVideo.pause();
   });
 
   const title = edEl("ed-title");

@@ -33,6 +33,9 @@ from typing import Any, Callable, Iterable
 from . import media
 from .config import CLIP_MAX_SECONDS
 
+# Versi algoritma deteksi framing — dinaikkan agar klip lama otomatis dianalisa ulang saat render
+DETECTOR_VERSION = 3
+
 # Rentang fokus yang aman: kamera tidak pernah mentok total ke tepi frame
 FOCUS_MIN = 0.02
 FOCUS_MAX = 0.98
@@ -46,11 +49,15 @@ MIN_SEGMENT = 1.1
 GAMEPLAY_STRONG_HINTS = (
     "gameplay", "walkthrough", "playthrough", "let's play", "lets play",
     "mabar", "push rank", "mobile legends", "mlbb", "valorant", "pubg",
-    "free fire", "genshin", "minecraft", "roblox", "gta", "elden ring",
-    "fortnite", "dota", "cs2", "csgo", "apex legends", "warzone",
+    "free fire", "genshin", "minecraft", "roblox", "gta", "grand theft auto",
+    "elden ring", "fortnite", "dota", "cs2", "csgo", "apex legends", "warzone",
     "call of duty", "resident evil", "horror game", "boss fight",
     "speedrun", "facecam", "windah", "miawaug", "jess no limit",
-    "rrq", "evos", "onic", "steam", "ps5", "main game", "rank mythic",
+    "rrq", "evos", "onic", "steam", "ps5", "ps4", "playstation", "xbox",
+    "nintendo", "wolverine", "spider-man", "spiderman", "god of war",
+    "cyberpunk", "red dead", "wukong", "black myth", "silent hill",
+    "final fantasy", "monster hunter", "tekken", "ea fc", "efootball",
+    "fifa", "share factory", "main game", "rank mythic", "console",
 )
 
 GAMEPLAY_SUB_HINTS = {
@@ -58,6 +65,8 @@ GAMEPLAY_SUB_HINTS = {
     "cooldown", "damage", "healer", "ulti", "turret", "mythic",
     "clutch", "headshot", "loot", "lobby", "matchmaking", "boss",
     "checkpoint", "gacha", "skin", "ranked", "noob", "pro player",
+    "controller", "dualsense", "joystick", "console", "dlc", "patch",
+    "level", "quest", "mission", "cutscene", "trailer", "fps", "rpg",
 }
 
 PODCAST_HINTS = (
@@ -74,11 +83,13 @@ def classify_content_context(context: dict[str, Any] | None = None) -> dict[str,
     categories = [str(c).lower() for c in (ctx.get("categories") or []) if c]
     tags = [str(t).lower() for t in (ctx.get("tags") or []) if t]
     title = str(ctx.get("title") or ctx.get("job_title") or "").lower()
+    clip_title = str(ctx.get("clip_title") or ctx.get("hook") or "").lower()
+    source_name = str(ctx.get("source_name") or "").lower()
     uploader = str(ctx.get("uploader") or "").lower()
     description = str(ctx.get("description") or "").lower()[:600]
     transcript = str(ctx.get("transcript") or "").lower()[:1500]
 
-    blob_meta = " ".join([title, uploader, " ".join(tags), description])
+    blob_meta = " ".join([title, clip_title, source_name, uploader, " ".join(tags), description])
     blob_all = f"{blob_meta} {transcript}"
 
     gameplay_score = 0.0
@@ -93,15 +104,15 @@ def classify_content_context(context: dict[str, Any] | None = None) -> dict[str,
 
     strong_hits = [kw for kw in GAMEPLAY_STRONG_HINTS if kw in blob_all]
     if strong_hits:
-        gameplay_score += min(0.65, 0.35 + 0.15 * len(strong_hits))
+        gameplay_score += min(0.70, 0.42 + 0.14 * len(strong_hits))
         reasons.append(f"kata kunci gameplay ({strong_hits[0]})")
 
     words = set(re.findall(r"[a-z0-9]+", blob_all))
     sub_hits = [w for w in GAMEPLAY_SUB_HINTS if w in words or w in blob_meta]
     if len(sub_hits) >= 2:
-        gameplay_score += min(0.35, 0.12 * len(sub_hits))
+        gameplay_score += min(0.40, 0.14 * len(sub_hits))
     elif len(sub_hits) == 1:
-        gameplay_score += 0.12
+        gameplay_score += 0.15
 
     pod_hits = [kw for kw in PODCAST_HINTS if kw in blob_all]
     if pod_hits:
@@ -110,7 +121,7 @@ def classify_content_context(context: dict[str, Any] | None = None) -> dict[str,
 
     gameplay_score = _clamp(gameplay_score, 0.0, 1.0)
     podcast_score = _clamp(podcast_score, 0.0, 1.0)
-    is_gameplay = gameplay_score >= 0.42 and gameplay_score > podcast_score
+    is_gameplay = gameplay_score >= 0.40 and gameplay_score > podcast_score
     return {
         "is_gameplay_hint": is_gameplay,
         "gameplay_score": round(gameplay_score, 3),
@@ -176,6 +187,29 @@ def _cascade() -> Any:
         path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         _CASCADE_CACHE["front"] = cv2.CascadeClassifier(path)
     return _CASCADE_CACHE["front"]
+
+
+def _extra_cascades() -> list[tuple[str, Any]]:
+    """Muat cascade tambahan (alt2 & profile) untuk mendeteksi wajah gamer
+    yang memakai kacamata, headset, mikrofon besar, atau menoleh ke monitor."""
+    cv2 = _cv()
+    if cv2 is None:
+        return []
+    out: list[tuple[str, Any]] = []
+    for key, filename in (
+        ("front", "haarcascade_frontalface_default.xml"),
+        ("alt2", "haarcascade_frontalface_alt2.xml"),
+        ("profile", "haarcascade_profileface.xml"),
+    ):
+        if key not in _CASCADE_CACHE:
+            try:
+                c = cv2.CascadeClassifier(cv2.data.haarcascades + filename)
+                _CASCADE_CACHE[key] = c if not c.empty() else None
+            except Exception:
+                _CASCADE_CACHE[key] = None
+        if _CASCADE_CACHE.get(key) is not None:
+            out.append((key, _CASCADE_CACHE[key]))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -381,33 +415,137 @@ def _read_frames(path: Path, start: float, duration: float, step: float,
     return frames
 
 
+def _face_live_activity(
+    cv2: Any,
+    frame: Any,
+    curr_gray: Any,
+    prev_gray: Any | None,
+    cx: float,
+    cy: float,
+    fw: float,
+) -> tuple[float, float, float]:
+    """Ukur aktivitas bicara/gerak lokal & rasio warna kulit manusia pada kandidat wajah.
+
+    Mengembalikan ``(motion_diff, skin_ratio, live_weight)``:
+    - Wallpaper/poster/cover game statis (mis. gambar Lucia & Jason GTA VI di layar PS5)
+      memiliki ``motion_diff < 1.35`` karena piksel wajahnya diam seperti lukisan,
+      sehingga diberi ``live_weight`` sangat kecil (0.08) agar tidak membajak fokus.
+    - Host manusia asli yang sedang berbicara memiliki gerakan mulut/kepala/mata
+      lokal (``motion_diff >= 1.45``) dan rasio krominansi kulit manusia di ruang YCrCb,
+      sehingga diberi ``live_weight`` tinggi (1.8 – 3.6).
+    """
+    h, w = curr_gray.shape[:2]
+    r_in = max(8, int(round(fw * 0.45)))
+    x1 = max(0, int(round(cx - r_in)))
+    x2 = min(w, int(round(cx + r_in)))
+    y1 = max(0, int(round(cy - r_in)))
+    y2 = min(h, int(round(cy + r_in)))
+    if x2 - x1 < 6 or y2 - y1 < 6:
+        return 0.0, 0.0, 0.5
+
+    # 1) Rasio warna kulit di ruang YCrCb (membantu membedakan wajah manusia vs ikon game)
+    skin_ratio = 0.25
+    try:
+        roi_bgr = frame[y1:y2, x1:x2]
+        ycrcb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2YCrCb)
+        mask = cv2.inRange(ycrcb, (35, 132, 77), (250, 178, 128))
+        skin_ratio = float(cv2.countNonZero(mask)) / float(max(1, (x2 - x1) * (y2 - y1)))
+    except Exception:
+        skin_ratio = 0.25
+
+    if prev_gray is None or prev_gray.shape != curr_gray.shape:
+        base_w = 1.15 if 0.12 <= skin_ratio <= 0.88 else 0.75
+        return 2.0, round(skin_ratio, 3), base_w
+
+    # 2) Gerakan piksel lokal di dalam wajah dibanding cincin latar di sekitarnya
+    r_out = max(14, int(round(fw * 0.95)))
+    ox1 = max(0, int(round(cx - r_out)))
+    ox2 = min(w, int(round(cx + r_out)))
+    oy1 = max(0, int(round(cy - r_out)))
+    oy2 = min(h, int(round(cy + r_out)))
+
+    try:
+        inner_diff_mat = cv2.absdiff(curr_gray[y1:y2, x1:x2], prev_gray[y1:y2, x1:x2])
+        inner_diff = float(inner_diff_mat.mean()[0])
+        outer_diff_mat = cv2.absdiff(curr_gray[oy1:oy2, ox1:ox2], prev_gray[oy1:oy2, ox1:ox2])
+        outer_sum = float(outer_diff_mat.mean()[0]) * float((ox2 - ox1) * (oy2 - oy1))
+        inner_sum = inner_diff * float((x2 - x1) * (y2 - y1))
+        ring_area = max(1.0, float((ox2 - ox1) * (oy2 - oy1) - (x2 - x1) * (y2 - y1)))
+        ring_diff = max(0.0, (outer_sum - inner_sum) / ring_area)
+    except Exception:
+        return 2.0, round(skin_ratio, 3), 1.0
+
+    # Jika seluruh layar berganti mendadak (scene cut / scroll menu besar), jangan anggap bicara
+    if ring_diff > 24.0 and inner_diff <= ring_diff * 1.12:
+        motion = 0.4
+    else:
+        motion = inner_diff
+
+    # Wajah poster/wallpaper statis (diam total)
+    if motion < 1.30:
+        live_weight = 0.08
+    elif motion <= 32.0 and (motion >= ring_diff * 0.60 or motion >= 2.2):
+        skin_bonus = 1.25 if 0.14 <= skin_ratio <= 0.88 else 0.85
+        live_weight = (1.6 + min(2.0, motion / 3.2)) * skin_bonus
+    else:
+        live_weight = 0.55
+    return round(motion, 3), round(skin_ratio, 3), round(live_weight, 3)
+
+
+def _dedup_faces(faces: list[tuple[float, float, float]]) -> list[tuple[float, float, float]]:
+    """Gabungkan deteksi wajah yang bertumpuk pada lokasi yang sama."""
+    if len(faces) <= 1:
+        return faces
+    kept: list[tuple[float, float, float]] = []
+    for cx, cy, fw in sorted(faces, key=lambda item: item[2], reverse=True):
+        if any(
+            abs(cx - kx) < max(fw, kw) * 0.55 and abs(cy - ky) < max(fw, kw) * 0.55
+            for kx, ky, kw in kept
+        ):
+            continue
+        kept.append((cx, cy, fw))
+    return kept
+
+
 def detect_faces(cv2: Any, frame: Any, cascade: Any) -> list[tuple[float, float, float]]:
     """Deteksi wajah pada satu frame → ``[(center_x, center_y, lebar)]`` piksel.
 
-    Dipakai beberapa tingkat ketat: Haar yang terlalu ketat sering melewatkan
-    wajah yang agak miring / setengah profil, sedangkan yang terlalu longgar
-    memunculkan "wajah palsu" di kursi dan lampu. Jadi: coba ketat dulu, kalau
-    tidak ada hasil baru dilonggarkan.
+    Dipakai beberapa tingkat ketat + cascade alt2 agar host berkacamata/headset/mic
+    tetap terdeteksi bahkan ketika ada gambar karakter game di layar.
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    min_size = max(28, int(frame.shape[1] * 0.05))
-    candidates: list[tuple[Any, float, int]] = [
-        (gray, 1.1, 5),
-        (gray, 1.06, 3),
-    ]
-    # equalizeHist membantu video gelap/kontras rendah, hanya dijalankan bila perlu
+    min_size = max(24, int(frame.shape[1] * 0.045))
+    eq_gray = None
     try:
-        if float(gray.mean()) < 95.0 or float(gray.std()) < 45.0:
-            candidates.append((cv2.equalizeHist(gray), 1.1, 4))
+        if float(gray.mean()) < 105.0 or float(gray.std()) < 48.0:
+            eq_gray = cv2.equalizeHist(gray)
     except Exception:
-        candidates.append((cv2.equalizeHist(gray), 1.1, 4))
-    for source, scale, neighbors in candidates:
-        boxes = cascade.detectMultiScale(
+        eq_gray = cv2.equalizeHist(gray)
+
+    found: list[tuple[float, float, float]] = []
+    extra = dict(_extra_cascades())
+    alt2 = extra.get("alt2")
+
+    passes: list[tuple[Any, Any, float, int]] = [
+        (cascade, gray, 1.09, 5),
+        (cascade, gray, 1.06, 3),
+    ]
+    if alt2 is not None:
+        passes.append((alt2, gray, 1.08, 4))
+    if eq_gray is not None:
+        passes.append((cascade, eq_gray, 1.08, 4))
+        if alt2 is not None:
+            passes.append((alt2, eq_gray, 1.08, 4))
+
+    for clf, source, scale, neighbors in passes:
+        boxes = clf.detectMultiScale(
             source, scaleFactor=scale, minNeighbors=neighbors, minSize=(min_size, min_size)
         )
-        if len(boxes):
-            return [(x + w / 2.0, y + h / 2.0, float(w)) for (x, y, w, h) in boxes]
-    return []
+        for x, y, w, h in boxes:
+            found.append((x + w / 2.0, y + h / 2.0, float(w)))
+        if len(found) >= 2:
+            break
+    return _dedup_faces(found)
 
 
 def _detect_edge_facecam(
@@ -418,15 +556,18 @@ def _detect_edge_facecam(
 ) -> list[tuple[float, float, float]]:
     """Deteksi wajah ukuran kecil pada pojok/tepi kiri & kanan (khusus facecam gamer).
 
-    Pada video gameplay 16:9 yang diperkecil ke lebar 640px, kotak webcam host di
-    pojok sering membuat ukuran wajah < 28px sehingga terlewat oleh ``detect_faces``
-    standar. Fungsi ini memeriksa strip tepi kiri & kanan yang diperbesar 1.75×.
+    Berbeda dari versi lama, fungsi ini memakai multi-cascade (frontal default,
+    frontal alt2 untuk headset/mic/kacamata, dan profile untuk wajah menoleh ke
+    monitor) serta dijalankan secara independen walaupun di tengah layar ada
+    gambar karakter game besar (seperti artwork GTA VI di menu PS5).
     """
     h, w = frame.shape[:2]
     if w < 120 or h < 90:
         return []
-    strip_w = int(round(w * 0.36))
+    strip_w = int(round(w * 0.38))
+    cascades = _extra_cascades() or [("front", cascade)]
     results: list[tuple[float, float, float]] = []
+
     for x_offset, x_end in ((0, strip_w), (w - strip_w, w)):
         roi = frame[:, x_offset:x_end]
         if roi.size == 0:
@@ -435,21 +576,143 @@ def _detect_edge_facecam(
         up_h = int(round(roi.shape[0] * upscale))
         resized = cv2.resize(roi, (up_w, up_h))
         gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-        for source, scale, neighbors in (
-            (gray, 1.08, 4),
-            (cv2.equalizeHist(gray), 1.08, 4),
-        ):
-            boxes = cascade.detectMultiScale(
-                source, scaleFactor=scale, minNeighbors=neighbors, minSize=(24, 24)
-            )
-            if len(boxes):
+        eq_gray = cv2.equalizeHist(gray)
+        flipped_gray = None
+
+        roi_hits: list[tuple[float, float, float]] = []
+        for key, clf in cascades:
+            for src in (gray, eq_gray):
+                boxes = clf.detectMultiScale(
+                    src, scaleFactor=1.08, minNeighbors=4, minSize=(24, 24)
+                )
                 for bx, by, bw, bh in boxes:
                     cx = x_offset + (bx + bw / 2.0) / upscale
                     cy = (by + bh / 2.0) / upscale
                     fw = float(bw) / upscale
-                    results.append((cx, cy, fw))
+                    roi_hits.append((cx, cy, fw))
+                if roi_hits:
+                    break
+            if not roi_hits and key == "profile":
+                if flipped_gray is None:
+                    flipped_gray = cv2.flip(gray, 1)
+                boxes = clf.detectMultiScale(
+                    flipped_gray, scaleFactor=1.08, minNeighbors=4, minSize=(24, 24)
+                )
+                for bx, by, bw, bh in boxes:
+                    orig_bx = up_w - (bx + bw)
+                    cx = x_offset + (orig_bx + bw / 2.0) / upscale
+                    cy = (by + bh / 2.0) / upscale
+                    fw = float(bw) / upscale
+                    roi_hits.append((cx, cy, fw))
+            if roi_hits:
+                results.extend(roi_hits)
                 break
-    return results
+    return _dedup_faces(results)
+
+
+def _detect_active_corner_webcam(
+    cv2: Any,
+    frames: list[tuple[float, Any]],
+) -> dict[str, Any] | None:
+    """Fallback visual: cari kotak webcam aktif di 4 pojok layar (kiri/kanan × atas/bawah).
+
+    Berguna saat wajah YouTuber gamer tertutup mikrofon besar/headset/masker
+    sehingga Haar cascade melewatkannya, tetapi di pojok layar terdapat kotak
+    facecam dengan gerakan hidup + warna kulit manusia.
+    """
+    if len(frames) < 4:
+        return None
+    h, w = frames[0][1].shape[:2]
+    if w < 160 or h < 90:
+        return None
+
+    # 4 zona pojok standar OBS streamer: (label, x1_r, x2_r, y1_r, y2_r, cx, cy, game_x)
+    corners = [
+        ("kiri bawah", 0.01, 0.30, 0.60, 0.97, 0.16, 0.78, 0.56),
+        ("kiri atas", 0.01, 0.30, 0.03, 0.40, 0.16, 0.22, 0.56),
+        ("kanan bawah", 0.70, 0.99, 0.60, 0.97, 0.84, 0.78, 0.44),
+        ("kanan atas", 0.70, 0.99, 0.03, 0.40, 0.84, 0.22, 0.44),
+    ]
+    step = max(1, len(frames) // 25)
+    sampled = [frames[i][1] for i in range(0, len(frames), step)]
+    if len(sampled) < 3:
+        return None
+
+    best_corner: dict[str, Any] | None = None
+    best_score = 0.0
+
+    for label, xr1, xr2, yr1, yr2, def_cx, def_cy, game_x in corners:
+        x1, x2 = int(round(w * xr1)), int(round(w * xr2))
+        y1, y2 = int(round(h * yr1)), int(round(h * yr2))
+        if x2 - x1 < 24 or y2 - y1 < 20:
+            continue
+
+        active_count = 0
+        skin_Editing_scores: list[float] = []
+        motion_scores: list[float] = []
+        weighted_xs: list[float] = []
+        weighted_ys: list[float] = []
+        prev_roi_gray = None
+
+        for frm in sampled:
+            roi = frm[y1:y2, x1:x2]
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            ycrcb = cv2.cvtColor(roi, cv2.COLOR_BGR2YCrCb)
+            skin_mask = cv2.inRange(ycrcb, (40, 133, 77), (245, 177, 127))
+            skin_ratio = float(cv2.countNonZero(skin_mask)) / float(max(1, gray.size))
+
+            if prev_roi_gray is not None:
+                diff = cv2.absdiff(gray, prev_roi_gray)
+                # Fokus gerakan pada piksel kulit/orang di dalam pojok
+                skin_diff = cv2.bitwise_and(diff, diff, mask=skin_mask)
+                m_all = float(diff.mean()[0])
+                m_skin = (
+                    float(skin_diff.sum()) / float(max(1, cv2.countNonZero(skin_mask)))
+                    if cv2.countNonZero(skin_mask) > 25
+                    else 0.0
+                )
+                if 0.04 <= skin_ratio <= 0.55 and 1.4 <= m_all <= 22.0 and m_skin >= 1.6:
+                    active_count += 1
+                    skin_Editing_scores.append(skin_ratio)
+                    motion_scores.append(m_skin)
+                    moments = cv2.moments(skin_mask, True)
+                    if moments["m00"] > 10:
+                        cx_norm = (x1 + moments["m10"] / moments["m00"]) / float(w)
+                        cy_norm = (y1 + moments["m01"] / moments["m00"]) / float(h)
+                        weighted_xs.append(cx_norm)
+                        weighted_ys.append(cy_norm)
+            prev_roi_gray = gray
+
+        active_ratio = active_count / float(max(1, len(sampled) - 1))
+        if active_ratio < 0.30 or not motion_scores:
+            continue
+
+        # Pastikan titik tengah kulit di pojok ini stabil (tidak lari-lari seperti efek ledakan game)
+        if len(weighted_xs) >= 3:
+            mx = sum(weighted_xs) / len(weighted_xs)
+            my = sum(weighted_ys) / len(weighted_ys)
+            sx = math.sqrt(sum((v - mx) ** 2 for v in weighted_xs) / len(weighted_xs))
+            sy = math.sqrt(sum((v - my) ** 2 for v in weighted_ys) / len(weighted_ys))
+            if sx > 0.055 or sy > 0.065:
+                continue
+            final_cx = _clamp(mx, 0.06, 0.94)
+            final_cy = _clamp(my, 0.08, 0.92)
+        else:
+            final_cx, final_cy = def_cx, def_cy
+
+        score = active_ratio * (1.0 + min(1.5, (sum(motion_scores) / len(motion_scores)) / 6.0))
+        if score > best_score:
+            best_score = score
+            best_corner = {
+                "x": round(final_cx, 4),
+                "y": round(final_cy, 4),
+                "w": 0.095,
+                "scale": 0.25,
+                "game_x": round(game_x, 4),
+                "corner": label,
+                "confidence": round(_clamp(score, 0.45, 0.95), 3),
+            }
+    return best_corner
 
 
 def _evaluate_facecam(
@@ -457,14 +720,14 @@ def _evaluate_facecam(
     total_frames: int,
     moves: int,
     ctx_info: dict[str, Any],
+    fallback_corner: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Tentukan apakah wajah yang terdeteksi adalah facecam host gameplay.
 
-    Facecam gameplay memiliki ciri khas:
-    - Posisi wajah berada di pojok/tepi layar (kiri/kanan/atas/bawah) dan relatif
-      diam di dalam kotak webcam OBS (simpangan baku posisi kecil).
-    - Ukuran wajah relatif kecil terhadap lebar layar 16:9 (<= 21%, atau <= 25%
-      bila konteks video memang Gaming).
+    Menggunakan pengelompokan spasial (spatial clustering) pada kandidat wajah
+    di pojok/tepi layar + filter aktivitas hidup (``live``), sehingga gambar
+    karakter game besar di layar (seperti Lucia & Jason GTA VI di PS5) tidak
+    akan menggagalkan deteksi facecam YouTuber gamer di pojok layar.
     """
     is_hint = bool(ctx_info.get("is_gameplay_hint"))
     gameplay_score = float(ctx_info.get("gameplay_score") or 0.0)
@@ -473,47 +736,74 @@ def _evaluate_facecam(
     if podcast_score >= 0.48 and gameplay_score < 0.35:
         return None
 
-    # Saring kandidat wajah yang berada di zona facecam / berukuran kecil
-    edge_records = [
+    max_w = 0.34 if is_hint else 0.22
+    candidates = [
         r for r in records
-        if (r["nx"] <= 0.36 or r["nx"] >= 0.64 or r["ny"] <= 0.38 or r["ny"] >= 0.58)
-        and r["nw"] <= (0.26 if is_hint else 0.20)
+        if (r["nx"] <= 0.38 or r["nx"] >= 0.62 or r["ny"] <= 0.38 or r["ny"] >= 0.56)
+        and 0.025 <= r["nw"] <= max_w
     ]
-    pool = edge_records if len(edge_records) >= max(1, int(len(records) * 0.45)) else (
-        records if is_hint else []
-    )
-    if not pool:
-        if is_hint and gameplay_score >= 0.65 and not records:
-            # Video jelas gameplay tapi wajah host terlalu kecil/tertutup headset:
-            # default ke pojok kiri bawah standar streamer
-            return {
+
+    # Bentuk cluster spasial di sekitar setiap kandidat (radius dx<=0.085, dy<=0.095)
+    best_cluster: list[dict[str, float]] = []
+    best_cluster_score = -1.0
+    for seed in candidates:
+        sx, sy = seed["nx"], seed["ny"]
+        members = [
+            r for r in candidates
+            if abs(r["nx"] - sx) <= 0.085 and abs(r["ny"] - sy) <= 0.095
+        ]
+        if not members:
+            continue
+        # Hitung jumlah frame unik dan aktivitas hidup (bukan poster/ikon diam)
+        unique_times = {round(r["at"], 2) for r in members}
+        hits = len(unique_times)
+        live_hits = sum(1 for r in members if float(r.get("motion", 2.0)) >= 1.35)
+        avg_live = sum(float(r.get("live", 1.0)) for r in members) / len(members)
+        edge_hits = sum(1 for r in members if r.get("from_edge"))
+
+        # Tolak cluster yang 100% diam seperti ikon/wallpaper statis (mis. Wolverine / Lucia & Jason GTA VI)
+        if total_frames >= 4 and live_hits == 0 and avg_live < 0.35:
+            continue
+
+        med_x = sorted(r["nx"] for r in members)[len(members) // 2]
+        med_y = sorted(r["ny"] for r in members)[len(members) // 2]
+        med_w = sorted(r["nw"] for r in members)[len(members) // 2]
+
+        in_corner = (med_x <= 0.34 or med_x >= 0.66) and (med_y <= 0.40 or med_y >= 0.56)
+        corner_bonus = 1.45 if in_corner else 1.05
+        size_bonus = 1.25 if med_w <= 0.16 else 1.0
+        edge_bonus = 1.15 if edge_hits > 0 else 1.0
+
+        c_score = (hits + 1.8 * live_hits) * avg_live * corner_bonus * size_bonus * edge_bonus
+        if c_score > best_cluster_score:
+            best_cluster_score = c_score
+            best_cluster = members
+
+    min_hits = 1 if is_hint else max(2, int(round(total_frames * 0.14)))
+    unique_cluster_hits = len({round(r["at"], 2) for r in best_cluster})
+
+    if unique_cluster_hits < min_hits:
+        if fallback_corner is not None and (is_hint or fallback_corner.get("confidence", 0.0) >= 0.62):
+            return fallback_corner
+        if is_hint and gameplay_score >= 0.60:
+            return fallback_corner or {
                 "x": 0.16,
                 "y": 0.78,
-                "w": 0.11,
-                "scale": 0.32,
-                "game_x": 0.55,
+                "w": 0.10,
+                "scale": 0.25,
+                "game_x": 0.56,
                 "corner": "kiri bawah",
                 "confidence": round(gameplay_score, 3),
             }
         return None
 
-    # Kelompokkan berdasarkan sisi kiri vs kanan supaya 1 false-positive di sisi
-    # seberang tidak menggeser titik tengah facecam
-    left_pool = [r for r in pool if r["nx"] < 0.5]
-    right_pool = [r for r in pool if r["nx"] >= 0.5]
-    cluster = left_pool if len(left_pool) >= len(right_pool) else right_pool
-    if not cluster:
-        return None
-
-    min_hits = 1 if is_hint else max(2, int(round(total_frames * 0.18)))
-    if len(cluster) < min_hits:
-        return None
-
-    xs = sorted(r["nx"] for r in cluster)
-    ys = sorted(r["ny"] for r in cluster)
-    ws = sorted(r["nw"] for r in cluster)
-    mid = len(cluster) // 2
+    xs = sorted(r["nx"] for r in best_cluster)
+    ys = sorted(r["ny"] for r in best_cluster)
+    ws = sorted(r["nw"] for r in best_cluster)
+    motions = sorted(float(r.get("motion", 2.0)) for r in best_cluster)
+    mid = len(best_cluster) // 2
     med_x, med_y, med_w = xs[mid], ys[mid], ws[mid]
+    med_motion = motions[mid]
 
     mean_x = sum(xs) / len(xs)
     mean_y = sum(ys) / len(ys)
@@ -521,23 +811,24 @@ def _evaluate_facecam(
     std_y = math.sqrt(sum((v - mean_y) ** 2 for v in ys) / len(ys))
 
     in_corner_or_edge = (
-        med_x <= 0.35 or med_x >= 0.65 or med_y <= 0.36 or med_y >= 0.60
+        med_x <= 0.38 or med_x >= 0.62 or med_y <= 0.38 or med_y >= 0.56
     )
     in_strict_corner = (
-        (med_x <= 0.32 or med_x >= 0.68) and (med_y <= 0.38 or med_y >= 0.58)
+        (med_x <= 0.35 or med_x >= 0.65) and (med_y <= 0.40 or med_y >= 0.56)
     )
-    is_pinned = std_x <= 0.075 and std_y <= 0.08
-    is_small = med_w <= (0.25 if is_hint else 0.17)
+    is_pinned = std_x <= 0.075 and std_y <= 0.085
+    is_small = med_w <= (0.34 if is_hint else 0.21)
 
-    # Tanpa hint gaming, syarat visual harus ketat (pojok + ukuran kecil + diam + tidak pindah pembicara)
     if not is_hint:
-        if not (in_strict_corner and is_pinned and is_small and moves <= 1):
-            return None
+        # Tanpa hint judul gaming: wajib di pojok/tepi, stabil, ukuran kecil, dan bukan gambar statis
+        if not (in_strict_corner and is_pinned and is_small and med_motion >= 1.30):
+            return fallback_corner if (fallback_corner and fallback_corner.get("confidence", 0) >= 0.72) else None
     else:
         if not ((in_corner_or_edge or is_small) and std_x <= 0.11):
-            return None
+            return fallback_corner
 
-    cam_scale = _clamp(max(0.26, med_w * 2.85), 0.24, 0.44)
+    # Kalibrasi zoom facecam (2.35x lebar wajah agar fokus pas ke wajah & mic host di panel bawah)
+    cam_scale = _clamp(max(0.20, med_w * 2.35), 0.19, 0.38)
     game_x = 0.56 if med_x < 0.35 else (0.44 if med_x > 0.65 else 0.50)
     corner = _corner_label(med_x, med_y)
     return {
@@ -547,7 +838,7 @@ def _evaluate_facecam(
         "scale": round(cam_scale, 4),
         "game_x": round(game_x, 4),
         "corner": corner,
-        "confidence": round(max(gameplay_score, len(cluster) / max(1, total_frames)), 3),
+        "confidence": round(max(gameplay_score, unique_cluster_hits / max(1, total_frames)), 3),
     }
 
 
@@ -564,30 +855,37 @@ def analyze(
     Kembalian::
 
         {"ok": True, "kind": "speaker" | "gameplay" | "topic",
-         "faces": 12, "coverage": 0.83, "moves": 2,
+         "detector_v": 3, "faces": 12, "coverage": 0.83, "moves": 2,
          "segments": [{"at": 0.0, "x": 0.31}, ...],
          "facecam": {...}, "reason": ""}
     """
     progress = on_progress or (lambda fraction, message: None)
     cv2 = _cv()
     path = Path(source_path)
-    ctx_info = classify_content_context(context)
+    merged_ctx = dict(context or {})
+    if not merged_ctx.get("source_name"):
+        merged_ctx["source_name"] = path.stem
+    ctx_info = classify_content_context(merged_ctx)
     if not path.exists():
-        return {"ok": False, "kind": "topic", "reason": "File sumber tidak ditemukan", "segments": []}
+        return {"ok": False, "kind": "topic", "detector_v": DETECTOR_VERSION,
+                "reason": "File sumber tidak ditemukan", "segments": []}
     if cv2 is None or not available():
-        return {"ok": False, "kind": "topic", "reason": "OpenCV belum terpasang (deteksi wajah nonaktif)", "segments": []}
+        return {"ok": False, "kind": "topic", "detector_v": DETECTOR_VERSION,
+                "reason": "OpenCV belum terpasang (deteksi wajah nonaktif)", "segments": []}
 
     info = media.probe(path)
     length = _f(duration, 0.0) or _f(info.duration, 0.0)
     length = min(length, float(CLIP_MAX_SECONDS) + 1.0)
     if length <= 0:
-        return {"ok": False, "kind": "topic", "reason": "Durasi klip tidak diketahui", "segments": []}
+        return {"ok": False, "kind": "topic", "detector_v": DETECTOR_VERSION,
+                "reason": "Durasi klip tidak diketahui", "segments": []}
 
     cascade = _cascade()
     progress(0.05, "Membaca frame video…")
     frames = _read_frames(path, max(0.0, _f(start)), length, sample_step)
     if not frames:
-        return {"ok": False, "kind": "topic", "reason": "Video tidak bisa dibaca", "segments": []}
+        return {"ok": False, "kind": "topic", "detector_v": DETECTOR_VERSION,
+                "reason": "Video tidak bisa dibaca", "segments": []}
 
     frame_h, frame_w = frames[0][1].shape[:2]
     source_w = int(info.width or 0) or int(frame_w)
@@ -597,58 +895,115 @@ def analyze(
     is_landscape = source_w > source_h * 1.15
 
     samples: list[dict[str, Any]] = []
-    face_records: list[dict[str, float]] = []
+    all_face_records: list[dict[str, float]] = []
     detected = 0
+    live_speaker_frames = 0
     previous_x = 0.5
-    for index, (offset, frame) in enumerate(frames):
-        faces = detect_faces(cv2, frame, cascade)
-        if not faces and is_landscape and (ctx_info["is_gameplay_hint"] or index % 3 == 0):
-            faces = _detect_edge_facecam(cv2, frame, cascade)
-        if faces:
-            detected += 1
-            # wajah dominan: paling besar, tapi diberi bonus kalau dekat posisi kamera sekarang
-            def score(face: tuple[float, float, float]) -> float:
-                center_x, _center_y, width = face
-                norm = _clamp((center_x * scale_x) / max(1.0, source_w))
-                return width * (1.35 if abs(norm - previous_x) < 0.22 else 1.0)
+    prev_gray: Any | None = None
+    edge_stride = 1 if (ctx_info["is_gameplay_hint"] or len(frames) <= 75) else 2
 
-            best = max(faces, key=score)
-            nx = _clamp((best[0] * scale_x) / max(1.0, source_w))
-            ny = _clamp((best[1] * scale_y) / max(1.0, source_h))
-            nw = _clamp((best[2] * scale_x) / max(1.0, source_w))
-            face_records.append({"at": offset, "nx": nx, "ny": ny, "nw": nw})
-            focus = focus_from_face(best[0] * scale_x, source_w, source_h)
-            previous_x = focus
-            samples.append({"at": offset, "x": round(focus, 4)})
+    for index, (offset, frame) in enumerate(frames):
+        curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        full_faces = detect_faces(cv2, frame, cascade)
+        edge_faces: list[tuple[float, float, float]] = []
+        if is_landscape and (index % edge_stride == 0):
+            edge_faces = _detect_edge_facecam(cv2, frame, cascade)
+
+        # Gabungkan deteksi frame utuh & deteksi pojok tanpa membuang wajah kecil
+        combined_tagged: list[tuple[float, float, float, bool]] = [
+            (cx, cy, fw, False) for (cx, cy, fw) in full_faces
+        ]
+        for ecx, ecy, efw in edge_faces:
+            if not any(
+                abs(ecx - cx) < max(efw, fw) * 0.55 and abs(ecy - cy) < max(efw, fw) * 0.55
+                for cx, cy, fw, _ in combined_tagged
+            ):
+                combined_tagged.append((ecx, ecy, efw, True))
+
+        if combined_tagged:
+            scored_faces: list[dict[str, Any]] = []
+            for cx, cy, fw, from_edge in combined_tagged:
+                motion, skin_ratio, live_w = _face_live_activity(
+                    cv2, frame, curr_gray, prev_gray, cx, cy, fw
+                )
+                nx = _clamp((cx * scale_x) / max(1.0, source_w))
+                ny = _clamp((cy * scale_y) / max(1.0, source_h))
+                nw = _clamp((fw * scale_x) / max(1.0, source_w))
+                rec = {
+                    "at": offset,
+                    "cx": cx,
+                    "cy": cy,
+                    "fw": fw,
+                    "nx": nx,
+                    "ny": ny,
+                    "nw": nw,
+                    "motion": motion,
+                    "skin": skin_ratio,
+                    "live": live_w,
+                    "from_edge": 1.0 if from_edge else 0.0,
+                }
+                all_face_records.append(rec)
+                scored_faces.append(rec)
+
+            # Untuk tracking pembicara utama (mode speaker/podcast), prioritaskan wajah
+            # manusia yang benar-benar bergerak/berbicara (live_w tinggi), BUKAN gambar
+            # poster/wallpaper statis di layar (seperti artwork GTA VI di menu PS5).
+            def speaker_score(item: dict[str, Any]) -> float:
+                continuity = 1.30 if abs(item["nx"] - previous_x) < 0.22 else 1.0
+                return float(item["fw"]) * float(item["live"]) * continuity
+
+            best = max(scored_faces, key=speaker_score)
+            # Hanya masukkan ke sampel fokus kamera bila bukan gambar statis murni
+            if best["live"] >= 0.35 or prev_gray is None:
+                detected += 1
+                if best["motion"] >= 1.40:
+                    live_speaker_frames += 1
+                focus = focus_from_face(best["cx"] * scale_x, source_w, source_h)
+                previous_x = focus
+                samples.append({"at": offset, "x": round(focus, 4)})
+
+        prev_gray = curr_gray
         if index % 25 == 0:
             progress(0.05 + 0.8 * index / max(1, len(frames)),
-                     f"Mendeteksi wajah {index}/{len(frames)}…")
+                     f"Mendeteksi wajah & aktivitas bicara {index}/{len(frames)}…")
 
     coverage = detected / max(1, len(frames))
+    live_ratio = live_speaker_frames / max(1, detected) if detected else 0.0
     progress(0.9, "Menyusun pergerakan kamera…")
     segments = plan_segments(samples)
     moves = max(0, len(segments) - 1)
 
-    facecam = (
-        _evaluate_facecam(face_records, len(frames), moves, ctx_info)
+    fallback_corner = (
+        _detect_active_corner_webcam(cv2, frames)
         if is_landscape
         else None
     )
+    facecam = (
+        _evaluate_facecam(all_face_records, len(frames), moves, ctx_info, fallback_corner=fallback_corner)
+        if is_landscape
+        else None
+    )
+
     if facecam is not None:
         kind = "gameplay"
         ok = True
-    elif bool(segments) and coverage >= 0.35 and len(segments) > 0:
+    elif bool(segments) and coverage >= 0.35 and live_ratio >= 0.22 and len(segments) > 0:
         kind = "speaker"
         ok = True
     else:
+        # Jika hanya ada wajah statis di wallpaper/poster (live_ratio < 0.22), jangan crop ke poster!
         kind = "topic"
         ok = False
+        segments = []
+        moves = 0
 
     result: dict[str, Any] = {
         "ok": ok,
         "kind": kind,
+        "detector_v": DETECTOR_VERSION,
         "faces": detected,
         "coverage": round(coverage, 3),
+        "live_ratio": round(live_ratio, 3),
         "segments": segments,
         "moves": moves,
         "start": round(max(0.0, _f(start)), 3),
@@ -664,7 +1019,7 @@ def analyze(
             "atas gameplay, bawah host"
         )
     elif not segments:
-        result["reason"] = "Tidak ada wajah pembicara — fokus pada topik & hook video"
+        result["reason"] = "Tidak ada wajah pembicara aktif — fokus pada topik & hook video"
     elif coverage < 0.35:
         result["reason"] = (
             f"Wajah hanya terdeteksi di {coverage * 100:.0f}% frame — fokus pada topik & hook video"
