@@ -57,8 +57,91 @@ def _progress_fn(job_id: str, floor: float, ceil: float) -> Callable[[float, str
 
 
 # --------------------------------------------------------------------------- #
-# analisis
 # --------------------------------------------------------------------------- #
+# persiapan video full & analisis AI
+# --------------------------------------------------------------------------- #
+def is_manual_clip(clip: dict[str, Any]) -> bool:
+    meta = clip.get("meta") or {}
+    return bool(meta.get("manual") or meta.get("origin") == "manual")
+
+
+def start_prepare(job_id: str) -> None:
+    """Unduh/simpan video sumber full & baca metadata tanpa langsung menjalankan AI."""
+    if not _claim(f"analyze:{job_id}"):
+        return
+    analysis_pool.submit(_run_prepare, job_id)
+
+
+def _run_prepare(job_id: str) -> None:
+    job = db.get_job(job_id)
+    if not job:
+        _release(f"analyze:{job_id}")
+        return
+    workdir = WORK_DIR / job_id
+    workdir.mkdir(parents=True, exist_ok=True)
+    try:
+        _job_set(job_id, status="running", stage="memuat", progress=0.02, message="Menyiapkan video full…", error="")
+
+        source_path = resolve_media_path(job.get("source_path"), (WORK_DIR / job_id,))
+        if source_path is not None and str(source_path) != (job.get("source_path") or ""):
+            _job_set(job_id, source_path=str(source_path))
+
+        # 1) download kalau sumbernya link
+        if (not source_path or not source_path.exists()) and ingest.is_url(job.get("source") or ""):
+            _job_set(job_id, stage="download", progress=0.05, message="Mengunduh video full dari link…")
+            source_path = ingest.download(
+                job["source"], job_label=job_id,
+                on_progress=_progress_fn(job_id, 0.05, 0.90),
+            )
+            _job_set(job_id, source_path=str(source_path))
+        if not source_path or not source_path.exists():
+            raise RuntimeError("Sumber video tidak ditemukan")
+
+        # 2) probe metadata video full
+        _job_set(job_id, stage="probe", progress=0.94, message="Membaca metadata video full…")
+        info = media.probe(source_path)
+        source_meta = ingest.load_source_meta(workdir) or (job.get("meta") or {}).get("source_meta") or {}
+        if info.duration <= 3:
+            raise RuntimeError("Video terlalu pendek (minimal 3 detik)")
+        current_title = (job.get("title") or "").strip()
+        best_title = current_title
+        if not current_title or current_title.lower() == "source":
+            best_title = str(source_meta.get("title") or source_path.stem)[:80]
+
+        _job_set(
+            job_id,
+            title=best_title,
+            duration=info.duration,
+            width=info.width,
+            height=info.height,
+            status="done",
+            stage="siap_pilih",
+            progress=1.0,
+            message="Video full siap — klik Project untuk pilih Render Hook AI atau Edit Manual",
+            error="",
+            meta={
+                **(job.get("meta") or {}),
+                "prepared": True,
+                "source_meta": source_meta,
+                "info": {
+                    "duration": info.duration,
+                    "width": info.width,
+                    "height": info.height,
+                    "fps": info.fps,
+                    "has_audio": info.has_audio,
+                    "has_video": info.has_video,
+                    "audio_codec": info.audio_codec,
+                },
+            },
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        _job_set(job_id, status="error", stage="gagal", progress=0.0,
+                 message="Gagal menyiapkan video", error=friendly_error(exc))
+    finally:
+        _release(f"analyze:{job_id}")
+
+
 def start_analysis(job_id: str) -> None:
     if not _claim(f"analyze:{job_id}"):
         return
@@ -209,9 +292,11 @@ def _run_analysis(job_id: str) -> None:
             _job_set(job_id, message="Minta judul ke LLM lokal…")
             analyze.refine_with_llm(candidates, settings)
 
-        # 6) simpan clip
+        # 6) simpan clip AI (JANGAN hapus clip manual milik user!)
         existing = db.list_clips(job_id)
         for clip in existing:
+            if is_manual_clip(clip):
+                continue
             for old_ref in (clip.get("file"), clip.get("thumb"), (clip.get("meta") or {}).get("srt")):
                 old_file = resolve_media_path(old_ref, (WORK_DIR / clip["job_id"],))
                 if old_file is not None:
@@ -251,6 +336,8 @@ def _run_analysis(job_id: str) -> None:
                 hashtags=cand.hashtags,
                 status="suggested",
                 meta={
+                    "origin": "ai",
+                    "manual": False,
                     "features": cand.features,
                     "hook": getattr(cand, "hook_info", {}) or {},
                     "hook_speech": hook_speech.get(idx, {}),
@@ -266,11 +353,12 @@ def _run_analysis(job_id: str) -> None:
             message += f" · transkrip dilewati: {transcript_error[:120]}"
         _job_set(job_id, status="done", stage="selesai", progress=1.0, message=message,
                  error="", meta={**(db.get_job(job_id) or {}).get("meta", {}),
+                                 "ai_done": True,
                                  "transcript_error": transcript_error,
                                  "language": (transcript or {}).get("language", "")})
 
         if settings.get("auto_render") and candidates:
-            render_job_all(job_id)
+            render_job_all(job_id, mode="ai")
 
     except Exception as exc:
         traceback.print_exc()
@@ -318,10 +406,14 @@ def start_render(clip_id: str) -> None:
     render_pool.submit(_run_render, clip_id)
 
 
-def render_job_all(job_id: str, only_dirty: bool = False) -> int:
+def render_job_all(job_id: str, only_dirty: bool = False, mode: str | None = None) -> int:
     """Antre render semua clip project. `only_dirty` = hanya yang perlu render ulang."""
     queued = 0
     for clip in db.list_clips(job_id):
+        if mode == "ai" and is_manual_clip(clip):
+            continue
+        if mode == "manual" and not is_manual_clip(clip):
+            continue
         if clip["status"] == "uploaded":
             continue
         if only_dirty and not (clip.get("meta") or {}).get("dirty"):

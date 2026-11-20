@@ -177,15 +177,31 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ #
     # project / job
     # ------------------------------------------------------------------ #
+    def _enrich_job_summary(job: dict[str, Any], clips: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        if clips is None:
+            clips = db.list_clips(job["id"])
+        for clip in clips:
+            clip["has_file"] = bool(clip.get("file")) and paths.media_exists(clip["file"])
+            clip["is_manual"] = pipeline.is_manual_clip(clip)
+        ai_clips = [c for c in clips if not c.get("is_manual")]
+        manual_clips = [c for c in clips if c.get("is_manual")]
+        job["clip_count"] = len(clips)
+        job["ai_clip_count"] = len(ai_clips)
+        job["manual_clip_count"] = len(manual_clips)
+        job["ai_rendered_count"] = sum(1 for c in ai_clips if c.get("has_file"))
+        job["manual_rendered_count"] = sum(1 for c in manual_clips if c.get("has_file"))
+        job["uploaded_count"] = sum(1 for c in clips if c["status"] == "uploaded")
+        job["thumb"] = next((c["thumb"] for c in clips if c.get("thumb")), "")
+        job["thumb_clip"] = next((c["id"] for c in clips if c.get("thumb")), "")
+        src_path = paths.resolve_media_path(job.get("source_path"), (WORK_DIR / job["id"],))
+        job["has_source"] = bool(src_path and src_path.exists())
+        return job
+
     @app.get("/api/jobs")
     def api_jobs(limit: int = 50) -> list[dict[str, Any]]:
         jobs = db.list_jobs(limit=max(1, min(200, limit)))
         for job in jobs:
-            clips = db.list_clips(job["id"])
-            job["clip_count"] = len(clips)
-            job["uploaded_count"] = sum(1 for c in clips if c["status"] == "uploaded")
-            job["thumb"] = next((c["thumb"] for c in clips if c.get("thumb")), "")
-            job["thumb_clip"] = next((c["id"] for c in clips if c.get("thumb")), "")
+            _enrich_job_summary(job)
         return jobs
 
     @app.get("/api/jobs/{job_id}")
@@ -193,10 +209,9 @@ def create_app() -> FastAPI:
         job = db.get_job(job_id)
         if not job:
             raise HTTPException(404, "Project tidak ditemukan")
-        job["clips"] = db.list_clips(job_id)
-        for clip in job["clips"]:
-            # tanpa ini tombol Render/Upload/TikTok di halaman Project ikut mati
-            clip["has_file"] = bool(clip.get("file")) and paths.media_exists(clip["file"])
+        clips = db.list_clips(job_id)
+        _enrich_job_summary(job, clips)
+        job["clips"] = clips
         job["settings_snapshot"] = {
             k: load_settings().get(k) for k in ("min_clip_seconds", "max_clip_seconds", "target_clips")
         }
@@ -208,8 +223,11 @@ def create_app() -> FastAPI:
         if not ingest.is_url(url):
             raise HTTPException(400, "Link tidak valid (harus diawali http/https)")
         job = db.create_job("url", source=url, title=str(payload.get("title") or "").strip())
-        pipeline.start_analysis(job["id"])
-        return job
+        if payload.get("auto_ai"):
+            pipeline.start_analysis(job["id"])
+        else:
+            pipeline.start_prepare(job["id"])
+        return _enrich_job_summary(job, [])
 
     @app.post("/api/jobs/local")
     def create_from_local(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
@@ -219,8 +237,11 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"File tidak ditemukan di server: {path}")
         job = db.create_job("local", source=str(path), source_path=str(path),
                             title=str(payload.get("title") or path.stem))
-        pipeline.start_analysis(job["id"])
-        return job
+        if payload.get("auto_ai"):
+            pipeline.start_analysis(job["id"])
+        else:
+            pipeline.start_prepare(job["id"])
+        return _enrich_job_summary(job, [])
 
     @app.post("/api/jobs/upload")
     def create_from_upload(
@@ -236,8 +257,138 @@ def create_app() -> FastAPI:
             raise HTTPException(413, "File terlalu besar")
         job = db.create_job("upload", source=file.filename or saved.name,
                             source_path=str(saved), title=title.strip() or saved.stem)
-        pipeline.start_analysis(job["id"])
-        return job
+        pipeline.start_prepare(job["id"])
+        return _enrich_job_summary(job, [])
+
+    @app.post("/api/jobs/{job_id}/start-ai")
+    def start_job_ai(job_id: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        job = db.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "Project tidak ditemukan")
+        force = bool(payload.get("force"))
+        clips = db.list_clips(job_id)
+        ai_clips = [c for c in clips if not pipeline.is_manual_clip(c)]
+        manual_clips = [c for c in clips if pipeline.is_manual_clip(c)]
+        if ai_clips and not force:
+            for c in ai_clips:
+                c["has_file"] = bool(c.get("file")) and paths.media_exists(c["file"])
+                c["is_manual"] = False
+            return {
+                "ok": True,
+                "already_exists": True,
+                "started": False,
+                "ai_clip_count": len(ai_clips),
+                "manual_clip_count": len(manual_clips),
+                "clips": ai_clips,
+            }
+        db.update_job(
+            job_id,
+            status="queued",
+            stage="antre",
+            progress=0.02,
+            error="",
+            message="Menyiapkan Render Hook AI…",
+        )
+        pipeline.start_analysis(job_id)
+        return {
+            "ok": True,
+            "already_exists": False,
+            "started": True,
+            "ai_clip_count": len(ai_clips),
+            "manual_clip_count": len(manual_clips),
+        }
+
+    @app.post("/api/jobs/{job_id}/start-manual")
+    def start_job_manual(job_id: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        job = db.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "Project tidak ditemukan")
+        create_new = bool(payload.get("create_new"))
+        clips = db.list_clips(job_id)
+        manual_clips = [c for c in clips if pipeline.is_manual_clip(c)]
+        ai_clips = [c for c in clips if not pipeline.is_manual_clip(c)]
+        if manual_clips and not create_new:
+            for c in manual_clips:
+                c["has_file"] = bool(c.get("file")) and paths.media_exists(c["file"])
+                c["is_manual"] = True
+            return {
+                "ok": True,
+                "already_exists": True,
+                "created": False,
+                "manual_clip_count": len(manual_clips),
+                "ai_clip_count": len(ai_clips),
+                "active_clip_id": manual_clips[0]["id"],
+                "clips": manual_clips,
+            }
+
+        source_path = paths.resolve_media_path(job.get("source_path"), (WORK_DIR / job_id,))
+        dur_total = float(job.get("duration") or 0.0)
+        if source_path and source_path.exists() and dur_total <= 0:
+            try:
+                info = media.probe(source_path)
+                dur_total = float(info.duration or 0.0)
+                db.update_job(job_id, duration=info.duration, width=info.width, height=info.height)
+                job["duration"] = info.duration
+                job["width"] = info.width
+                job["height"] = info.height
+            except Exception:
+                pass
+
+        req_start = max(0.0, float(payload.get("start") or 0.0))
+        default_dur = min(60.0, max(15.0, dur_total - req_start)) if dur_total > 0 else 60.0
+        req_dur = max(2.0, float(payload.get("duration") or default_dur))
+        if dur_total > 0 and req_start + req_dur > dur_total:
+            req_dur = max(2.0, dur_total - req_start)
+
+        framing_meta: dict[str, Any] = {}
+        if source_path and source_path.exists() and framing.available():
+            try:
+                source_meta = (job.get("meta") or {}).get("source_meta") or {}
+                ctx = {
+                    **(source_meta if isinstance(source_meta, dict) else {}),
+                    "job_title": str(job.get("title") or ""),
+                }
+                framing_meta = framing.analyze(source_path, req_start, min(req_dur, 45.0), context=ctx)
+            except Exception:
+                framing_meta = {}
+
+        idx_num = len(manual_clips) + 1
+        base_title = str(payload.get("title") or "").strip() or (
+            f"{(job.get('title') or 'Video')[:56]} · Manual #{idx_num}"
+        )
+        clip = db.create_clip(
+            job_id,
+            idx=len(clips),
+            start=round(req_start, 3),
+            duration=round(req_dur, 3),
+            score=100.0,
+            title=base_title,
+            hook=base_title[:48],
+            hashtags=load_settings().get("yt_hashtags", "#Shorts"),
+            description=base_title,
+            status="suggested",
+            meta={
+                "manual": True,
+                "origin": "manual",
+                "framing": framing_meta,
+                "caption": True,
+            },
+        )
+        transcript = transcribe.load_transcript(job_id)
+        spec = editor.load_or_create_spec(clip, transcript, dur_total, load_settings())
+        clip = db.update_clip(clip["id"], spec=json.dumps(spec, ensure_ascii=False)) or clip
+        clip["has_file"] = False
+        clip["is_manual"] = True
+        return {
+            "ok": True,
+            "already_exists": False,
+            "created": True,
+            "manual_clip_count": len(manual_clips) + 1,
+            "ai_clip_count": len(ai_clips),
+            "active_clip_id": clip["id"],
+            "clip": clip,
+            "clips": [*manual_clips, clip],
+        }
 
     @app.post("/api/jobs/{job_id}/retry")
     def retry_job(job_id: str) -> dict[str, Any]:
@@ -254,7 +405,8 @@ def create_app() -> FastAPI:
         if not job:
             raise HTTPException(404, "Project tidak ditemukan")
         only_dirty = bool(payload.get("only_dirty"))
-        queued = pipeline.render_job_all(job_id, only_dirty=only_dirty)
+        mode = str(payload.get("mode") or "").strip().lower() or None
+        queued = pipeline.render_job_all(job_id, only_dirty=only_dirty, mode=mode)
         return {"ok": True, "queued": queued, "clips": len(db.list_clips(job_id))}
 
     @app.delete("/api/jobs/{job_id}")
@@ -313,10 +465,15 @@ def create_app() -> FastAPI:
         title = str(payload.get("title") or "").strip() or f"Clip manual {start:.0f}s"
         clip = db.create_clip(
             job_id, idx=len(db.list_clips(job_id)), start=start, duration=duration,
-            score=float(payload.get("score") or 0), title=title,
+            score=float(payload.get("score") or 100.0), title=title,
             hook=title[:48], hashtags=load_settings().get("yt_hashtags", "#Shorts"),
-            description=title, status="suggested", meta={"manual": True},
+            description=title, status="suggested", meta={"manual": True, "origin": "manual", "caption": True},
         )
+        transcript = transcribe.load_transcript(job_id)
+        spec = editor.load_or_create_spec(clip, transcript, float(job.get("duration") or 0), load_settings())
+        clip = db.update_clip(clip["id"], spec=json.dumps(spec, ensure_ascii=False)) or clip
+        clip["has_file"] = False
+        clip["is_manual"] = True
         return clip
 
     @app.get("/api/clips/{clip_id}")
@@ -430,6 +587,7 @@ def create_app() -> FastAPI:
     def upload_all(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
         job_id = payload.get("job_id")
         target = str(payload.get("target") or "youtube").lower()
+        mode = str(payload.get("mode") or "").strip().lower() or None
         if target not in ("youtube", "tiktok", "both"):
             raise HTTPException(400, "Target upload tidak dikenal")
         if target in ("youtube", "both") and not youtube.is_connected():
@@ -439,6 +597,10 @@ def create_app() -> FastAPI:
         clips = db.list_clips(job_id)
         queued = 0
         for clip in clips:
+            if mode == "ai" and pipeline.is_manual_clip(clip):
+                continue
+            if mode == "manual" and not pipeline.is_manual_clip(clip):
+                continue
             if not clip.get("file") or not paths.media_exists(clip["file"]):
                 continue
             done = clip.get("yt_id") if target == "youtube" else clip.get("tk_id") if target == "tiktok" else (
@@ -581,9 +743,18 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
         spec = editor.load_or_create_spec(clip, transcript, float(info.duration or 0), settings)
+        project_clips = db.list_clips(job["id"])
+        for pc in project_clips:
+            pc["has_file"] = bool(pc.get("file")) and paths.media_exists(pc["file"])
+            pc["is_manual"] = pipeline.is_manual_clip(pc)
         return {
-            "clip": {**clip, "has_file": bool(clip.get("file")) and paths.media_exists(clip["file"])},
-            "job": {"id": job["id"], "title": job.get("title"), "duration": job.get("duration")},
+            "clip": {
+                **clip,
+                "has_file": bool(clip.get("file")) and paths.media_exists(clip["file"]),
+                "is_manual": pipeline.is_manual_clip(clip),
+            },
+            "job": {"id": job["id"], "title": job.get("title"), "duration": job.get("duration") or info.duration},
+            "project_clips": project_clips,
             "source": {
                 "duration": info.duration, "width": info.width, "height": info.height,
                 "has_audio": info.has_audio, "fps": info.fps,

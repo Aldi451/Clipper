@@ -882,3 +882,470 @@ select.ed-mini { width: 76px !important; }
   border-color: #7c5cff;
   background: #161327;
 }
+
+/* ------------------------------------------------------------------ */
+/* Popup Pilih Mode Editing (Render Hook AI vs Edit Manual OpenCut)   */
+/* ------------------------------------------------------------------ */
+.modal.mode-modal {
+  max-width: 780px;
+  width: 94vw;
+  padding: 26px 28px 22px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, #151624 0%, #0d0e18 100%);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(124, 92, 255, 0.14);
+}
+.mode-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.mode-modal-title {
+  margin: 0 0 6px;
+  font-size: 21px;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: -0.01em;
+}
+.mode-modal-sub {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.mode-modal-status {
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.mode-cards-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+@media (max-width: 680px) {
+  .mode-cards-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.mode-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 26px 22px 22px;
+  border-radius: 16px;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  background: rgba(18, 20, 34, 0.85);
+}
+.mode-card-ai {
+  border: 1.5px solid rgba(155, 114, 255, 0.75);
+  box-shadow: 0 0 26px rgba(124, 92, 255, 0.22), inset 0 0 22px rgba(124, 92, 255, 0.08);
+}
+.mode-card-ai:hover {
+  transform: translateY(-2px);
+  border-color: #b18cff;
+  box-shadow: 0 0 36px rgba(124, 92, 255, 0.38), inset 0 0 26px rgba(124, 92, 255, 0.14);
+}
+.mode-card-manual {
+  border: 1.5px solid rgba(0, 210, 255, 0.75);
+  box-shadow: 0 0 26px rgba(0, 210, 255, 0.2), inset 0 0 22px rgba(0, 210, 255, 0.08);
+}
+.mode-card-manual:hover {
+  transform: translateY(-2px);
+  border-color: #5ce1ff;
+  box-shadow: 0 0 36px rgba(0, 210, 255, 0.36), inset 0 0 26px rgba(0, 210, 255, 0.14);
+}
+.mode-card-icon {
+  width: 68px;
+  height: 68px;
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+.mode-card-icon.ai {
+  color: #b794ff;
+  background: rgba(124, 92, 255, 0.14);
+  filter: drop-shadow(0 0 10px rgba(124, 92, 255, 0.45));
+}
+.mode-card-icon.manual {
+  color: #38e2ff;
+  background: rgba(0, 210, 255, 0.13);
+  filter: drop-shadow(0 0 10px rgba(0, 210, 255, 0.45));
+}
+.mode-card-title {
+  margin: 0 0 10px;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.3;
+}
+.mode-card-title.ai { color: #b794ff; }
+.mode-card-title.manual { color: #47e5ff; }
+.mode-card-desc {
+  margin: 0 0 14px;
+  font-size: 12.8px;
+  line-height: 1.55;
+  color: #b2b5c8;
+  flex: 1;
+}
+.mode-card-badges {
+  margin-bottom: 14px;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.mode-cta-btn {
+  width: 100%;
+  padding: 11px 16px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.16s ease, box-shadow 0.16s ease, color 0.16s ease;
+}
+.mode-cta-btn.ai {
+  background: rgba(124, 92, 255, 0.18);
+  color: #e2d6ff;
+  border: 1.5px solid #9d78ff;
+  box-shadow: 0 0 16px rgba(124, 92, 255, 0.28);
+}
+.mode-cta-btn.ai:hover {
+  background: #7c5cff;
+  color: #ffffff;
+}
+.mode-cta-btn.manual {
+  background: rgba(0, 210, 255, 0.15);
+  color: #ccf7ff;
+  border: 1.5px solid #29d8ff;
+  box-shadow: 0 0 16px rgba(0, 210, 255, 0.25);
+}
+.mode-cta-btn.manual:hover {
+  background: #00bce6;
+  color: #061018;
+}
+
+/* ------------------------------------------------------------------ */
+/* Bar Pindah Mode di Halaman Project                                 */
+/* ------------------------------------------------------------------ */
+.mode-switch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--border);
+}
+.mode-switch-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.mode-switch-tab:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+.mode-switch-tab.active.ai {
+  color: #e4d8ff;
+  background: rgba(124, 92, 255, 0.2);
+  border-color: rgba(155, 114, 255, 0.65);
+  box-shadow: 0 0 16px rgba(124, 92, 255, 0.2);
+}
+.mode-switch-tab.active.manual {
+  color: #ccf8ff;
+  background: rgba(0, 210, 255, 0.16);
+  border-color: rgba(0, 210, 255, 0.65);
+  box-shadow: 0 0 16px rgba(0, 210, 255, 0.18);
+}
+.mode-switch-tab .badge {
+  padding: 1px 7px;
+  border-radius: 99px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+/* ------------------------------------------------------------------ */
+/* OpenCut Interactive Preview HUD & Full-Video Timeline              */
+/* ------------------------------------------------------------------ */
+.ed-opencut-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+}
+.ed-page.ed-drag-over {
+  outline: 2px dashed #00d2ff;
+  outline-offset: 4px;
+}
+.ed-preview {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.ed-preview:active {
+  cursor: grabbing;
+}
+.ed-zone-hud.top {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  background: rgba(11, 11, 18, 0.72);
+  color: #d8c9ff;
+  border: 1px solid rgba(124, 92, 255, 0.55);
+  pointer-events: none;
+}
+.ed-gp-divider {
+  cursor: ns-resize !important;
+  pointer-events: auto !important;
+  height: 6px !important;
+  background: linear-gradient(90deg, #7c5cff, #00d2ff) !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 6 !important;
+}
+.ed-gp-divider-pill {
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 9.5px;
+  font-weight: 700;
+  background: #0d0e18;
+  color: #67e8f9;
+  border: 1px solid rgba(0, 210, 255, 0.65);
+  white-space: nowrap;
+}
+.ed-cam-hud {
+  position: absolute;
+  inset: 2px;
+  border: 1.5px dashed rgba(0, 210, 255, 0.78);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 4;
+}
+.ed-cam-badge {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(6, 16, 24, 0.78);
+  color: #5ce1ff;
+  border: 1px solid rgba(0, 210, 255, 0.55);
+}
+.ed-cam-handle {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  background: #00d2ff;
+  border: 2px solid #0b0b12;
+  pointer-events: auto;
+  cursor: nwse-resize;
+}
+.ed-cam-handle.tl { top: -4px; left: -4px; }
+.ed-cam-handle.tr { top: -4px; right: -4px; cursor: nesw-resize; }
+.ed-cam-handle.bl { bottom: -4px; left: -4px; cursor: nesw-resize; }
+.ed-cam-handle.br { bottom: -4px; right: -4px; }
+
+.ed-snap-line {
+  position: absolute;
+  z-index: 7;
+  pointer-events: none;
+  background: #00d2ff;
+  box-shadow: 0 0 8px #00d2ff;
+}
+.ed-snap-line.v {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1.5px;
+}
+.ed-snap-line.h {
+  left: 0;
+  right: 0;
+  top: 62%;
+  height: 1.5px;
+}
+
+/* Peta Sumber 16:9 di Panel Layout */
+.ed-minimap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, rgba(124, 92, 255, 0.14), rgba(0, 210, 255, 0.12)),
+    repeating-linear-gradient(0deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 18px),
+    repeating-linear-gradient(90deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 18px),
+    #0c0d16;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  overflow: hidden;
+  cursor: crosshair;
+  user-select: none;
+  touch-action: none;
+}
+.ed-minimap-label {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  font-size: 10px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.ed-minimap-game {
+  position: absolute;
+  top: 6%;
+  height: 88%;
+  border: 1.5px dashed #9d78ff;
+  background: rgba(124, 92, 255, 0.14);
+  border-radius: 6px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #d7c6ff;
+  cursor: ew-resize;
+}
+.ed-minimap-cam {
+  position: absolute;
+  border: 2px solid #00d2ff;
+  background: rgba(0, 210, 255, 0.24);
+  box-shadow: 0 0 12px rgba(0, 210, 255, 0.35);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 800;
+  color: #ffffff;
+  cursor: move;
+  z-index: 2;
+}
+
+/* OpenCut Full-Video Scrubber */
+.ed-full-timeline-box {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--border);
+}
+.ed-full-tl-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 7px;
+}
+.ed-full-tl-track {
+  position: relative;
+  height: 40px;
+  border-radius: 8px;
+  background: #0b0c14;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+  cursor: pointer;
+  user-select: none;
+  touch-action: none;
+}
+.ed-full-tl-ruler {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.ed-full-tl-ruler span {
+  position: absolute;
+  top: 2px;
+  transform: translateX(-50%);
+  font-size: 9.5px;
+  color: var(--dim);
+  font-family: var(--mono);
+}
+.ed-full-tl-window {
+  position: absolute;
+  top: 14px;
+  bottom: 3px;
+  background: rgba(124, 92, 255, 0.28);
+  border-top: 1.5px solid #9d78ff;
+  border-bottom: 1.5px solid #9d78ff;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  min-width: 18px;
+}
+.ed-full-tl-window.sel {
+  background: rgba(0, 210, 255, 0.26);
+  border-color: #fbbf24;
+  box-shadow: 0 0 12px rgba(251, 191, 36, 0.25);
+}
+.ed-trim-body {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  cursor: grab;
+  padding: 0 4px;
+}
+.ed-trim-body:active { cursor: grabbing; }
+.ed-trim-handle {
+  width: 8px;
+  height: 100%;
+  background: #fbbf24;
+  cursor: ew-resize;
+  flex: none;
+}
+.ed-trim-handle.left { border-radius: 4px 0 0 4px; }
+.ed-trim-handle.right { border-radius: 0 4px 4px 0; }
+.ed-full-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #ff4d6d;
+  box-shadow: 0 0 6px #ff4d6d;
+  pointer-events: none;
+  z-index: 4;
+}
+

@@ -5,12 +5,14 @@ const ED = {
   clipId: null,
   clip: null,
   job: null,
+  projectClips: [],
   source: null,
   spec: null,
   meta: null,
   summary: null,
   dirty: false,
   saving: false,
+  liveSourceMode: true,
   time: 0,
   playing: false,
   tab: "text",
@@ -73,12 +75,14 @@ async function loadEditor(clipId) {
   ED.clipId = clipId;
   ED.clip = data.clip;
   ED.job = data.job;
+  ED.projectClips = data.project_clips || [];
   ED.source = data.source;
   ED.spec = data.spec;
   ED.meta = data.meta;
   ED.hookReport = data.hook_report || null;
   ED.summary = data.summary;
   ED.dirty = false;
+  ED.liveSourceMode = true;
   ED.time = 0;
   ED.selectedText = null;
   ED.selectedSegment = 0;
@@ -131,30 +135,51 @@ async function renderEditor(clipId) {
   await loadEditor(clipId);
   const view = $("#view");
   const clip = ED.clip;
+  const backMode = clip.is_manual ? "manual" : "ai";
+  const allProjectClips = ED.projectClips || [];
   view.innerHTML = `
-    <div class="ed-page">
+    <div class="ed-page" id="ed-page-dropzone">
       <div class="ed-topbar">
-        <div class="row" style="gap:10px;min-width:0">
-          <a class="btn small ghost" href="#/project/${esc(clip.job_id)}">← Project</a>
+        <div class="row" style="gap:8px;min-width:0;flex-wrap:wrap">
+          <a class="btn small ghost" href="#/project/${esc(clip.job_id)}?mode=${backMode}">← Project (${clip.is_manual ? "Manual" : "AI"})</a>
+          <button class="btn small ghost" data-ed="open-mode-modal" title="Pilih Mode Render Hook AI atau Edit Manual">⇄ Pilih Mode</button>
+          ${
+            allProjectClips.length > 0
+              ? `<select class="select" id="ed-clip-switcher" style="width:auto;max-width:220px;padding:7px 28px 7px 10px" title="Pindah antar clip di project ini">
+                   ${allProjectClips
+                     .map(
+                       (pc) => `<option value="${esc(pc.id)}" ${pc.id === clip.id ? "selected" : ""}>
+                         ${pc.is_manual ? "✂ Manual:" : "🪄 AI:"} ${esc((pc.title || "Clip").slice(0, 28))} (${edFmt(pc.duration)})
+                       </option>`
+                     )
+                     .join("")}
+                 </select>`
+              : ""
+          }
+          <button class="btn small ghost" data-ed="new-manual-clip" title="Tambah potongan clip manual baru dari video full ini">+ Clip Manual</button>
+          <button class="btn small ghost" data-ed="drop-local-video" title="Buka / Drag & Drop file video full lokal dari komputer">📂 Buka Video Lokal</button>
+          <input type="file" id="ed-local-video-input" accept="video/*,.mkv,.webm,.mov,.mp4" hidden />
           <div style="min-width:0">
             <input class="ed-title-input" id="ed-title" value="${esc(clip.title)}" maxlength="100" />
             <div class="tiny dim" id="ed-meta-line"></div>
           </div>
         </div>
-        <div class="row" style="gap:8px">
+        <div class="row" style="gap:8px;flex-wrap:wrap">
           <span id="ed-save-state" class="tiny dim">✓ tersimpan</span>
           <select class="select" id="ed-template" style="width:auto;padding:8px 34px 8px 12px">
             <option value="">Template…</option>
             ${ED.meta.templates.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}
           </select>
           <button class="btn small ghost" id="ed-cam-btn" data-ed="cam-toggle"
-            title="Kamera mengikuti pembicara yang sedang tampil. Klik untuk menyalakan/mematikan.">🎯 <span id="ed-cam-label">Kamera</span></button>
+            title="Kamera mengikuti pembicara / gameplay. Klik untuk menyalakan/mematikan.">🎯 <span id="ed-cam-label">Kamera</span></button>
           <button class="btn small" data-ed="auto-subtitle">✨ Auto subtitle</button>
           <select class="select" id="ed-resolution" style="width:auto;padding:8px 34px 8px 12px">
             ${ED.meta.resolutions.map((r) => `<option value="${r.height}" ${Number(ED.spec.output.height) === r.height ? "selected" : ""}>${esc(r.label)}</option>`).join("")}
           </select>
           <button class="btn small primary" data-ed="render">Render</button>
           <a class="btn small ghost" id="ed-download" href="/api/clips/${esc(clip.id)}/download" ${clip.has_file ? "" : "hidden"}>Unduh</a>
+          <button class="btn small yt" data-ed="upload-yt" ${clip.has_file ? "" : "disabled"}
+            title="Upload hasil render ini ke YouTube Shorts">Upload YT</button>
           <button class="btn small tt" data-ed="upload-tiktok" ${clip.has_file ? "" : "disabled"}
             title="Kirim clip hasil render ini ke TikTok">TikTok</button>
         </div>
@@ -162,13 +187,46 @@ async function renderEditor(clipId) {
 
       <div class="ed-grid">
         <div class="ed-left">
+          <div class="ed-opencut-bar">
+            <div class="row" style="gap:6px;flex-wrap:wrap">
+              <button class="btn small ${ED.spec.layout === "gameplay" ? "primary" : "ghost"}" data-ed="quick-layout" data-layout="gameplay">
+                🎮 Gameplay (Atas Game · Bawah Host)
+              </button>
+              <button class="btn small ${ED.spec.layout === "crop" ? "primary" : "ghost"}" data-ed="quick-layout" data-layout="crop">
+                🎙 Fokus Host / Podcast (9:16)
+              </button>
+              <button class="btn small ${ED.spec.layout === "fit" ? "primary" : "ghost"}" data-ed="quick-layout" data-layout="fit">
+                🖼 Video Utuh + Blur
+              </button>
+            </div>
+            ${
+              clip.has_file
+                ? `<button class="btn small ghost" data-ed="toggle-preview-source" id="ed-preview-mode-btn" title="Ganti antara Kanvas Interaktif dan Hasil Render MP4">
+                     ${ED.liveSourceMode ? "🎯 Mode Kanvas Interaktif" : "🎞 Memutar Hasil Render (.mp4)"}
+                   </button>`
+                : `<span class="tiny dim">🖱 Geser kamera langsung pakai mouse di preview · Scroll = Zoom wajah host</span>`
+            }
+          </div>
+
           <div class="ed-preview-wrap">
             <div class="ed-preview" id="ed-preview">
               <video id="ed-video" playsinline preload="auto"></video>
-              <div id="ed-gp-divider" class="ed-gp-divider" hidden></div>
+              <div id="ed-top-hud" class="ed-zone-hud top" hidden>🎮 Gameplay (Atas) · Drag kiri/kanan</div>
+              <div id="ed-gp-divider" class="ed-gp-divider" hidden title="Tarik ke atas/bawah untuk atur tinggi Gameplay vs Host">
+                <span class="ed-gp-divider-pill">⇅ Batas Atas Game / Bawah Host</span>
+              </div>
               <div id="ed-cam-wrap" class="ed-cam-wrap" hidden>
                 <video id="ed-video-cam" muted playsinline preload="auto"></video>
+                <div class="ed-cam-hud" id="ed-cam-hud">
+                  <span class="ed-cam-badge">🎯 Host di Bawah · Drag = Geser · Scroll = Zoom</span>
+                  <i class="ed-cam-handle tl" data-cam-handle="tl"></i>
+                  <i class="ed-cam-handle tr" data-cam-handle="tr"></i>
+                  <i class="ed-cam-handle bl" data-cam-handle="bl"></i>
+                  <i class="ed-cam-handle br" data-cam-handle="br"></i>
+                </div>
               </div>
+              <div id="ed-snap-v" class="ed-snap-line v" hidden></div>
+              <div id="ed-snap-h" class="ed-snap-line h" hidden></div>
               <div class="ed-overlay" id="ed-overlay">
                 <div class="ed-caption" id="ed-caption"></div>
                 <div id="ed-texts"></div>
@@ -184,13 +242,15 @@ async function renderEditor(clipId) {
             <button class="btn small ghost" data-ed="play">▶</button>
             <span class="mono tiny" id="ed-time">0:00 / 0:00</span>
             <div class="ed-seek" id="ed-seek"><i></i></div>
-            <button class="btn small ghost" data-ed="mark-in" title="Set awal segmen ke playhead">⇤</button>
-            <button class="btn small ghost" data-ed="mark-out" title="Set akhir segmen ke playhead">⇥</button>
+            <button class="btn small ghost" data-ed="mark-in" title="Set awal segmen ke playhead">⇤ Awal</button>
+            <button class="btn small ghost" data-ed="seg-split" title="Potong (Split) segmen tepat di posisi playhead">✂ Potong</button>
+            <button class="btn small ghost" data-ed="mark-out" title="Set akhir segmen ke playhead">Akhir ⇥</button>
           </div>
 
+          <div class="ed-full-timeline-box" id="ed-full-timeline"></div>
           <div class="ed-timeline" id="ed-timeline"></div>
           <div class="tiny dim" style="margin-top:6px">
-            Timeline = potongan video sumber yang dipakai. Klik segmen untuk mengatur, atau pakai tombol ⇤ ⇥ saat video diputar.
+            <b>Timeline Video Full (Gaya OpenCut):</b> Tarik gagang kuning kiri/kanan pada batang <b>Video Full</b> di atas untuk mengambil bagian mana saja dari seluruh durasi video (${edFmt(ED.source && ED.source.duration)}), atau geser fokus kamera langsung di layar preview.
           </div>
           <div id="ed-duration-gate"></div>
         </div>
@@ -198,9 +258,9 @@ async function renderEditor(clipId) {
         <div class="ed-right">
           <div class="ed-tabs">
             ${[
+              ["layout", "Layout & Kamera"],
               ["text", "Teks"],
               ["caption", "Caption"],
-              ["layout", "Layout & Logo"],
               ["export", "Export & 4K"],
             ]
               .map(([id, label]) => `<button class="ed-tab ${ED.tab === id ? "active" : ""}" data-ed-tab="${id}">${label}</button>`)
@@ -213,6 +273,7 @@ async function renderEditor(clipId) {
   `;
 
   bindEditorEvents();
+  bindOpenCutPreviewInteractions();
   renderPreviewSource();
   renderTimeline();
   renderPanel();
@@ -242,14 +303,22 @@ function refreshChrome() {
   const meta = edEl("ed-meta-line");
   if (meta) {
     meta.textContent =
-      `${ED.spec.segments.length} segmen · ${edFmt(dur)} · ${res.width}×${res.height} · ` +
-      `${(ED.spec.subtitles || []).filter((s) => !s.hidden).length} baris caption · ` +
-      `${(ED.spec.texts || []).length} teks`;
+      `Video Full ${edFmt(ED.source && ED.source.duration)} · Clip ${edFmt(dur)} (${ED.spec.segments.length} segmen) · ${res.width}×${res.height} · ` +
+      `${(ED.spec.subtitles || []).filter((s) => !s.hidden).length} caption`;
   }
   const timeLabel = edEl("ed-time");
   if (timeLabel) timeLabel.textContent = `${edFmt(ED.time)} / ${edFmt(dur)}`;
   const gate = edEl("ed-duration-gate");
   if (gate) gate.innerHTML = durationGateHtml(dur);
+  $$('[data-ed="quick-layout"]').forEach((btn) => {
+    const active = btn.dataset.layout === ED.spec.layout;
+    btn.classList.toggle("primary", active);
+    btn.classList.toggle("ghost", !active);
+  });
+  const modeBtn = edEl("ed-preview-mode-btn");
+  if (modeBtn) {
+    modeBtn.textContent = ED.liveSourceMode ? "🎯 Mode Kanvas Interaktif" : "🎞 Memutar Hasil Render (.mp4)";
+  }
   updateSaveBadge();
 }
 
@@ -263,7 +332,7 @@ function durationGateHtml(dur) {
   }
   const short = dur < low;
   return `<div class="ed-warn" style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <span>⚠ Durasi ${edFmt(dur)} ${short ? "kurang dari 1 menit" : "lebih dari 3 menit"} — Clipper memakai clip 1–3 menit.</span>
+      <span>⚠ Durasi ${edFmt(dur)} ${short ? "kurang dari 1 menit" : "lebih dari 3 menit"} — rekomendasi Shorts 1–3 menit (opsional untuk Edit Manual).</span>
       <button class="btn small" data-ed="fix-duration" data-target="${short ? low : high}">
         ${short ? "Panjangkan ke 1 menit" : "Pendekkan ke 3 menit"}
       </button>
@@ -278,56 +347,77 @@ function updateGameplayPreviewLayout() {
   const camWrap = edEl("ed-cam-wrap");
   const camVideo = edEl("ed-video-cam");
   const divider = edEl("ed-gp-divider");
+  const topHud = edEl("ed-top-hud");
   if (!video || !ED.spec) return;
 
-  const hasFile = ED.clip && ED.clip.has_file && !ED.dirty;
-  const isLiveGameplay = ED.spec.layout === "gameplay" && !hasFile;
-  if (!isLiveGameplay) {
+  const useRenderedFile = Boolean(ED.clip && ED.clip.has_file && !ED.dirty && !ED.liveSourceMode);
+  if (useRenderedFile) {
     video.style.height = "100%";
     video.style.objectFit = "contain";
     video.style.objectPosition = "50% 50%";
     if (camWrap) camWrap.hidden = true;
     if (divider) divider.hidden = true;
+    if (topHud) topHud.hidden = true;
     if (camVideo && !camVideo.paused) camVideo.pause();
     return;
   }
 
-  const gp = ED.spec.gameplay || {};
-  const split = Math.max(0.45, Math.min(0.75, Number(gp.split || 0.62)));
-  const gameX = Math.max(0, Math.min(1, Number(gp.game_x ?? 0.56)));
-  const camX = Math.max(0.04, Math.min(0.96, Number(gp.cam_x ?? 0.16)));
-  const camY = Math.max(0.06, Math.min(0.94, Number(gp.cam_y ?? 0.78)));
-  const camScale = Math.max(0.18, Math.min(0.65, Number(gp.cam_scale ?? 0.26)));
+  if (ED.spec.layout === "gameplay") {
+    const gp = ED.spec.gameplay || {};
+    const split = Math.max(0.45, Math.min(0.75, Number(gp.split || 0.62)));
+    const gameX = Math.max(0, Math.min(1, Number(gp.game_x ?? 0.56)));
+    const camX = Math.max(0.04, Math.min(0.96, Number(gp.cam_x ?? 0.16)));
+    const camY = Math.max(0.06, Math.min(0.94, Number(gp.cam_y ?? 0.78)));
+    const camScale = Math.max(0.16, Math.min(0.65, Number(gp.cam_scale ?? 0.26)));
 
-  video.style.height = (split * 100).toFixed(2) + "%";
-  video.style.objectFit = "cover";
-  video.style.objectPosition = `${(gameX * 100).toFixed(1)}% 50%`;
+    video.style.height = (split * 100).toFixed(2) + "%";
+    video.style.objectFit = "cover";
+    video.style.objectPosition = `${(gameX * 100).toFixed(1)}% 50%`;
 
-  if (divider) {
-    divider.hidden = false;
-    divider.style.top = `calc(${(split * 100).toFixed(2)}% - 1.5px)`;
-  }
-  if (camWrap && camVideo) {
-    camWrap.hidden = false;
-    camWrap.style.height = ((1 - split) * 100).toFixed(2) + "%";
-    const src = `/api/jobs/${ED.clip.job_id}/source`;
-    if (camVideo.dataset.src !== src) {
-      camVideo.dataset.src = src;
-      camVideo.src = src;
+    if (topHud) topHud.hidden = false;
+    if (divider) {
+      divider.hidden = false;
+      divider.style.top = `calc(${(split * 100).toFixed(2)}% - 1.5px)`;
     }
-    const zoom = Math.max(1.4, Math.min(4.8, 1 / camScale));
-    const tx = (0.5 - camX) * 100 * zoom;
-    const ty = (0.47 - camY) * 100 * zoom;
-    camVideo.style.transformOrigin = "50% 50%";
-    camVideo.style.transform = `translate(${tx.toFixed(1)}%, ${ty.toFixed(1)}%) scale(${zoom.toFixed(2)})`;
+    if (camWrap && camVideo) {
+      camWrap.hidden = false;
+      camWrap.style.height = ((1 - split) * 100).toFixed(2) + "%";
+      const src = `/api/jobs/${ED.clip.job_id}/source`;
+      if (camVideo.dataset.src !== src) {
+        camVideo.dataset.src = src;
+        camVideo.src = src;
+      }
+      const zoom = Math.max(1.4, Math.min(5.2, 1 / camScale));
+      const tx = (0.5 - camX) * 100 * zoom;
+      const ty = (0.47 - camY) * 100 * zoom;
+      camVideo.style.transformOrigin = "50% 50%";
+      camVideo.style.transform = `translate(${tx.toFixed(1)}%, ${ty.toFixed(1)}%) scale(${zoom.toFixed(2)})`;
+    }
+    return;
+  }
+
+  if (camWrap) camWrap.hidden = true;
+  if (divider) divider.hidden = true;
+  if (topHud) topHud.hidden = true;
+  if (camVideo && !camVideo.paused) camVideo.pause();
+
+  if (ED.spec.layout === "crop") {
+    const focus = Math.max(0, Math.min(1, Number(ED.spec.crop_focus ?? 0.5)));
+    video.style.height = "100%";
+    video.style.objectFit = "cover";
+    video.style.objectPosition = `${(focus * 100).toFixed(1)}% 50%`;
+  } else {
+    video.style.height = "100%";
+    video.style.objectFit = "contain";
+    video.style.objectPosition = "50% 50%";
   }
 }
 
 function renderPreviewSource() {
   const video = edEl("ed-video");
   if (!video) return;
-  const hasFile = ED.clip.has_file && !ED.dirty;
-  const src = hasFile
+  const useRenderedFile = Boolean(ED.clip.has_file && !ED.dirty && !ED.liveSourceMode);
+  const src = useRenderedFile
     ? `/api/clips/${ED.clipId}/video?v=${Math.round(Date.now() / 1000)}`
     : `/api/jobs/${ED.clip.job_id}/source`;
   if (video.dataset.src !== src) {
@@ -340,7 +430,7 @@ function renderPreviewSource() {
   video.volume = 0.85;
   updateGameplayPreviewLayout();
   // posisi awal = awal segmen pertama
-  seekTo(0);
+  seekTo(ED.time || 0);
 }
 
 function seekTo(outTime) {
@@ -379,6 +469,12 @@ function updatePlayhead() {
   const timeline = edEl("ed-timeline");
   if (marker && timeline && dur > 0) {
     marker.style.left = ((ED.time / dur) * 100).toFixed(2) + "%";
+  }
+  const fullMarker = edEl("ed-full-playhead");
+  const srcDur = Math.max(0.1, Number(ED.source && ED.source.duration) || dur || 1);
+  if (fullMarker && ED.spec) {
+    const srcTime = outToSrc(ED.time, ED.spec.segments);
+    fullMarker.style.left = Math.max(0, Math.min(100, (srcTime / srcDur) * 100)).toFixed(2) + "%";
   }
   const timeLabel = edEl("ed-time");
   if (timeLabel) timeLabel.textContent = `${edFmt(ED.time)} / ${edFmt(dur)}`;
@@ -498,9 +594,351 @@ function hexToRgba(hex, alpha) {
 }
 
 /* ------------------------------------------------------------------ */
+/* OpenCut Full-Video Scrubber & Direct Canvas Interactions            */
+/* ------------------------------------------------------------------ */
+function renderFullVideoTimeline() {
+  const box = edEl("ed-full-timeline");
+  if (!box || !ED.spec) return;
+  const srcDur = Math.max(1, Number(ED.source && ED.source.duration) || specDuration(ED.spec) || 60);
+  const segs = ED.spec.segments || [];
+  const activeSeg = segs[ED.selectedSegment] || segs[0] || { start: 0, end: 30 };
+
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((p) => ({
+    pct: (p * 100).toFixed(1),
+    label: edFmt(p * srcDur),
+  }));
+
+  box.innerHTML = `
+    <div class="ed-full-tl-head">
+      <span class="tiny">
+        <b>🎞 Peta Video Full (0:00 → ${edFmt(srcDur)}):</b>
+        Segmen aktif <span class="mono">${edFmt(activeSeg.start, true)} – ${edFmt(activeSeg.end, true)}</span>
+        (durasi ${edFmt(Math.max(0, activeSeg.end - activeSeg.start))})
+      </span>
+      <div class="row" style="gap:6px">
+        <button class="btn small ghost" data-ed="seg-expand-left" title="Perluas awal segmen 5 detik ke kiri">−5s Awal</button>
+        <button class="btn small ghost" data-ed="seg-expand-right" title="Perluas akhir segmen 5 detik ke kanan">+5s Akhir</button>
+        <button class="btn small ghost" data-ed="seg-full-video" title="Gunakan seluruh durasi video full">Pakai Full Video</button>
+      </div>
+    </div>
+    <div class="ed-full-tl-track" id="ed-full-tl-track">
+      <div class="ed-full-tl-ruler">
+        ${ticks.map((t) => `<span style="left:${t.pct}%">${t.label}</span>`).join("")}
+      </div>
+      ${segs
+        .map((seg, idx) => {
+          const leftPct = Math.max(0, Math.min(100, (Number(seg.start) / srcDur) * 100));
+          const widthPct = Math.max(0.8, Math.min(100 - leftPct, ((Number(seg.end) - Number(seg.start)) / srcDur) * 100));
+          const isSel = idx === ED.selectedSegment;
+          return `
+            <div class="ed-full-tl-window ${isSel ? "sel" : ""}" data-full-seg="${idx}"
+                 style="left:${leftPct.toFixed(3)}%;width:${widthPct.toFixed(3)}%">
+              <i class="ed-trim-handle left" data-trim-side="left" data-trim-seg="${idx}" title="Tarik untuk geser titik AWAL dari video full"></i>
+              <div class="ed-trim-body" data-trim-side="body" data-trim-seg="${idx}" title="Tarik untuk menggeser posisi segmen di sepanjang video full">
+                <span>#${idx + 1} · ${edFmt(seg.start)}–${edFmt(seg.end)}</span>
+              </div>
+              <i class="ed-trim-handle right" data-trim-side="right" data-trim-seg="${idx}" title="Tarik untuk geser titik AKHIR dari video full"></i>
+            </div>
+          `;
+        })
+        .join("")}
+      <div class="ed-full-playhead" id="ed-full-playhead"></div>
+    </div>
+  `;
+
+  bindFullTimelineInteractions(srcDur);
+}
+
+function bindFullTimelineInteractions(srcDur) {
+  const track = edEl("ed-full-tl-track");
+  if (!track) return;
+
+  let dragState = null;
+
+  track.addEventListener("pointerdown", (e) => {
+    const handle = e.target.closest("[data-trim-side]");
+    const rect = track.getBoundingClientRect();
+    if (!rect.width) return;
+
+    if (handle) {
+      e.preventDefault();
+      e.stopPropagation();
+      const idx = Number(handle.dataset.trimSeg || 0);
+      const side = handle.dataset.trimSide;
+      ED.selectedSegment = idx;
+      const seg = ED.spec.segments[idx];
+      if (!seg) return;
+      try {
+        track.setPointerCapture(e.pointerId);
+      } catch (err) {}
+      dragState = {
+        pointerId: e.pointerId,
+        idx,
+        side,
+        startX: e.clientX,
+        origStart: Number(seg.start),
+        origEnd: Number(seg.end),
+        widthPx: rect.width,
+      };
+      return;
+    }
+
+    // Klik langsung di area kosong batang Video Full → lompat ke detik tersebut
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const clickedSrcTime = ratio * srcDur;
+    const seg = ED.spec.segments[ED.selectedSegment];
+    if (seg && clickedSrcTime >= seg.start && clickedSrcTime <= seg.end) {
+      const segsOut = segmentsWithOut(ED.spec.segments);
+      const curOut = segsOut[ED.selectedSegment];
+      if (curOut) {
+        const localOut = curOut.outStart + (clickedSrcTime - seg.start) / Math.max(0.5, Number(seg.speed) || 1);
+        seekTo(localOut);
+      }
+    } else if (seg) {
+      // Geser jendela segmen aktif ke titik yang diklik di video full
+      const dur = Math.max(2, Number(seg.end) - Number(seg.start));
+      const newStart = Math.max(0, Math.min(srcDur - dur, clickedSrcTime - dur / 2));
+      seg.start = Number(newStart.toFixed(2));
+      seg.end = Number(Math.min(srcDur, newStart + dur).toFixed(2));
+      ED.liveSourceMode = true;
+      scheduleSave();
+      renderTimeline();
+      renderPanel();
+      seekTo(0);
+    }
+  });
+
+  track.addEventListener("pointermove", (e) => {
+    if (!dragState || e.pointerId !== dragState.pointerId) return;
+    const seg = ED.spec.segments[dragState.idx];
+    if (!seg) return;
+    const deltaSec = ((e.clientX - dragState.startX) / Math.max(1, dragState.widthPx)) * srcDur;
+    if (dragState.side === "left") {
+      const nextStart = Math.max(0, Math.min(dragState.origEnd - 1.0, dragState.origStart + deltaSec));
+      seg.start = Number(nextStart.toFixed(2));
+    } else if (dragState.side === "right") {
+      const nextEnd = Math.max(dragState.origStart + 1.0, Math.min(srcDur, dragState.origEnd + deltaSec));
+      seg.end = Number(nextEnd.toFixed(2));
+    } else if (dragState.side === "body") {
+      const len = Math.max(1.0, dragState.origEnd - dragState.origStart);
+      const nextStart = Math.max(0, Math.min(srcDur - len, dragState.origStart + deltaSec));
+      seg.start = Number(nextStart.toFixed(2));
+      seg.end = Number((nextStart + len).toFixed(2));
+    }
+    ED.liveSourceMode = true;
+    const video = edEl("ed-video");
+    if (video) {
+      try {
+        video.currentTime = dragState.side === "right" ? seg.end : seg.start;
+      } catch (err) {}
+    }
+    renderFullVideoTimeline();
+    updatePlayhead();
+    refreshChrome();
+  });
+
+  const finishDrag = (e) => {
+    if (!dragState || (e && e.pointerId !== dragState.pointerId)) return;
+    try {
+      track.releasePointerCapture(dragState.pointerId);
+    } catch (err) {}
+    dragState = null;
+    scheduleSave();
+    renderTimeline();
+    renderPanel();
+  };
+
+  track.addEventListener("pointerup", finishDrag);
+  track.addEventListener("pointercancel", finishDrag);
+}
+
+function bindOpenCutPreviewInteractions() {
+  const preview = edEl("ed-preview");
+  const video = edEl("ed-video");
+  const divider = edEl("ed-gp-divider");
+  const camWrap = edEl("ed-cam-wrap");
+  const snapV = edEl("ed-snap-v");
+  const snapH = edEl("ed-snap-h");
+  if (!preview || !video) return;
+
+  let ptrState = null;
+
+  const showSnap = (vOn, hOn) => {
+    if (snapV) snapV.hidden = !vOn;
+    if (snapH) snapH.hidden = !hOn;
+  };
+
+  // Scroll wheel di atas panel Host (bawah) = Zoom In / Out wajah host secara langsung
+  if (camWrap) {
+    camWrap.addEventListener(
+      "wheel",
+      (e) => {
+        if (!ED.spec || ED.spec.layout !== "gameplay") return;
+        e.preventDefault();
+        ED.liveSourceMode = true;
+        if (!ED.spec.gameplay) {
+          ED.spec.gameplay = { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.28, game_x: 0.56, split: 0.62 };
+        }
+        const cur = Number(ED.spec.gameplay.cam_scale ?? 0.28);
+        const delta = e.deltaY > 0 ? 0.02 : -0.02;
+        ED.spec.gameplay.cam_scale = Number(Math.max(0.16, Math.min(0.6, cur + delta)).toFixed(3));
+        updateGameplayPreviewLayout();
+        scheduleSave();
+        if (ED.tab === "layout") renderPanel();
+      },
+      { passive: false }
+    );
+  }
+
+  preview.addEventListener("pointerdown", (e) => {
+    if (!ED.spec) return;
+    if (e.target.closest(".ed-render-badge")) return;
+
+    const rect = preview.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+
+    ED.liveSourceMode = true;
+    const handleEl = e.target.closest("[data-cam-handle]");
+    const onDivider = e.target.closest("#ed-gp-divider");
+    const onCamWrap = e.target.closest("#ed-cam-wrap");
+
+    if (ED.spec.layout === "gameplay") {
+      if (!ED.spec.gameplay) {
+        ED.spec.gameplay = { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.28, game_x: 0.56, split: 0.62, corner: "kiri bawah" };
+      }
+      const gp = ED.spec.gameplay;
+      let mode = "top-game";
+      if (onDivider) mode = "divider";
+      else if (handleEl) mode = "cam-scale";
+      else if (onCamWrap) mode = "bottom-cam";
+
+      e.preventDefault();
+      try {
+        preview.setPointerCapture(e.pointerId);
+      } catch (err) {}
+      ptrState = {
+        pointerId: e.pointerId,
+        mode,
+        startX: e.clientX,
+        startY: e.clientY,
+        rect,
+        origGameX: Number(gp.game_x ?? 0.56),
+        origCamX: Number(gp.cam_x ?? 0.16),
+        origCamY: Number(gp.cam_y ?? 0.78),
+        origCamScale: Number(gp.cam_scale ?? 0.28),
+        origSplit: Number(gp.split ?? 0.62),
+      };
+    } else if (ED.spec.layout === "crop") {
+      e.preventDefault();
+      try {
+        preview.setPointerCapture(e.pointerId);
+      } catch (err) {}
+      ptrState = {
+        pointerId: e.pointerId,
+        mode: "crop-focus",
+        startX: e.clientX,
+        startY: e.clientY,
+        rect,
+        origFocus: Number(ED.spec.crop_focus ?? 0.5),
+      };
+    }
+  });
+
+  preview.addEventListener("pointermove", (e) => {
+    if (!ptrState || e.pointerId !== ptrState.pointerId || !ED.spec) return;
+    const dx = (e.clientX - ptrState.startX) / Math.max(1, ptrState.rect.width);
+    const dy = (e.clientY - ptrState.startY) / Math.max(1, ptrState.rect.height);
+
+    if (ptrState.mode === "divider") {
+      let nextSplit = Math.max(0.48, Math.min(0.72, ptrState.origSplit + dy));
+      if (Math.abs(nextSplit - 0.62) < 0.015) {
+        nextSplit = 0.62;
+        showSnap(false, true);
+      } else {
+        showSnap(false, false);
+      }
+      ED.spec.gameplay.split = Number(nextSplit.toFixed(2));
+      if (ED.spec.captions) ED.spec.captions.y = ED.spec.gameplay.split;
+    } else if (ptrState.mode === "top-game") {
+      let nextGameX = Math.max(0, Math.min(1, ptrState.origGameX - dx * 0.85));
+      if (Math.abs(nextGameX - 0.5) < 0.025) {
+        nextGameX = 0.5;
+        showSnap(true, false);
+      } else {
+        showSnap(false, false);
+      }
+      ED.spec.gameplay.game_x = Number(nextGameX.toFixed(3));
+    } else if (ptrState.mode === "bottom-cam") {
+      const scale = Math.max(0.16, Number(ED.spec.gameplay.cam_scale || 0.28));
+      const nextCamX = Math.max(0.04, Math.min(0.96, ptrState.origCamX - dx * scale * 1.35));
+      const nextCamY = Math.max(0.06, Math.min(0.94, ptrState.origCamY - dy * scale * 1.8));
+      ED.spec.gameplay.cam_x = Number(nextCamX.toFixed(3));
+      ED.spec.gameplay.cam_y = Number(nextCamY.toFixed(3));
+      ED.spec.gameplay.corner = `${nextCamX < 0.5 ? "kiri" : "kanan"} ${nextCamY < 0.5 ? "atas" : "bawah"}`;
+    } else if (ptrState.mode === "cam-scale") {
+      const nextScale = Math.max(0.16, Math.min(0.6, ptrState.origCamScale - dy * 0.6));
+      ED.spec.gameplay.cam_scale = Number(nextScale.toFixed(3));
+    } else if (ptrState.mode === "crop-focus") {
+      let nextFocus = Math.max(0, Math.min(1, ptrState.origFocus - dx * 0.85));
+      if (Math.abs(nextFocus - 0.5) < 0.025) {
+        nextFocus = 0.5;
+        showSnap(true, false);
+      } else {
+        showSnap(false, false);
+      }
+      ED.spec.crop_focus = Number(nextFocus.toFixed(3));
+      if (ED.spec.framing) ED.spec.framing.mode = "manual";
+    }
+
+    renderOverlay();
+    refreshChrome();
+    syncMinimapBoxes();
+  });
+
+  const endPreviewDrag = (e) => {
+    if (!ptrState || (e && e.pointerId !== ptrState.pointerId)) return;
+    try {
+      preview.releasePointerCapture(ptrState.pointerId);
+    } catch (err) {}
+    ptrState = null;
+    showSnap(false, false);
+    scheduleSave();
+    if (ED.tab === "layout") renderPanel();
+  };
+
+  preview.addEventListener("pointerup", endPreviewDrag);
+  preview.addEventListener("pointercancel", endPreviewDrag);
+}
+
+function syncMinimapBoxes() {
+  const camBox = edEl("ed-minimap-cam");
+  const gameBox = edEl("ed-minimap-game");
+  if (!ED.spec || !ED.spec.gameplay) return;
+  const gp = ED.spec.gameplay;
+  const camScale = Math.max(0.16, Math.min(0.6, Number(gp.cam_scale ?? 0.28)));
+  const camX = Math.max(0.04, Math.min(0.96, Number(gp.cam_x ?? 0.16)));
+  const camY = Math.max(0.06, Math.min(0.94, Number(gp.cam_y ?? 0.78)));
+  const gameX = Math.max(0, Math.min(1, Number(gp.game_x ?? 0.56)));
+  if (camBox) {
+    const wPct = camScale * 100;
+    const hPct = camScale * 100;
+    camBox.style.width = `${wPct.toFixed(1)}%`;
+    camBox.style.height = `${hPct.toFixed(1)}%`;
+    camBox.style.left = `${Math.max(0, Math.min(100 - wPct, camX * 100 - wPct / 2)).toFixed(1)}%`;
+    camBox.style.top = `${Math.max(0, Math.min(100 - hPct, camY * 100 - hPct / 2)).toFixed(1)}%`;
+  }
+  if (gameBox) {
+    const gw = 52;
+    gameBox.style.width = `${gw}%`;
+    gameBox.style.left = `${Math.max(0, Math.min(100 - gw, gameX * (100 - gw))).toFixed(1)}%`;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* timeline                                                          */
 /* ------------------------------------------------------------------ */
 function renderTimeline() {
+  renderFullVideoTimeline();
   const box = edEl("ed-timeline");
   if (!box) return;
   const segments = segmentsWithOut(ED.spec.segments);
@@ -786,13 +1224,24 @@ function panelLayoutHtml() {
   const spec = ED.spec;
   const bg = spec.background || {};
   const logo = spec.logo || {};
-  const gp = spec.gameplay || { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.32, game_x: 0.56, split: 0.62 };
+  const gp = spec.gameplay || { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.28, game_x: 0.56, split: 0.62 };
+  const camScale = Math.max(0.16, Math.min(0.6, Number(gp.cam_scale ?? 0.28)));
+  const camX = Math.max(0.04, Math.min(0.96, Number(gp.cam_x ?? 0.16)));
+  const camY = Math.max(0.06, Math.min(0.94, Number(gp.cam_y ?? 0.78)));
+  const gameX = Math.max(0, Math.min(1, Number(gp.game_x ?? 0.56)));
+  const camW = camScale * 100;
+  const camH = camScale * 100;
+  const camLeft = Math.max(0, Math.min(100 - camW, camX * 100 - camW / 2));
+  const camTop = Math.max(0, Math.min(100 - camH, camY * 100 - camH / 2));
+  const gameW = 52;
+  const gameLeft = Math.max(0, Math.min(100 - gameW, gameX * (100 - gameW)));
+
   return `
     ${fieldRow("Layout video", `<select class="select" data-spec="layout">
       ${[
-        ["fit", "Video utuh + background (fokus topik)"],
-        ["crop", "Crop penuh 9:16 (fokus pembicara / podcast)"],
-        ["gameplay", "Gameplay (atas game, bawah facecam host)"],
+        ["gameplay", "Gameplay (Atas Game · Bawah Host Berbicara)"],
+        ["crop", "Crop penuh 9:16 (Fokus Pembicara / Podcast)"],
+        ["fit", "Video utuh + background (Fokus Topik)"],
         ["black", "Letterbox hitam"],
       ]
         .map(([v, l]) => `<option value="${v}" ${spec.layout === v ? "selected" : ""}>${l}</option>`)
@@ -802,24 +1251,43 @@ function panelLayoutHtml() {
       spec.layout === "gameplay"
         ? `
     <div class="ed-hook-box" style="margin-bottom:10px">
-      <div class="tiny" style="margin-bottom:6px"><b>Mode Gameplay:</b> Bagian atas menampilkan gameplay, bagian bawah menampilkan facecam host YouTuber.</div>
-      <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">
-        <button class="btn small ghost" data-gp-preset="0.16,0.78,0.56,kiri bawah">Facecam Kiri Bawah</button>
-        <button class="btn small ghost" data-gp-preset="0.16,0.22,0.56,kiri atas">Facecam Kiri Atas</button>
-        <button class="btn small ghost" data-gp-preset="0.84,0.78,0.44,kanan bawah">Facecam Kanan Bawah</button>
-        <button class="btn small ghost" data-gp-preset="0.84,0.22,0.44,kanan atas">Facecam Kanan Atas</button>
+      <div class="tiny" style="margin-bottom:8px">
+        <b>Mode Gameplay Interaktif (Gaya OpenCut):</b><br/>
+        • <b>Panel Atas (62%):</b> Gameplay utuh<br/>
+        • <b>Panel Bawah (38%):</b> Fokus wajah Host/YouTuber yang berbicara<br/>
+        Geser kotak langsung di layar Preview kiri atau di peta sumber 16:9 di bawah:
+      </div>
+
+      <div class="ed-minimap" id="ed-minimap" title="Klik / tarik kotak biru ke arah wajah Host, atau kotak ungu ke area Gameplay">
+        <div class="ed-minimap-label">Peta Sumber 16:9 (Tarik Kotak Fokus)</div>
+        <div class="ed-minimap-game" id="ed-minimap-game" data-minimap-drag="game"
+             style="left:${gameLeft.toFixed(1)}%;width:${gameW}%">
+          <span>🎮 Gameplay (Atas)</span>
+        </div>
+        <div class="ed-minimap-cam" id="ed-minimap-cam" data-minimap-drag="cam"
+             style="left:${camLeft.toFixed(1)}%;top:${camTop.toFixed(1)}%;width:${camW.toFixed(1)}%;height:${camH.toFixed(1)}%">
+          <span>🎯 Host (Bawah)</span>
+        </div>
+      </div>
+
+      <div class="row" style="gap:6px;flex-wrap:wrap;margin:8px 0">
+        <button class="btn small ghost" data-gp-preset="0.16,0.78,0.56,kiri bawah">Host Kiri Bawah</button>
+        <button class="btn small ghost" data-gp-preset="0.16,0.22,0.56,kiri atas">Host Kiri Atas</button>
+        <button class="btn small ghost" data-gp-preset="0.84,0.78,0.44,kanan bawah">Host Kanan Bawah</button>
+        <button class="btn small ghost" data-gp-preset="0.84,0.22,0.44,kanan atas">Host Kanan Atas</button>
+        <button class="btn small ghost" data-gp-preset="0.50,0.78,0.50,tengah bawah">Host Tengah Bawah</button>
       </div>
       <div class="ed-two">
-        ${fieldRow("Facecam X (kiri–kanan)", `<input type="range" min="0.04" max="0.96" step="0.01" data-gameplay="cam_x" value="${Number(gp.cam_x ?? 0.16)}" />`)}
-        ${fieldRow("Facecam Y (atas–bawah)", `<input type="range" min="0.06" max="0.94" step="0.01" data-gameplay="cam_y" value="${Number(gp.cam_y ?? 0.78)}" />`)}
+        ${fieldRow("Fokus Host X (kiri–kanan)", `<input type="range" min="0.04" max="0.96" step="0.01" data-gameplay="cam_x" value="${Number(gp.cam_x ?? 0.16)}" />`)}
+        ${fieldRow("Fokus Host Y (atas–bawah)", `<input type="range" min="0.06" max="0.94" step="0.01" data-gameplay="cam_y" value="${Number(gp.cam_y ?? 0.78)}" />`)}
       </div>
       <div class="ed-two">
-        ${fieldRow("Ukuran area facecam", `<input type="range" min="0.18" max="0.60" step="0.01" data-gameplay="cam_scale" value="${Number(gp.cam_scale ?? 0.32)}" />`, "Kecil = zoom dekat ke wajah host")}
-        ${fieldRow("Tinggi bagian gameplay", `<input type="range" min="0.48" max="0.72" step="0.01" data-gameplay="split" value="${Number(gp.split ?? 0.62)}" />`, "Default 62% atas game, 38% bawah host")}
+        ${fieldRow("Zoom Wajah Host", `<input type="range" min="0.16" max="0.60" step="0.01" data-gameplay="cam_scale" value="${Number(gp.cam_scale ?? 0.28)}" />`, "Kecil = makin zoom dekat ke wajah host")}
+        ${fieldRow("Rasio Atas Game / Bawah Host", `<input type="range" min="0.48" max="0.72" step="0.01" data-gameplay="split" value="${Number(gp.split ?? 0.62)}" />`, "Default 62% atas game · 38% bawah host")}
       </div>
-      ${fieldRow("Fokus horizontal gameplay (atas)", `<input type="range" min="0" max="1" step="0.01" data-gameplay="game_x" value="${Number(gp.game_x ?? 0.5)}" />`)}
+      ${fieldRow("Fokus Horizontal Gameplay (Atas)", `<input type="range" min="0" max="1" step="0.01" data-gameplay="game_x" value="${Number(gp.game_x ?? 0.56)}" />`)}
     </div>`
-        : fieldRow("Fokus crop horizontal", `<input type="range" min="0" max="1" step="0.01" data-spec="crop_focus" value="${Number(spec.crop_focus)}" />`, "0% kiri · 50% tengah · 100% kanan")
+        : fieldRow("Fokus crop horizontal (bisa juga digeser pakai mouse di preview)", `<input type="range" min="0" max="1" step="0.01" data-spec="crop_focus" value="${Number(spec.crop_focus)}" />`, "0% kiri · 50% tengah · 100% kanan")
     }
     ${fieldRow("Jenis background", `<select class="select" data-bg="type">
       ${[["blur", "Blur video"], ["gradient", "Gradien warna"], ["color", "Warna solid"]]
@@ -1054,6 +1522,71 @@ function bindEditorEvents() {
       renderPanel();
     });
   });
+
+  const switcher = edEl("ed-clip-switcher");
+  if (switcher) {
+    switcher.addEventListener("change", () => {
+      if (switcher.value && switcher.value !== ED.clipId) {
+        location.hash = "#/editor/" + switcher.value;
+      }
+    });
+  }
+
+  const localInput = edEl("ed-local-video-input");
+  if (localInput) {
+    localInput.addEventListener("change", () => {
+      const f = localInput.files && localInput.files[0];
+      if (f) uploadLocalVideoToManualEditor(f);
+      localInput.value = "";
+    });
+  }
+
+  const dropzone = edEl("ed-page-dropzone");
+  if (dropzone) {
+    ["dragenter", "dragover"].forEach((ev) =>
+      dropzone.addEventListener(ev, (e) => {
+        if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes("Files")) return;
+        e.preventDefault();
+        dropzone.classList.add("ed-drag-over");
+      })
+    );
+    ["dragleave", "drop"].forEach((ev) =>
+      dropzone.addEventListener(ev, (e) => {
+        dropzone.classList.remove("ed-drag-over");
+      })
+    );
+    dropzone.addEventListener("drop", (e) => {
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (!f || !/\.(mp4|mkv|mov|webm|flv|ts|m4v)$/i.test(f.name || "")) return;
+      e.preventDefault();
+      uploadLocalVideoToManualEditor(f);
+    });
+  }
+}
+
+function uploadLocalVideoToManualEditor(file) {
+  toast(`Mengunggah video full "${file.name}" ke Editor Manual…`, "ok");
+  const form = new FormData();
+  form.append("file", file);
+  form.append("title", file.name.replace(/\.[^.]+$/, ""));
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/jobs/upload");
+  xhr.onload = async () => {
+    if (xhr.status >= 200 && xhr.status < 300) {
+      try {
+        const job = JSON.parse(xhr.responseText);
+        if (job && job.id) {
+          await openProjectModeModal(job.id, job);
+        }
+      } catch (err) {
+        toast("Gagal membaca respons upload", "bad");
+      }
+    } else {
+      toast("Upload video gagal", "bad");
+    }
+  };
+  xhr.onerror = () => toast("Koneksi upload terputus", "bad");
+  xhr.send(form);
 }
 
 async function applySubEdit(el) {
@@ -1160,18 +1693,79 @@ function bindPanelEvents() {
     btn.addEventListener("click", () => {
       const parts = String(btn.dataset.gpPreset || "").split(",");
       if (parts.length < 3) return;
-      if (!ED.spec.gameplay) ED.spec.gameplay = { cam_scale: 0.32, split: 0.62 };
+      if (!ED.spec.gameplay) ED.spec.gameplay = { cam_scale: 0.28, split: 0.62 };
       ED.spec.gameplay.cam_x = Number(parts[0]);
       ED.spec.gameplay.cam_y = Number(parts[1]);
       ED.spec.gameplay.game_x = Number(parts[2]);
       ED.spec.gameplay.corner = parts[3] || "";
+      ED.liveSourceMode = true;
       scheduleSave();
       renderPanel();
       renderOverlay();
       refreshChrome();
-      toast(`Facecam diatur ke ${parts[3] || "pojok"}`, "ok");
+      toast(`Kamera Host diatur ke ${parts[3] || "pojok"}`, "ok");
     });
   });
+
+  // Interaksi drag langsung pada Peta Sumber 16:9 (#ed-minimap)
+  const minimap = edEl("ed-minimap");
+  if (minimap) {
+    let mmDrag = null;
+    minimap.addEventListener("pointerdown", (e) => {
+      if (!ED.spec || ED.spec.layout !== "gameplay") return;
+      const rect = minimap.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      e.preventDefault();
+      ED.liveSourceMode = true;
+      if (!ED.spec.gameplay) {
+        ED.spec.gameplay = { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.28, game_x: 0.56, split: 0.62 };
+      }
+      const boxEl = e.target.closest("[data-minimap-drag]");
+      const targetKind = boxEl ? boxEl.dataset.minimapDrag : "cam";
+      try {
+        minimap.setPointerCapture(e.pointerId);
+      } catch (err) {}
+      mmDrag = { pointerId: e.pointerId, kind: targetKind, rect };
+      const rx = Math.max(0.04, Math.min(0.96, (e.clientX - rect.left) / rect.width));
+      const ry = Math.max(0.06, Math.min(0.94, (e.clientY - rect.top) / rect.height));
+      if (targetKind === "cam") {
+        ED.spec.gameplay.cam_x = Number(rx.toFixed(3));
+        ED.spec.gameplay.cam_y = Number(ry.toFixed(3));
+        ED.spec.gameplay.corner = `${rx < 0.5 ? "kiri" : "kanan"} ${ry < 0.5 ? "atas" : "bawah"}`;
+      } else {
+        ED.spec.gameplay.game_x = Number(Math.max(0, Math.min(1, rx)).toFixed(3));
+      }
+      syncMinimapBoxes();
+      renderOverlay();
+      refreshChrome();
+    });
+    minimap.addEventListener("pointermove", (e) => {
+      if (!mmDrag || e.pointerId !== mmDrag.pointerId || !ED.spec || !ED.spec.gameplay) return;
+      const rx = Math.max(0.04, Math.min(0.96, (e.clientX - mmDrag.rect.left) / mmDrag.rect.width));
+      const ry = Math.max(0.06, Math.min(0.94, (e.clientY - mmDrag.rect.top) / mmDrag.rect.height));
+      if (mmDrag.kind === "cam") {
+        ED.spec.gameplay.cam_x = Number(rx.toFixed(3));
+        ED.spec.gameplay.cam_y = Number(ry.toFixed(3));
+        ED.spec.gameplay.corner = `${rx < 0.5 ? "kiri" : "kanan"} ${ry < 0.5 ? "atas" : "bawah"}`;
+      } else {
+        ED.spec.gameplay.game_x = Number(Math.max(0, Math.min(1, rx)).toFixed(3));
+      }
+      syncMinimapBoxes();
+      renderOverlay();
+      refreshChrome();
+    });
+    const endMm = (e) => {
+      if (!mmDrag || (e && e.pointerId !== mmDrag.pointerId)) return;
+      try {
+        minimap.releasePointerCapture(mmDrag.pointerId);
+      } catch (err) {}
+      mmDrag = null;
+      scheduleSave();
+      renderPanel();
+    };
+    minimap.addEventListener("pointerup", endMm);
+    minimap.addEventListener("pointercancel", endMm);
+  }
   $$("[data-bg]").forEach((el) => {
     el.addEventListener("input", () => {
       ED.spec.background[el.dataset.bg] = el.type === "range" ? Number(el.value) : el.value;
@@ -1261,7 +1855,75 @@ async function editorAction(action, target) {
   const spec = ED.spec;
   if (!spec) return;
 
-  if (action === "play") {
+  if (action === "open-mode-modal") {
+    if (ED.clip && ED.clip.job_id && typeof openProjectModeModal === "function") {
+      await openProjectModeModal(ED.clip.job_id);
+    }
+    return;
+  } else if (action === "new-manual-clip") {
+    if (!ED.clip || !ED.clip.job_id) return;
+    if (ED.dirty) await saveSpec();
+    const curSrc = outToSrc(ED.time, spec.segments) || 0;
+    const res = await api(`/api/jobs/${encodeURIComponent(ED.clip.job_id)}/start-manual`, {
+      method: "POST",
+      body: { create_new: true, start: Number(curSrc.toFixed(2)), duration: 45 },
+    });
+    if (res && res.active_clip_id) {
+      toast("Potongan manual baru ditambahkan", "ok");
+      location.hash = "#/editor/" + res.active_clip_id;
+    }
+    return;
+  } else if (action === "drop-local-video") {
+    const inp = edEl("ed-local-video-input");
+    if (inp) inp.click();
+    return;
+  } else if (action === "quick-layout") {
+    const nextLayout = (target && target.dataset && target.dataset.layout) || "gameplay";
+    spec.layout = nextLayout;
+    ED.liveSourceMode = true;
+    if (nextLayout === "gameplay") {
+      if (!spec.gameplay) {
+        spec.gameplay = { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.28, game_x: 0.56, split: 0.62, corner: "kiri bawah" };
+      }
+      if (spec.captions) spec.captions.y = Number((spec.gameplay.split || 0.62).toFixed(2));
+    }
+    scheduleSave();
+    renderPreviewSource();
+    renderOverlay();
+    renderPanel();
+    refreshChrome();
+    return;
+  } else if (action === "toggle-preview-source") {
+    ED.liveSourceMode = !ED.liveSourceMode;
+    renderPreviewSource();
+    renderOverlay();
+    refreshChrome();
+    toast(
+      ED.liveSourceMode
+        ? "Mode Kanvas Interaktif aktif — silakan drag & zoom kamera langsung di preview"
+        : "Memutar file hasil render (.mp4)",
+      "ok"
+    );
+    return;
+  } else if (action === "seg-expand-left" || action === "seg-expand-right" || action === "seg-full-video") {
+    const seg = spec.segments[ED.selectedSegment];
+    if (!seg) return;
+    const srcDur = Math.max(2, Number(ED.source && ED.source.duration) || 120);
+    if (action === "seg-expand-left") {
+      seg.start = Number(Math.max(0, Number(seg.start) - 5).toFixed(2));
+    } else if (action === "seg-expand-right") {
+      seg.end = Number(Math.min(srcDur, Number(seg.end) + 5).toFixed(2));
+    } else if (action === "seg-full-video") {
+      seg.start = 0;
+      seg.end = Number(Math.min(srcDur, Math.max(60, srcDur)).toFixed(2));
+    }
+    ED.liveSourceMode = true;
+    scheduleSave();
+    renderTimeline();
+    renderPanel();
+    refreshChrome();
+    return;
+  } else if (action === "play") {
     const video = edEl("ed-video");
     if (!video) return;
     if (video.paused) {
@@ -1662,16 +2324,25 @@ function pollRenderStatus() {
         const badge = edEl("ed-render-badge");
         if (clip.status === "rendered") {
           ED.clip = { ...ED.clip, has_file: true, status: "rendered" };
+          ED.liveSourceMode = false;
           showRenderBadge("✓ Render selesai", 100);
           setTimeout(() => {
             if (badge) badge.hidden = true;
           }, 2500);
-          toast("Render selesai — preview memakai hasil baru", "ok");
+          toast("Render selesai — siap diunduh atau diupload ke YT / TikTok!", "ok");
           ED.clip.has_file = true;
           renderPreviewSource();
           renderPanel();
+          refreshChrome();
           const dl = edEl("ed-download");
           if (dl) dl.hidden = false;
+          $$('[data-ed="render"]').forEach((b) => {
+            b.disabled = false;
+            b.innerHTML = "Render ulang";
+          });
+          $$('[data-ed="upload-yt"], [data-ed="upload-tiktok"]').forEach((b) => {
+            b.disabled = false;
+          });
         } else if (clip.status === "error") {
           showRenderBadge("✗ " + (clip.error || "Render gagal"), 100);
           toast(clip.error || "Render gagal", "bad");
