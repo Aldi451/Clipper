@@ -649,6 +649,7 @@ def default_spec(
     }
     spec = {
         "version": 1,
+        "framing_v": int(framing_raw.get("detector_v") or 0),
         "layout": layout if layout in ("fit", "crop", "gameplay", "black") else "fit",
         "background": background,
         "crop_focus": _clamp(_f(focus, _f(settings.get("crop_focus"), 0.5)), 0.0, 1.0),
@@ -793,6 +794,7 @@ def normalize_spec(
         return base
 
     result = dict(base)
+    result["framing_v"] = int(spec.get("framing_v") or base.get("framing_v") or 0)
     result["layout"] = (
         spec.get("layout")
         if spec.get("layout") in ("fit", "crop", "gameplay", "black")
@@ -1269,12 +1271,13 @@ def _layout_chain(layout: str, focus: float, background: dict[str, Any], fps: in
         game_x = _clamp(_f(gp.get("game_x"), 0.5), 0.0, 1.0)
         cam_x = _clamp(_f(gp.get("cam_x"), 0.16), 0.04, 0.96)
         cam_y = _clamp(_f(gp.get("cam_y"), 0.78), 0.06, 0.94)
-        cam_scale = _clamp(_f(gp.get("cam_scale"), 0.32), 0.18, 0.65)
+        cam_scale = _clamp(_f(gp.get("cam_scale"), 0.26), 0.18, 0.65)
         norm_w, norm_h = 1920, 1080
         crop_w = max(160, min(norm_w, int(round(norm_w * cam_scale / 2) * 2)))
         crop_h = max(120, min(norm_h, int(round(crop_w * bot_h / max(1, width) / 2) * 2)))
         crop_x = int(round(_clamp(cam_x * norm_w - crop_w / 2.0, 0.0, float(norm_w - crop_w))))
-        crop_y = int(round(_clamp(cam_y * norm_h - crop_h / 2.0, 0.0, float(norm_h - crop_h))))
+        # Geser sedikit ke bawah (0.465 vs 0.50) agar dagu & mikrofon host masuk proporsional
+        crop_y = int(round(_clamp(cam_y * norm_h - crop_h * 0.465, 0.0, float(norm_h - crop_h))))
         return (
             f"[0:v]fps={fps},split=2[topsrc][botsrc];"
             f"[topsrc]scale={width}:{top_h}:force_original_aspect_ratio=increase,"
@@ -1283,7 +1286,7 @@ def _layout_chain(layout: str, focus: float, background: dict[str, Any], fps: in
             f"crop={norm_w}:{norm_h},crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
             f"scale={width}:{bot_h}:flags=lanczos,setsar=1[vbot];"
             f"[vtop][vbot]vstack=inputs=2,"
-            f"drawbox=x=0:y={top_h - 2}:w={width}:h=4:color=0x7C5CFF@0.85:t=fill,setsar=1[vbase]"
+            f"drawbox=x=0:y={top_h - 3}:w={width}:h=6:color=0x00D2FF@0.92:t=fill,setsar=1[vbase]"
         )
 
     if layout == "crop":
@@ -1713,6 +1716,19 @@ def load_or_create_spec(
         try:
             data = json.loads(raw)
             if isinstance(data, dict) and data.get("segments"):
+                framing_meta = (clip.get("meta") or {}).get("framing") or {}
+                meta_v = int(framing_meta.get("detector_v") or 0)
+                spec_v = int(data.get("framing_v") or 0)
+                if meta_v > spec_v and settings.get("auto_framing", True):
+                    # Spec dibuat oleh detektor versi lama → sinkronkan hasil deteksi terbaru
+                    base = default_spec(clip, settings, transcript, source_duration)
+                    data["framing_v"] = meta_v
+                    data["framing"] = base["framing"]
+                    data["gameplay"] = base["gameplay"]
+                    if not data.get("template"):
+                        data["layout"] = base["layout"]
+                        if base["layout"] == "gameplay":
+                            data.setdefault("captions", {})["y"] = base["captions"]["y"]
                 return normalize_spec(data, clip, settings, source_duration)
         except (json.JSONDecodeError, TypeError):
             pass

@@ -2833,14 +2833,24 @@ document.addEventListener("click", async (e) => {
       toast("Mencoba ulang analisis…", "ok");
       renderProject(id);
     } else if (action === "detect-speaker") {
-      toast("Mendeteksi pembicara… (beberapa detik)", "ok");
+      toast("Mendeteksi host / gameplay… (beberapa detik)", "ok");
       const res = await api("/api/clips/" + id + "/framing", { method: "POST" });
-      toast(res.summary || "Analisa selesai", res.framing && res.framing.ok ? "ok" : "bad");
+      const curClip = (state.clips || []).find((c) => c.id === id);
+      if (curClip && curClip.has_file) {
+        await api("/api/clips/" + id + "/render", { method: "POST" });
+        toast((res.summary || "Analisa selesai") + " — merender ulang video…", "ok");
+      } else {
+        toast(res.summary || "Analisa selesai", res.framing && res.framing.ok ? "ok" : "warn");
+      }
       if (state.job) await renderProject(state.job.id);
     } else if (action === "detect-all-speakers") {
-      toast("Mendeteksi pembicara untuk semua clip…", "ok");
+      toast("Mendeteksi host / gameplay untuk semua clip…", "ok");
       const res = await api("/api/jobs/" + encodeURIComponent(state.job.id) + "/framing", { method: "POST" });
-      toast(`${res.detected} dari ${res.clips} clip: kamera mengikuti pembicara`, "ok");
+      await api("/api/jobs/" + encodeURIComponent(state.job.id) + "/render", {
+        method: "POST",
+        body: { only_dirty: true },
+      });
+      toast(`${res.detected} dari ${res.clips} clip terdeteksi — merender ulang otomatis…`, "ok");
       await renderProject(state.job.id);
     } else if (action === "refresh-hooks") {
       const res = await api("/api/jobs/" + encodeURIComponent(state.job.id) + "/hooks/refresh", { method: "POST" });

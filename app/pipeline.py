@@ -357,6 +357,44 @@ def _run_render(clip_id: str) -> None:
         def on_progress(fraction: float, message: str) -> None:
             db.update_clip(clip_id, progress=round(fraction, 4), message=message)
 
+        # Jika clip dibuat dengan detektor framing versi lama (atau belum pernah dianalisa),
+        # jalankan deteksi pembicara/gameplay otomatis sebelum render agar otomatis fokus ke host.
+        if settings.get("auto_framing", True):
+            try:
+                from . import framing as framing_module
+
+                cur_meta = dict(clip.get("meta") or {})
+                cur_framing = cur_meta.get("framing") if isinstance(cur_meta.get("framing"), dict) else {}
+                if (
+                    framing_module.available()
+                    and int(cur_framing.get("detector_v") or 0) < framing_module.DETECTOR_VERSION
+                ):
+                    db.update_clip(clip_id, progress=0.03, message="Mendeteksi host / gameplay…")
+                    job_meta = (job.get("meta") or {}) if isinstance(job, dict) else {}
+                    src_meta = (
+                        job_meta.get("source_meta")
+                        if isinstance(job_meta.get("source_meta"), dict)
+                        else {}
+                    ) or ingest.load_source_meta(WORK_DIR / str(job["id"]))
+                    ctx = {
+                        **src_meta,
+                        "job_title": str(job.get("title") or ""),
+                        "clip_title": str(clip.get("title") or ""),
+                        "hook": str(clip.get("hook") or ""),
+                        "transcript": str(cur_meta.get("transcript") or "")[:1500],
+                    }
+                    f_res = framing_module.analyze(
+                        source_path,
+                        float(clip.get("start") or 0.0),
+                        float(clip.get("duration") or 30.0),
+                        context=ctx,
+                    )
+                    cur_meta["framing"] = f_res
+                    db.update_clip(clip_id, meta=cur_meta)
+                    clip["meta"] = cur_meta
+            except Exception:
+                traceback.print_exc()
+
         spec = editor.load_or_create_spec(clip, transcript, float(info.duration or 0), settings)
         result = editor.render_spec(clip, spec, source_path, info, on_progress, settings)
         db.update_clip(
