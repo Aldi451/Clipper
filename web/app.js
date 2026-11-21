@@ -8,6 +8,7 @@ const state = {
   param: "",
   job: null,
   clips: [],
+  clipView: { jobId: "", filter: "all", sort: "score", selected: new Set() },
   projectMode: {},
   modeModalPoll: null,
   poll: null,
@@ -1054,8 +1055,125 @@ function hookVariantsHtml(clip) {
   </div>`;
 }
 
+const CLIP_WORKFLOW_STATUSES = ["draft", "review", "approved", "posted"];
+const CLIP_VIEW_FILTERS = [
+  ["all", "Semua"],
+  ["priority", "⭐ Prioritas"],
+  ["draft", "Draft"],
+  ["review", "Review"],
+  ["approved", "Approved"],
+  ["posted", "Posted"],
+];
+
+function clipWorkflowStatus(clip) {
+  const meta = (clip && clip.meta) || {};
+  const status = String(meta.workflow_status || "").toLowerCase();
+  if (CLIP_WORKFLOW_STATUSES.includes(status)) return status;
+  if (clip && (clip.status === "uploaded" || clip.yt_url || clip.tk_url || meta.tk_posted)) return "posted";
+  return "draft";
+}
+
+function clipIsStarred(clip) {
+  return Boolean((clip && clip.meta && clip.meta.starred) || false);
+}
+
+function filterAndSortClips(clips, view = state.clipView) {
+  let result = (clips || []).slice();
+  const filter = view && view.filter || "all";
+  if (filter === "priority") result = result.filter(clipIsStarred);
+  else if (CLIP_WORKFLOW_STATUSES.includes(filter)) {
+    result = result.filter((clip) => clipWorkflowStatus(clip) === filter);
+  }
+  if ((view && view.sort) === "time") {
+    result.sort((a, b) => Number(a.start || 0) - Number(b.start || 0) || Number(a.idx || 0) - Number(b.idx || 0));
+  } else {
+    result.sort((a, b) => Number(b.score || 0) - Number(a.score || 0) || Number(a.start || 0) - Number(b.start || 0));
+  }
+  return result;
+}
+
+function currentModeClips() {
+  const job = state.job;
+  if (!job) return [];
+  const mode = state.projectMode[job.id] || "ai";
+  return (job.clips || state.clips || []).filter((clip) => isClipManual(clip) === (mode === "manual"));
+}
+
+function visibleModeClips() {
+  return filterAndSortClips(currentModeClips(), state.clipView);
+}
+
+function filteredZipUrl(jobId, clips) {
+  const ids = (clips || []).filter((clip) => clip.has_file).map((clip) => clip.id);
+  if (!ids.length) return "";
+  return `/api/jobs/${encodeURIComponent(jobId)}/export.zip?ids=${encodeURIComponent(ids.join(","))}`;
+}
+
+function clipViewToolbarHtml(jobId, allClips, visibleClips) {
+  const selectedCount = visibleClips.filter((clip) => state.clipView.selected.has(clip.id)).length;
+  const selectedAll = visibleClips.length > 0 && selectedCount === visibleClips.length;
+  const readyCount = visibleClips.filter((clip) => clip.has_file).length;
+  const zipUrl = filteredZipUrl(jobId, visibleClips);
+  return `<div class="clip-toolbar card tight">
+    <div class="clip-filter-row" role="group" aria-label="Filter clip">
+      ${CLIP_VIEW_FILTERS.map(([id, label]) => `<button class="clip-filter-pill ${state.clipView.filter === id ? "active" : ""}" data-clip-filter="${id}">${label}</button>`).join("")}
+    </div>
+    <div class="clip-toolbar-actions">
+      <label class="clip-sort-label tiny dim">Urutkan
+        <select class="select" data-clip-sort aria-label="Urutkan clip">
+          <option value="score" ${state.clipView.sort === "score" ? "selected" : ""}>Skor viral</option>
+          <option value="time" ${state.clipView.sort === "time" ? "selected" : ""}>Waktu video</option>
+        </select>
+      </label>
+      <span id="clip-visible-count" class="tiny dim">${visibleClips.length} dari ${allClips.length} clip</span>
+      <button class="btn small ghost" data-action="select-visible-clips">${selectedAll ? "Batal pilih terlihat" : "Pilih semua terlihat"}</button>
+      <span id="clip-selected-count" class="tiny dim">${selectedCount} dipilih</span>
+      <button class="btn small ghost" data-action="batch-star" ${selectedCount ? "" : "disabled"}>⭐ Star terpilih</button>
+      <button class="btn small" data-action="batch-approve" ${selectedCount ? "" : "disabled"}>✅ Approve</button>
+      <button class="btn small ghost" data-action="clear-clip-selection" ${selectedCount ? "" : "disabled"}>Bersihkan</button>
+      <a class="btn small primary clip-zip-link" id="clip-zip-download" href="${esc(zipUrl || "#")}" ${zipUrl ? "" : 'aria-disabled="true" tabindex="-1"'}>
+        📦 ZIP hasil filter (${readyCount})
+      </a>
+    </div>
+  </div>`;
+}
+
+function updateProjectClipView() {
+  const list = $("#clip-list");
+  if (!list || !state.job) return;
+  const allClips = currentModeClips();
+  const visibleClips = filterAndSortClips(allClips, state.clipView);
+  list.innerHTML = visibleClips.length
+    ? visibleClips.map(clipCardHtml).join("")
+    : `<div class="clip-filter-empty">Tidak ada clip pada filter ini.</div>`;
+  $("#clip-visible-count").textContent = `${visibleClips.length} dari ${allClips.length} clip`;
+  const selectedCount = visibleClips.filter((clip) => state.clipView.selected.has(clip.id)).length;
+  const selectedAll = visibleClips.length > 0 && selectedCount === visibleClips.length;
+  const count = $("#clip-selected-count");
+  if (count) count.textContent = `${selectedCount} dipilih`;
+  const selectBtn = $('[data-action="select-visible-clips"]');
+  if (selectBtn) selectBtn.textContent = selectedAll ? "Batal pilih terlihat" : "Pilih semua terlihat";
+  $$('[data-action="batch-star"], [data-action="batch-approve"], [data-action="clear-clip-selection"]').forEach((btn) => {
+    btn.disabled = selectedCount === 0;
+  });
+  const zip = $("#clip-zip-download");
+  if (zip) {
+    const readyCount = visibleClips.filter((clip) => clip.has_file).length;
+    const url = filteredZipUrl(state.job.id, visibleClips);
+    zip.href = url || "#";
+    zip.textContent = `📦 ZIP hasil filter (${readyCount})`;
+    zip.setAttribute("aria-disabled", url ? "false" : "true");
+    zip.tabIndex = url ? 0 : -1;
+  }
+  $$('[data-clip-filter]').forEach((btn) => btn.classList.toggle("active", btn.dataset.clipFilter === state.clipView.filter));
+  bindClipFieldHandlers();
+}
+
 function clipCardHtml(clip) {
   const ttOn = !state.settings || state.settings.tt_enabled !== false;
+  const starred = clipIsStarred(clip);
+  const workflow = clipWorkflowStatus(clip);
+  const selected = state.clipView.selected.has(clip.id);
   const thumb = clip.thumb
     ? `<img src="/api/clips/${esc(clip.id)}/thumb?v=${Math.round(clip.updated_at)}" onerror="this.style.display='none'" />`
     : `<span>${clip.status === "rendered" || clip.status === "uploaded" ? "🎞️" : "✂️"}</span>`;
@@ -1072,6 +1190,23 @@ function clipCardHtml(clip) {
         <div class="clip-info">
           <textarea class="clip-title" rows="2" data-field="title" data-id="${esc(clip.id)}"
             placeholder="Judul clip…">${esc(clip.title)}</textarea>
+          <div class="clip-curation-row">
+            <label class="clip-select-label" title="Pilih clip untuk aksi batch">
+              <input type="checkbox" data-clip-select="${esc(clip.id)}" ${selected ? "checked" : ""} />
+              <span>Pilih</span>
+            </label>
+            <button class="btn small ghost clip-star ${starred ? "is-starred" : ""}" data-action="toggle-star" data-id="${esc(clip.id)}" aria-pressed="${starred}">
+              ${starred ? "⭐ Prioritas" : "☆ Prioritas"}
+            </button>
+            <label class="clip-workflow-label tiny dim">Status
+              <select class="select clip-workflow-select" data-clip-workflow data-id="${esc(clip.id)}" aria-label="Status workflow">
+                <option value="draft" ${workflow === "draft" ? "selected" : ""}>Draft</option>
+                <option value="review" ${workflow === "review" ? "selected" : ""}>Review</option>
+                <option value="approved" ${workflow === "approved" ? "selected" : ""}>Approved</option>
+                <option value="posted" ${workflow === "posted" ? "selected" : ""}>Posted</option>
+              </select>
+            </label>
+          </div>
           <div class="meta-row">
             <span class="score">skor ${scoreText}</span>
             ${hookGradeTag(clip)}
@@ -1270,6 +1405,9 @@ async function renderProject(jobId) {
   const allClips = job.clips || [];
   state.job = job;
   state.clips = allClips;
+  if (state.clipView.jobId !== jobId) {
+    state.clipView = { jobId, filter: "all", sort: "score", selected: new Set() };
+  }
 
   const aiClips = allClips.filter((c) => !isClipManual(c));
   const manualClips = allClips.filter((c) => isClipManual(c));
@@ -1282,6 +1420,7 @@ async function renderProject(jobId) {
   }
 
   const clips = activeMode === "manual" ? manualClips : aiClips;
+  const visibleClips = filterAndSortClips(clips, state.clipView);
   const running = job.status === "running" || job.status === "queued";
   const pct = Math.round((job.progress || 0) * 100);
   const dirtyCount = clips.filter((c) => c.meta && c.meta.dirty && c.status !== "uploaded").length;
@@ -1382,10 +1521,12 @@ async function renderProject(jobId) {
       </div>
     </div>
 
+    ${clips.length ? clipViewToolbarHtml(job.id, clips, visibleClips) : ""}
+
     <div id="clips">
       ${
         clips.length
-          ? `<div class="clips">${clips.map(clipCardHtml).join("")}</div>`
+          ? `<div class="clips" id="clip-list">${visibleClips.length ? visibleClips.map(clipCardHtml).join("") : '<div class="clip-filter-empty">Tidak ada clip pada filter ini.</div>'}</div>`
           : activeMode === "manual"
             ? `<div class="card"><div class="empty">
                  <div class="big">🎬</div>
@@ -1467,6 +1608,97 @@ function closeModal() {
   state.editing = null;
 }
 
+const NICHE_HASHTAGS = {
+  general: ["#shorts", "#viral", "#fyp"],
+  gaming: ["#shorts", "#gaming", "#gameplay", "#gamer"],
+  "ai-tech": ["#shorts", "#AI", "#teknologi", "#tech"],
+  business: ["#shorts", "#bisnis", "#cuan", "#investasi"],
+  motivation: ["#shorts", "#motivasi", "#inspirasi", "#sukses"],
+  podcast: ["#shorts", "#podcast", "#podcastindonesia", "#obrolan"],
+  entertainment: ["#shorts", "#hiburan", "#komedi", "#lucu"],
+};
+
+const PREVIEW_SAFE_ZONES = {
+  tiktok: { top: 0.10, right: 0.08, bottom: 0.20, left: 0.08, label: "TikTok · area aman" },
+  reels: { top: 0.10, right: 0.10, bottom: 0.19, left: 0.10, label: "Reels · area aman" },
+  shorts: { top: 0.08, right: 0.08, bottom: 0.16, left: 0.08, label: "Shorts · area aman" },
+};
+
+function mergeNicheHashtags(existing, niche) {
+  const source = [
+    ...String(existing || "").split(/[\s,]+/).filter(Boolean),
+    ...(NICHE_HASHTAGS[niche] || NICHE_HASHTAGS.general),
+  ];
+  const seen = new Set();
+  return source.filter((tag) => {
+    const normalized = tag.toLowerCase();
+    if (seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  }).join(" ");
+}
+
+function updateMobileFeedCounter() {
+  const input = $("#edit-title");
+  const counter = $("#mobile-feed-counter");
+  if (!input || !counter) return;
+  const count = Array.from(input.value || "").length;
+  const level = count <= 60 ? "safe" : count <= 100 ? "warn" : "over";
+  const label = level === "safe" ? "🟢 Aman" : level === "warn" ? "🟡 Rawan" : "🔴 Terpotong";
+  counter.className = `mobile-feed-counter tiny ${level}`;
+  counter.textContent = `${label} · ${count} karakter (≤60 Aman · 61–100 Rawan · >100 Terpotong)`;
+}
+
+function applyPreviewSafeZone(select, overlay, frame, label) {
+  if (!select || !overlay || !frame) return;
+  const zone = PREVIEW_SAFE_ZONES[select.value];
+  overlay.hidden = !zone;
+  if (!zone) return;
+  frame.style.inset = `${zone.top * 100}% ${zone.right * 100}% ${zone.bottom * 100}% ${zone.left * 100}%`;
+  if (label) label.textContent = zone.label;
+}
+
+async function saveCoverBlob(url, filename) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    let detail = "Gagal membuat cover HD";
+    try { const body = await response.json(); detail = body.detail || detail; } catch (err) {}
+    throw new Error(detail);
+  }
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 3000);
+}
+
+async function copyAllClipMeta() {
+  const title = (($("#edit-title") && $("#edit-title").value) || "").trim();
+  const description = (($("#edit-desc") && $("#edit-desc").value) || "").trim();
+  const niche = (($("#edit-niche") && $("#edit-niche").value) || "general");
+  const tags = mergeNicheHashtags((($("#edit-tags") && $("#edit-tags").value) || "").trim(), niche);
+  const text = [title, description, tags].filter(Boolean).join("\n\n");
+  if (!text) throw new Error("Tidak ada metadata untuk disalin");
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    await navigator.clipboard.writeText(text);
+  } else {
+    const temporary = document.createElement("textarea");
+    temporary.value = text;
+    temporary.style.position = "fixed";
+    temporary.style.opacity = "0";
+    document.body.appendChild(temporary);
+    temporary.select();
+    const copied = document.execCommand("copy");
+    temporary.remove();
+    if (!copied) throw new Error("Clipboard tidak diizinkan oleh browser");
+  }
+  toast("Judul, deskripsi, dan hashtag niche disalin", "ok");
+}
+
 async function openClipEditor(clipId) {
   const root = $("#modal-root");
   root.innerHTML = `<div class="modal-back"><div class="modal"><div class="empty"><div class="spinner"></div></div></div></div>`;
@@ -1511,9 +1743,18 @@ async function openClipEditor(clipId) {
           <div>
             <div class="phone" id="preview-box">
               <video id="preview" controls playsinline src="${src}"></video>
+              <div class="clip-safe-zone" id="clip-safe-overlay" hidden>
+                <div class="clip-safe-frame" id="clip-safe-frame"><span id="clip-safe-label">Safe zone</span></div>
+              </div>
             </div>
-            <div class="row" style="margin-top:10px;justify-content:space-between">
-              <span class="tiny dim">${hasFile ? "Preview hasil render 9:16" : "Preview sumber (belum dirender)"}</span>
+            <div class="clip-preview-tools">
+              <label class="tiny dim">Safe Zone
+                <select class="select" id="clip-safe-zone-select" aria-label="Safe zone preview">
+                  <option value="off">Off</option><option value="tiktok">TikTok</option>
+                  <option value="reels">Reels</option><option value="shorts">Shorts</option>
+                </select>
+              </label>
+              <button class="btn small ghost" data-action="clip-cover-hd" data-id="${esc(clip.id)}">📸 Cover HD</button>
               <button class="btn small ghost" data-action="preview-clip" data-id="${esc(clip.id)}">Putar potongan</button>
             </div>
           </div>
@@ -1521,6 +1762,7 @@ async function openClipEditor(clipId) {
             <div class="field">
               <label>Judul / caption YouTube</label>
               <textarea class="input" id="edit-title" rows="2">${esc(clip.title)}</textarea>
+              <div id="mobile-feed-counter" class="mobile-feed-counter tiny" aria-live="polite"></div>
             </div>
             <div class="field">
               <label>Hook overlay (muncul 5 detik pertama)</label>
@@ -1576,6 +1818,22 @@ async function openClipEditor(clipId) {
               <label>Hashtag</label>
               <input class="input" id="edit-tags" value="${esc(clip.hashtags)}" />
             </div>
+            <div class="field meta-copy-box">
+              <label>Niche hashtag untuk salinan metadata</label>
+              <select class="select" id="edit-niche">
+                <option value="general">Umum</option>
+                <option value="gaming">Gaming</option>
+                <option value="ai-tech">AI &amp; Tech</option>
+                <option value="business">Bisnis &amp; Cuan</option>
+                <option value="motivation">Motivasi</option>
+                <option value="podcast">Podcast</option>
+                <option value="entertainment">Hiburan</option>
+              </select>
+              <button class="btn small primary" style="margin-top:8px" data-action="copy-all-meta" data-id="${esc(clip.id)}">
+                📋 Copy All Meta
+              </button>
+              <div class="tiny dim" style="margin-top:6px">Menyalin judul, deskripsi, dan hashtag clip + niche yang dipilih.</div>
+            </div>
             <div class="row">
               <button class="btn primary" data-action="save-clip" data-id="${esc(clip.id)}">Simpan &amp; render</button>
               <button class="btn" data-action="save-only" data-id="${esc(clip.id)}">Simpan saja</button>
@@ -1608,6 +1866,15 @@ async function openClipEditor(clipId) {
   $("#edit-focus").addEventListener("input", (e) => {
     $("#focus-val").textContent = Math.round(Number(e.target.value) * 100) + "%";
   });
+  const titleField = $("#edit-title");
+  if (titleField) titleField.addEventListener("input", updateMobileFeedCounter);
+  updateMobileFeedCounter();
+  const safeZoneSelect = $("#clip-safe-zone-select");
+  if (safeZoneSelect) {
+    safeZoneSelect.addEventListener("change", () => applyPreviewSafeZone(
+      safeZoneSelect, $("#clip-safe-overlay"), $("#clip-safe-frame"), $("#clip-safe-label")
+    ));
+  }
 
 }
 
@@ -2365,6 +2632,18 @@ function whisperModelsHtml(m) {
   `;
 }
 
+function captionPresetSettings(styleId) {
+  const style = ((state.editorMeta && state.editorMeta.caption_styles) || []).find((item) => item.id === styleId);
+  if (!style) return { caption_style: styleId };
+  return {
+    caption_style: style.id,
+    caption_color: style.color,
+    caption_highlight: style.highlight,
+    caption_uppercase: Boolean(style.uppercase),
+    caption_words: Number(style.words_per_line || 3),
+  };
+}
+
 function bindSettingInputs() {
   $$("[data-setting]").forEach((el) => {
     el.addEventListener("change", async () => {
@@ -2373,8 +2652,17 @@ function bindSettingInputs() {
       if (el.type === "checkbox") value = el.checked;
       else if (el.type === "number") value = Number(el.value);
       else value = el.value;
-      await saveSettings({ [key]: value });
-      toast("Pengaturan disimpan", "ok");
+      const patch = key === "caption_style" ? captionPresetSettings(value) : { [key]: value };
+      const saved = await saveSettings(patch);
+      if (saved) {
+        if (key === "gemini_api_key") {
+          el.value = "";
+          el.placeholder = "Key tersimpan · tempel untuk mengganti";
+          const keyStatus = $("#gemini-key-status");
+          if (keyStatus) { keyStatus.textContent = "API key tersimpan"; keyStatus.className = "tag done"; }
+        }
+        toast("Pengaturan disimpan", "ok");
+      }
     });
   });
 }
@@ -2654,11 +2942,21 @@ async function renderSettings() {
       <div class="card-title"><h2>Tampilan video & caption</h2></div>
       <div class="grid-3">
         <div class="field">
+          <label>Preset subtitle viral</label>
+          <select class="select" id="default-caption-style" data-setting="caption_style">
+            ${((state.editorMeta && state.editorMeta.caption_styles) || [])
+              .map((style) => `<option value="${esc(style.id)}" ${s.caption_style === style.id ? "selected" : ""}>${esc(style.label)}</option>`)
+              .join("")}
+          </select>
+          <button class="btn small ghost" style="margin-top:8px" data-action="save-caption-default">⭐ Jadikan Default Style</button>
+        </div>
+        <div class="field">
           <label>Gaya video</label>
           <select class="select" data-setting="layout">
             <option value="fit" ${s.layout === "fit" ? "selected" : ""}>Otomatis / Blur background</option>
             <option value="crop" ${s.layout === "crop" ? "selected" : ""}>Crop penuh 9:16 (fokus pembicara)</option>
             <option value="gameplay" ${s.layout === "gameplay" ? "selected" : ""}>Gameplay (atas game, bawah host)</option>
+            <option value="split" ${s.layout === "split" ? "selected" : ""}>Split 2 Pembicara</option>
           </select>
         </div>
         <div class="field">
@@ -2795,6 +3093,44 @@ async function renderSettings() {
             <span class="track"></span><span>Pakai LLM untuk judul</span>
           </label>
         </div>
+      </div>
+    </div>
+
+    <div class="card gemini-settings-card">
+      <div class="card-title">
+        <h2>Google Gemini · AI Studio</h2>
+        <span class="tag ${s.gemini_api_key_configured ? "done" : ""}" id="gemini-key-status">${s.gemini_api_key_configured ? "API key tersimpan" : "API key belum diatur"}</span>
+      </div>
+      <p class="hint" style="margin-top:0">
+        Opsional: Gemini membantu menyaring momen viral. Buat key dari Google AI Studio lalu tempel di sini.
+        Key disimpan lokal dan tidak pernah ditampilkan kembali oleh API.
+      </p>
+      <div class="grid-3">
+        <div class="field">
+          <label>Model Gemini</label>
+          <select class="select" data-setting="gemini_model">
+            ${["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+              .map((model) => `<option value="${model}" ${s.gemini_model === model ? "selected" : ""}>${model}</option>`)
+              .join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label>Google AI Studio API Key</label>
+          <input class="input mono" id="gemini-api-key" type="password" autocomplete="new-password"
+            placeholder="${s.gemini_api_key_configured ? "Key tersimpan · tempel untuk mengganti" : "Tempel API key AI Studio"}" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label>Aktifkan Gemini</label>
+          <label class="switch" style="margin-top:6px">
+            <input type="checkbox" data-setting="gemini_enabled" ${s.gemini_enabled ? "checked" : ""} />
+            <span class="track"></span><span>Refine skor viral dengan Gemini</span>
+          </label>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn small primary" data-action="gemini-key-save">Simpan API Key</button>
+        <button class="btn small ghost" data-action="gemini-key-clear" ${s.gemini_api_key_configured ? "" : "disabled"}>Hapus API Key</button>
+        <span class="tiny dim">Tanpa key, Clipper tetap memakai Ollama / heuristik lokal.</span>
       </div>
     </div>
 
@@ -3013,6 +3349,18 @@ async function handleViralAction(e, action, id, target) {
 /* aksi global                                                        */
 /* ------------------------------------------------------------------ */
 document.addEventListener("click", async (e) => {
+  const filterTarget = e.target.closest("[data-clip-filter]");
+  if (filterTarget) {
+    e.preventDefault();
+    if (state.clipView) state.clipView.filter = filterTarget.dataset.clipFilter || "all";
+    updateProjectClipView();
+    return;
+  }
+  const zipLink = e.target.closest("#clip-zip-download");
+  if (zipLink && zipLink.getAttribute("aria-disabled") === "true") {
+    e.preventDefault();
+    return;
+  }
   const target = e.target.closest("[data-action]");
   if (!target) {
     if (e.target.classList && e.target.classList.contains("modal-back")) closeModal();
@@ -3027,7 +3375,86 @@ document.addEventListener("click", async (e) => {
   }
 
   try {
-    if (action === "open-job") {
+    if (action === "clip-cover-hd") {
+      const clip = state.editing;
+      const video = $("#preview");
+      const hasFile = Boolean(clip && clip.has_file);
+      let timestamp = Number(video && video.currentTime) || 0;
+      if (!hasFile && clip && timestamp < Number(clip.start || 0)) timestamp = Number(clip.start || 0);
+      const query = `t=${encodeURIComponent(timestamp.toFixed(3))}${hasFile ? "" : "&original=1"}`;
+      await saveCoverBlob(`/api/clips/${encodeURIComponent(id)}/cover?${query}`, `${id}_cover.png`);
+      toast("Cover HD 1080×1920 diunduh", "ok");
+      return;
+    } else if (action === "copy-all-meta") {
+      await copyAllClipMeta();
+      return;
+    } else if (action === "save-caption-default") {
+      const select = $("#default-caption-style");
+      if (!select) return;
+      if (await saveSettings(captionPresetSettings(select.value))) toast("Preset subtitle disimpan sebagai default", "ok");
+      return;
+    } else if (action === "gemini-key-save") {
+      const input = $("#gemini-api-key");
+      const key = input && input.value.trim();
+      if (!key) {
+        toast("Tempel API key terlebih dahulu", "warn");
+        return;
+      }
+      if (await saveSettings({ gemini_api_key: key })) {
+        input.value = "";
+        input.placeholder = "Key tersimpan · tempel untuk mengganti";
+        toast("Gemini API key disimpan lokal", "ok");
+        await renderSettings();
+      }
+      return;
+    } else if (action === "gemini-key-clear") {
+      if (!confirm("Hapus Google Gemini API key yang tersimpan?")) return;
+      if (await saveSettings({ gemini_api_key: "" })) {
+        const input = $("#gemini-api-key");
+        if (input) input.value = "";
+        toast("Gemini API key dihapus", "ok");
+        await renderSettings();
+      }
+      return;
+    } else if (action === "select-visible-clips") {
+      const visible = visibleModeClips();
+      const allSelected = visible.length > 0 && visible.every((clip) => state.clipView.selected.has(clip.id));
+      visible.forEach((clip) => {
+        if (allSelected) state.clipView.selected.delete(clip.id);
+        else state.clipView.selected.add(clip.id);
+      });
+      updateProjectClipView();
+      return;
+    } else if (action === "clear-clip-selection") {
+      state.clipView.selected.clear();
+      updateProjectClipView();
+      return;
+    } else if (action === "toggle-star") {
+      const clip = (state.job && state.job.clips || []).find((item) => item.id === id);
+      if (!clip) return;
+      const nextStarred = !clipIsStarred(clip);
+      await api("/api/clips/" + encodeURIComponent(id), {
+        method: "PATCH",
+        body: { starred: nextStarred },
+      });
+      await renderProject(clip.job_id);
+      toast(nextStarred ? "Clip ditandai prioritas" : "Prioritas clip dihapus", "ok");
+      return;
+    } else if (action === "batch-star" || action === "batch-approve") {
+      const jobId = state.job && state.job.id;
+      const ids = visibleModeClips().filter((clip) => state.clipView.selected.has(clip.id)).map((clip) => clip.id);
+      if (!jobId || !ids.length) {
+        toast("Pilih minimal satu clip yang terlihat", "warn");
+        return;
+      }
+      const res = await api(`/api/jobs/${encodeURIComponent(jobId)}/clips/batch-meta`, {
+        method: "POST",
+        body: { ids, action: action === "batch-star" ? "star" : "approve" },
+      });
+      toast(action === "batch-star" ? `${res.updated} clip ditandai prioritas` : `${res.updated} clip disetujui`, "ok");
+      await renderProject(jobId);
+      return;
+    } else if (action === "open-job") {
       e.preventDefault();
       await openProjectModeModal(id);
     } else if (action === "open-mode-modal") {
@@ -3543,7 +3970,35 @@ async function importCookiesFile(file) {
 /* unggah cookies.txt: lewat tombol file picker */
 document.addEventListener("change", async (e) => {
   const el = e.target;
-  if (!el || el.id !== "cookies-file") return;
+  if (!el) return;
+  if (el.matches && el.matches("[data-clip-select]")) {
+    const clipId = el.dataset.clipSelect;
+    if (el.checked) state.clipView.selected.add(clipId);
+    else state.clipView.selected.delete(clipId);
+    updateProjectClipView();
+    return;
+  }
+  if (el.matches && el.matches("[data-clip-sort]")) {
+    state.clipView.sort = el.value === "time" ? "time" : "score";
+    updateProjectClipView();
+    return;
+  }
+  if (el.matches && el.matches("[data-clip-workflow]")) {
+    const clipId = el.dataset.id;
+    const jobId = state.job && state.job.id;
+    try {
+      await api("/api/clips/" + encodeURIComponent(clipId), {
+        method: "PATCH", body: { workflow_status: el.value },
+      });
+      toast("Status workflow diperbarui", "ok");
+      if (jobId) await renderProject(jobId);
+    } catch (err) {
+      toast("Gagal mengubah status: " + err.message, "bad");
+      if (jobId) await renderProject(jobId);
+    }
+    return;
+  }
+  if (el.id !== "cookies-file") return;
   await importCookiesFile(el.files && el.files[0]);
 });
 

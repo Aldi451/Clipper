@@ -34,7 +34,13 @@ from . import media
 from .config import CLIP_MAX_SECONDS
 
 # Versi algoritma deteksi framing — dinaikkan agar klip lama otomatis dianalisa ulang saat render
-DETECTOR_VERSION = 3
+DETECTOR_VERSION = 4
+
+# Padding inset kamera host (kepala + bahu ala OpenShorts camera_inset.py)
+INSET_PADDING = 1.45
+# Ambang koeksistensi 2 pembicara podcast (split_layout.py)
+SPLIT_MIN_COEXISTENCE = 0.45
+SPLIT_MIN_SEPARATION = 0.20
 
 # Rentang fokus yang aman: kamera tidak pernah mentok total ke tepi frame
 FOCUS_MIN = 0.02
@@ -472,21 +478,35 @@ def _face_live_activity(
         inner_sum = inner_diff * float((x2 - x1) * (y2 - y1))
         ring_area = max(1.0, float((ox2 - ox1) * (oy2 - oy1) - (x2 - x1) * (y2 - y1)))
         ring_diff = max(0.0, (outer_sum - inner_sum) / ring_area)
+
+        # 3) Mouth-region activity (OpenShorts active_speaker.py: 60%–92% tinggi wajah)
+        mx1 = max(0, int(round(cx - fw * 0.26)))
+        mx2 = min(w, int(round(cx + fw * 0.26)))
+        my1 = max(0, int(round(cy + fw * 0.06)))
+        my2 = min(h, int(round(cy + fw * 0.44)))
+        if mx2 - mx1 >= 4 and my2 - my1 >= 4:
+            mouth_diff = float(cv2.absdiff(curr_gray[my1:my2, mx1:mx2], prev_gray[my1:my2, mx1:mx2]).mean()[0])
+        else:
+            mouth_diff = inner_diff
     except Exception:
         return 2.0, round(skin_ratio, 3), 1.0
 
+    # Gabungkan gerakan wajah dengan bobot ekstra pada area mulut saat berbicara
+    effective_inner = max(inner_diff, inner_diff * 0.55 + mouth_diff * 0.65)
+
     # Jika seluruh layar berganti mendadak (scene cut / scroll menu besar), jangan anggap bicara
-    if ring_diff > 24.0 and inner_diff <= ring_diff * 1.12:
+    if ring_diff > 24.0 and effective_inner <= ring_diff * 1.12:
         motion = 0.4
     else:
-        motion = inner_diff
+        motion = effective_inner
 
     # Wajah poster/wallpaper statis (diam total)
     if motion < 1.30:
         live_weight = 0.08
     elif motion <= 32.0 and (motion >= ring_diff * 0.60 or motion >= 2.2):
         skin_bonus = 1.25 if 0.14 <= skin_ratio <= 0.88 else 0.85
-        live_weight = (1.6 + min(2.0, motion / 3.2)) * skin_bonus
+        mouth_bonus = 1.22 if mouth_diff >= inner_diff * 1.08 and mouth_diff >= 1.8 else 1.0
+        live_weight = (1.6 + min(2.0, motion / 3.2)) * skin_bonus * mouth_bonus
     else:
         live_weight = 0.55
     return round(motion, 3), round(skin_ratio, 3), round(live_weight, 3)
@@ -827,8 +847,9 @@ def _evaluate_facecam(
         if not ((in_corner_or_edge or is_small) and std_x <= 0.11):
             return fallback_corner
 
-    # Kalibrasi zoom facecam (2.35x lebar wajah agar fokus pas ke wajah & mic host di panel bawah)
-    cam_scale = _clamp(max(0.20, med_w * 2.35), 0.19, 0.38)
+    # Kalibrasi zoom facecam + INSET_PADDING (1.45x ala OpenShorts camera_inset.py
+    # agar kepala + bahu + mic host masuk proporsional di panel bawah)
+    cam_scale = _clamp(max(0.22, med_w * 2.15 * (INSET_PADDING / 1.30)), 0.20, 0.42)
     game_x = 0.56 if med_x < 0.35 else (0.44 if med_x > 0.65 else 0.50)
     corner = _corner_label(med_x, med_y)
     return {
@@ -839,6 +860,68 @@ def _evaluate_facecam(
         "game_x": round(game_x, 4),
         "corner": corner,
         "confidence": round(max(gameplay_score, unique_cluster_hits / max(1, total_frames)), 3),
+    }
+
+
+def _evaluate_split_speakers(
+    face_records: list[dict[str, float]],
+    total_frames: int,
+) -> dict[str, Any] | None:
+    """Deteksi 2 pembicara berdampingan untuk mode Podcast Split (Atas Pembicara 1, Bawah Pembicara 2).
+
+    Mengadopsi logika OpenShorts ``split_layout.py``:
+    - Dua wajah hidup muncul bersamaan di frame yang sama (koeksistensi >= 45% dari frame berwajah)
+    - Jarak horizontal antar pembicara >= 20% lebar layar (kiri vs kanan).
+    """
+    if total_frames < 4 or len(face_records) < 4:
+        return None
+    by_time: dict[float, list[dict[str, float]]] = {}
+    for rec in face_records:
+        if float(rec.get("live", 1.0)) < 0.35:
+            continue
+        t = round(float(rec.get("at", 0.0)), 2)
+        by_time.setdefault(t, []).append(rec)
+
+    if len(by_time) < 3:
+        return None
+
+    dual_frames = 0
+    left_xs: list[float] = []
+    left_ys: list[float] = []
+    right_xs: list[float] = []
+    right_ys: list[float] = []
+
+    for _, recs in by_time.items():
+        if len(recs) < 2:
+            continue
+        # Ambil 2 wajah terbesar/terhidup di frame tersebut
+        top_two = sorted(recs, key=lambda r: float(r.get("nw", 0.08)) * float(r.get("live", 1.0)), reverse=True)[:2]
+        left_f, right_f = sorted(top_two, key=lambda r: float(r.get("nx", 0.5)))
+        sep = float(right_f["nx"]) - float(left_f["nx"])
+        if sep >= SPLIT_MIN_SEPARATION:
+            dual_frames += 1
+            left_xs.append(float(left_f["nx"]))
+            left_ys.append(float(left_f["ny"]))
+            right_xs.append(float(right_f["nx"]))
+            right_ys.append(float(right_f["ny"]))
+
+    coexistence = dual_frames / float(max(1, len(by_time)))
+    if dual_frames < 3 or coexistence < SPLIT_MIN_COEXISTENCE:
+        return None
+
+    mid = dual_frames // 2
+    lx = sorted(left_xs)[mid]
+    ly = sorted(left_ys)[mid]
+    rx = sorted(right_xs)[mid]
+    ry = sorted(right_ys)[mid]
+    return {
+        "ok": True,
+        "left_x": round(_clamp(lx, 0.08, 0.48), 4),
+        "left_y": round(_clamp(ly, 0.12, 0.88), 4),
+        "right_x": round(_clamp(rx, 0.52, 0.92), 4),
+        "right_y": round(_clamp(ry, 0.12, 0.88), 4),
+        "coexistence": round(coexistence, 3),
+        "dual_frames": dual_frames,
     }
 
 
@@ -983,9 +1066,17 @@ def analyze(
         if is_landscape
         else None
     )
+    split_speakers = (
+        _evaluate_split_speakers(all_face_records, len(frames))
+        if is_landscape and facecam is None
+        else None
+    )
 
     if facecam is not None:
         kind = "gameplay"
+        ok = True
+    elif split_speakers is not None and coverage >= 0.35 and live_ratio >= 0.22:
+        kind = "split"
         ok = True
     elif bool(segments) and coverage >= 0.35 and live_ratio >= 0.22 and len(segments) > 0:
         kind = "speaker"
@@ -1010,6 +1101,7 @@ def analyze(
         "duration": round(length, 3),
         "source_size": [source_w, source_h],
         "facecam": facecam or {},
+        "split": split_speakers or {},
         "context": ctx_info,
         "reason": "",
     }
@@ -1017,6 +1109,11 @@ def analyze(
         result["reason"] = (
             f"Video gameplay terdeteksi (facecam host di {facecam.get('corner', 'pojok')}) — "
             "atas gameplay, bawah host"
+        )
+    elif kind == "split" and split_speakers:
+        result["reason"] = (
+            f"Podcast 2 pembicara terdeteksi ({int(split_speakers.get('coexistence', 0.5) * 100)}% frame berdampingan) — "
+            "atas pembicara 1, bawah pembicara 2"
         )
     elif not segments:
         result["reason"] = "Tidak ada wajah pembicara aktif — fokus pada topik & hook video"
@@ -1035,6 +1132,9 @@ def summary(result: dict[str, Any] | None) -> str:
     if result.get("kind") == "gameplay" and result.get("facecam"):
         corner = (result.get("facecam") or {}).get("corner") or "pojok"
         return f"Mode Gameplay · atas game, bawah host ({corner})"
+    if result.get("kind") == "split" and result.get("split"):
+        coex = int(float((result.get("split") or {}).get("coexistence", 0.5)) * 100)
+        return f"Mode Podcast Split 2 Pembicara · atas kiri, bawah kanan ({coex}%)"
     if not result.get("ok"):
         return result.get("reason") or "Fokus topik & hook video (kamera di tengah)"
     moves = int(result.get("moves") or 0)

@@ -118,10 +118,16 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "llm_enabled": False,
     "llm_url": "http://127.0.0.1:11434",
     "llm_model": "llama3.1:8b",
+    # Google Gemini API (gratis dari Google AI Studio — ala OpenShorts / edwins.ai.id)
+    "gemini_enabled": True,
+    "gemini_api_key": "",
+    "gemini_model": "gemini-2.5-flash",
     # render
-    "layout": "fit",             # fit (blur bg) | crop (isi penuh)
+    "layout": "fit",             # fit (blur bg) | crop (isi penuh) | gameplay | split
     "crop_focus": 0.5,           # 0 = kiri, 0.5 = tengah, 1 = kanan (mode crop)
+    "punch_in": True,            # zoom punch-in dinamis saat awal hook & momen penekanan suara
     "captions": True,
+    "caption_style": "karaoke-yellow",
     "caption_words": 3,          # jumlah kata per baris caption
     "caption_uppercase": True,
     "caption_font": "Inter",

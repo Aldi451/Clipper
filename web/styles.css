@@ -1349,3 +1349,63 @@ select.ed-mini { width: 76px !important; }
   z-index: 4;
 }
 
+/* Clipper Pro curation toolbar */
+.clip-toolbar { display: flex; flex-direction: column; gap: 12px; margin: 0 0 16px; }
+.clip-filter-row, .clip-toolbar-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.clip-filter-pill {
+  appearance: none; border: 1px solid var(--border); border-radius: 999px;
+  padding: 7px 12px; background: rgba(255,255,255,.035); color: var(--muted);
+  cursor: pointer; font-size: 12px; font-weight: 650; transition: .15s ease;
+}
+.clip-filter-pill:hover { border-color: var(--border-strong); color: var(--text); }
+.clip-filter-pill.active { border-color: rgba(124,92,255,.65); color: #fff; background: rgba(124,92,255,.22); }
+.clip-sort-label { display: inline-flex; align-items: center; gap: 7px; }
+.clip-sort-label .select { width: auto; min-width: 138px; padding: 7px 28px 7px 10px; }
+.clip-zip-link[aria-disabled="true"] { opacity: .45; pointer-events: none; }
+.clip-filter-empty { grid-column: 1/-1; padding: 22px; border: 1px dashed var(--border-strong); border-radius: 12px; text-align: center; color: var(--muted); }
+.clip-curation-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 2px 0 3px; }
+.clip-select-label, .clip-workflow-label { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; }
+.clip-select-label { color: var(--muted); cursor: pointer; }
+.clip-select-label input { accent-color: var(--accent); margin: 0; }
+.clip-workflow-label .select { width: auto; min-width: 98px; padding: 5px 24px 5px 8px; font-size: 11px; }
+.clip-star { padding-left: 8px; padding-right: 8px; }
+.clip-star.is-starred { color: #fcd34d; border-color: rgba(252,211,77,.35); background: rgba(252,211,77,.12); }
+
+/* Social preview safe zones */
+.phone { position: relative; }
+.clip-preview-tools { display: flex; align-items: center; justify-content: space-between; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
+.clip-preview-tools label { display: inline-flex; align-items: center; gap: 6px; }
+.clip-preview-tools .select { width: auto; min-width: 96px; padding: 6px 26px 6px 9px; font-size: 11px; }
+.clip-safe-zone, .ed-safe-zone { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+.clip-safe-frame, .ed-safe-frame { position: absolute; border: 1.5px dashed rgba(52,211,153,.95); box-shadow: 0 0 0 999px rgba(4,8,12,.10); }
+.clip-safe-frame span, .ed-safe-frame span {
+  position: absolute; top: 4px; left: 5px; padding: 2px 6px; border-radius: 5px;
+  color: #d1fae5; background: rgba(3,25,17,.78); border: 1px solid rgba(52,211,153,.6);
+  font-size: 9px; font-weight: 750; white-space: nowrap; letter-spacing: .03em;
+}
+.mobile-feed-counter { margin-top: 5px; font-weight: 700; }
+.mobile-feed-counter.safe { color: #6ee7b7; }
+.mobile-feed-counter.warn { color: #fcd34d; }
+.mobile-feed-counter.over { color: #fca5a5; }
+.meta-copy-box { padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,.025); }
+.meta-copy-box .select { margin-top: 4px; }
+
+/* Editor preview overlays, split layout and quick playback controls */
+.ed-preview-options { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; }
+.ed-preview-options label { display: inline-flex; align-items: center; gap: 7px; }
+.ed-preview-options .select { width: auto; min-width: 110px; padding: 6px 28px 6px 10px; }
+.ed-split-wrap { position: absolute; inset: 0; z-index: 1; overflow: hidden; background: #000; }
+.ed-split-wrap video { position: absolute; left: 0; width: 100%; object-fit: cover; background: #000; }
+.ed-split-divider { position: absolute; z-index: 2; left: 0; right: 0; top: 50%; height: 5px; transform: translateY(-50%); background: #ffd700; box-shadow: 0 0 10px rgba(255,215,0,.8); pointer-events: none; }
+.ed-speed-select { width: 72px !important; flex: none; padding: 7px 24px 7px 9px !important; }
+
+@media (max-width: 720px) {
+  .clip-toolbar-actions { align-items: stretch; }
+  .clip-sort-label { width: 100%; justify-content: space-between; }
+  .clip-toolbar-actions .btn, .clip-toolbar-actions .clip-zip-link { flex: 1 1 auto; justify-content: center; }
+  .clip-preview-tools { justify-content: flex-start; }
+  .ed-preview-options { justify-content: flex-start; }
+  .ed-transport { flex-wrap: wrap; }
+  .ed-speed-select { order: 1; }
+}
+

@@ -2,17 +2,22 @@
 from __future__ import annotations
 
 import json
+import math
 import mimetypes
 import os
 import re
 import shutil
+import subprocess
+import tempfile
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 from . import analyze, db, discover, editor, ingest, media, paths, pipeline, speech, tiktok, transcribe, youtube
 from .config import (
@@ -135,12 +140,16 @@ def create_app() -> FastAPI:
     def get_settings() -> dict[str, Any]:
         settings = load_settings()
         settings.pop("yt_client_secret", None)
+        gemini_key = str(settings.pop("gemini_api_key", "") or "").strip()
+        settings["gemini_api_key_configured"] = bool(gemini_key)
         return settings
 
     @app.patch("/api/settings")
     def patch_settings(patch: dict[str, Any] = Body(...)) -> dict[str, Any]:
         saved = update_settings(patch)
         saved.pop("yt_client_secret", None)
+        gemini_key = str(saved.pop("gemini_api_key", "") or "").strip()
+        saved["gemini_api_key_configured"] = bool(gemini_key)
         return saved
 
     # ------------------------------------------------------------------ #
@@ -409,6 +418,62 @@ def create_app() -> FastAPI:
         queued = pipeline.render_job_all(job_id, only_dirty=only_dirty, mode=mode)
         return {"ok": True, "queued": queued, "clips": len(db.list_clips(job_id))}
 
+    @app.get("/api/jobs/{job_id}/export.zip")
+    def export_job_zip(job_id: str, ids: str | None = None) -> Response:
+        """Unduh seluruh render project, atau hanya clip yang dipilih di UI."""
+        job = db.get_job(job_id)
+        if not job:
+            raise HTTPException(404, "Project tidak ditemukan")
+        clips = db.list_clips(job_id)
+        if ids is not None:
+            requested = list(dict.fromkeys(part.strip() for part in ids.split(",") if part.strip()))
+            if not requested:
+                raise HTTPException(400, "Pilih minimal satu clip untuk diunduh")
+            by_id = {clip["id"]: clip for clip in clips}
+            invalid = [clip_id for clip_id in requested if clip_id not in by_id]
+            if invalid:
+                raise HTTPException(400, "Ada clip pilihan yang bukan bagian dari project ini")
+            clips = [by_id[clip_id] for clip_id in requested]
+
+        ready: list[tuple[dict[str, Any], Path]] = []
+        for clip in clips:
+            resolved = paths.resolve_media_path(
+                clip.get("file"), (WORK_DIR / job_id,)
+            )
+            if resolved is not None and resolved.is_file():
+                ready.append((clip, resolved))
+        if not ready:
+            raise HTTPException(404, "Belum ada clip hasil render untuk diunduh")
+
+        job_dir = WORK_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix="clips_", suffix=".zip", dir=str(job_dir))
+        os.close(fd)
+        archive_path = Path(temp_name)
+        used_names: set[str] = set()
+        try:
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                for clip, media_path in ready:
+                    title = re.sub(r"[^\w. -]+", "_", str(clip.get("title") or "clip"))
+                    title = title.strip(" ._")[:70] or "clip"
+                    arcname = f"{int(clip.get('idx') or 0) + 1:02d}_{title}.mp4"
+                    if arcname in used_names:
+                        arcname = f"{int(clip.get('idx') or 0) + 1:02d}_{title}_{clip['id']}.mp4"
+                    used_names.add(arcname)
+                    archive.write(media_path, arcname)
+        except Exception:
+            safe_unlink(archive_path)
+            raise
+
+        job_title = re.sub(r"[^\w. -]+", "_", str(job.get("title") or "clips"))
+        filename = f"{job_title.strip(' ._')[:70] or 'clips'}.zip"
+        return FileResponse(
+            archive_path,
+            media_type="application/zip",
+            filename=filename,
+            background=BackgroundTask(safe_unlink, archive_path),
+        )
+
     @app.delete("/api/jobs/{job_id}")
     def delete_job(job_id: str) -> dict[str, Any]:
         job = db.get_job(job_id)
@@ -484,6 +549,51 @@ def create_app() -> FastAPI:
         clip["has_file"] = bool(clip.get("file")) and paths.media_exists(clip["file"])
         return clip
 
+    @app.post("/api/jobs/{job_id}/clips/batch-meta")
+    def batch_clip_meta(job_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        if not db.get_job(job_id):
+            raise HTTPException(404, "Project tidak ditemukan")
+        raw_ids = payload.get("ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise HTTPException(400, "Pilih minimal satu clip")
+        ids = list(dict.fromkeys(str(value).strip() for value in raw_ids if str(value).strip()))
+        if not ids or len(ids) > 500:
+            raise HTTPException(400, "Jumlah clip pilihan tidak valid")
+
+        changes: dict[str, Any] = {}
+        action = str(payload.get("action") or "").strip().lower()
+        if "starred" in payload:
+            if not isinstance(payload["starred"], bool):
+                raise HTTPException(400, "starred harus bernilai true atau false")
+            changes["starred"] = payload["starred"]
+        elif action in ("star", "unstar"):
+            changes["starred"] = action == "star"
+
+        workflow_status = payload.get("workflow_status")
+        if workflow_status is None and action == "approve":
+            workflow_status = "approved"
+        if workflow_status is not None:
+            workflow_status = str(workflow_status).strip().lower()
+            if workflow_status not in {"draft", "review", "approved", "posted"}:
+                raise HTTPException(400, "workflow_status harus draft, review, approved, atau posted")
+            changes["workflow_status"] = workflow_status
+        if not changes:
+            raise HTTPException(400, "Tidak ada perubahan metadata yang diminta")
+
+        clips_by_id = {clip["id"]: clip for clip in db.list_clips(job_id)}
+        missing = [clip_id for clip_id in ids if clip_id not in clips_by_id]
+        if missing:
+            raise HTTPException(400, "Ada clip pilihan yang bukan bagian dari project ini")
+        for clip_id in ids:
+            meta = dict(clips_by_id[clip_id].get("meta") or {})
+            meta.update(changes)
+            db.update_clip(clip_id, meta=meta)
+        return {
+            "ok": True,
+            "updated": len(ids),
+            "clips": [db.get_clip(clip_id) for clip_id in ids],
+        }
+
     @app.patch("/api/clips/{clip_id}")
     def patch_clip(clip_id: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         clip = db.get_clip(clip_id)
@@ -508,6 +618,17 @@ def create_app() -> FastAPI:
                 pass
         if "captions" in payload:
             meta["captions"] = bool(payload["captions"])
+            patch["meta"] = meta
+        if "starred" in payload:
+            if not isinstance(payload["starred"], bool):
+                raise HTTPException(400, "starred harus bernilai true atau false")
+            meta["starred"] = payload["starred"]
+            patch["meta"] = meta
+        if "workflow_status" in payload:
+            workflow_status = str(payload["workflow_status"] or "").strip().lower()
+            if workflow_status not in {"draft", "review", "approved", "posted"}:
+                raise HTTPException(400, "workflow_status harus draft, review, approved, atau posted")
+            meta["workflow_status"] = workflow_status
             patch["meta"] = meta
         # perubahan yang memengaruhi hasil video → tandai perlu render ulang
         rerender_keys = {"start", "duration", "hook", "focus", "captions"}
@@ -686,6 +807,72 @@ def create_app() -> FastAPI:
         if not clip or thumb is None:
             raise HTTPException(404, "Thumbnail belum ada")
         return FileResponse(thumb, media_type="image/jpeg")
+
+    @app.get("/api/clips/{clip_id}/cover")
+    def clip_cover(clip_id: str, t: float = 0.0, original: bool = False) -> Response:
+        """Ambil frame cover 1080×1920 dari hasil render atau video sumber."""
+        clip = db.get_clip(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip tidak ditemukan")
+        if not math.isfinite(t) or t < 0:
+            raise HTTPException(400, "Timestamp harus berupa angka positif")
+
+        input_path: Path | None = None
+        timestamp = float(t)
+        if not original:
+            input_path = paths.resolve_media_path(
+                clip.get("file"), (WORK_DIR / clip.get("job_id", ""),)
+            )
+        if input_path is None:
+            job = db.get_job(clip["job_id"]) or {}
+            input_path = paths.resolve_media_path(
+                job.get("source_path"), (WORK_DIR / clip["job_id"],)
+            )
+            if input_path is None:
+                raise HTTPException(404, "Video render maupun sumber tidak ditemukan")
+            if not original:
+                timestamp += max(0.0, float(clip.get("start") or 0.0))
+        if not input_path.is_file():
+            raise HTTPException(404, "File video tidak ditemukan")
+
+        job_dir = WORK_DIR / clip["job_id"]
+        job_dir.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f"cover_{clip_id[:32]}_", suffix=".png", dir=str(job_dir)
+        )
+        os.close(fd)
+        cover_path = Path(temp_name)
+        try:
+            ffmpeg = ffmpeg_exe()
+        except Exception as exc:  # noqa: BLE001
+            safe_unlink(cover_path)
+            raise HTTPException(500, f"ffmpeg tidak tersedia: {exc}") from exc
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{timestamp:.3f}", "-i", str(input_path),
+            "-frames:v", "1", "-an",
+            "-vf", "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
+                   "crop=1080:1920,setsar=1",
+            "-c:v", "png", str(cover_path),
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+        except subprocess.TimeoutExpired:
+            safe_unlink(cover_path)
+            raise HTTPException(504, "Pembuatan cover terlalu lama")
+        except Exception as exc:  # noqa: BLE001
+            safe_unlink(cover_path)
+            raise HTTPException(500, f"Gagal menjalankan ffmpeg: {exc}") from exc
+        if result.returncode != 0 or not cover_path.exists() or cover_path.stat().st_size <= 0:
+            safe_unlink(cover_path)
+            detail = (result.stderr or "Tidak ada frame pada timestamp ini").strip()[-500:]
+            raise HTTPException(422, f"Gagal mengambil frame cover: {detail}")
+        return FileResponse(
+            cover_path,
+            media_type="image/png",
+            filename=f"{clip_id}_cover.png",
+            background=BackgroundTask(safe_unlink, cover_path),
+        )
 
     @app.get("/api/jobs/{job_id}/source")
     def job_source(job_id: str, request: Request) -> Response:
@@ -1369,7 +1556,11 @@ def create_app() -> FastAPI:
                 spec["framing_v"] = int(result.get("detector_v") or 0)
                 spec["framing"] = editor._framing_from_meta(result)  # noqa: SLF001
                 spec["gameplay"] = editor._gameplay_from_meta(result)  # noqa: SLF001
-                if result.get("kind") == "gameplay":
+                if result.get("kind") == "split":
+                    spec["split"] = editor._split_from_meta(result)  # noqa: SLF001
+                    spec["layout"] = "split"
+                    spec.setdefault("captions", {})["y"] = 0.50
+                elif result.get("kind") == "gameplay":
                     spec["layout"] = "gameplay"
                     spec.setdefault("captions", {})["y"] = round(
                         float(spec["gameplay"].get("split") or 0.62), 2
