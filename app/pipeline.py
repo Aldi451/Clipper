@@ -288,8 +288,16 @@ def _run_analysis(job_id: str) -> None:
             except Exception:  # noqa: BLE001 - framing opsional, jangan gagalkan job
                 traceback.print_exc()
 
-        if settings.get("llm_enabled") and analyze.ollama_available(settings) and candidates:
-            _job_set(job_id, message="Minta judul ke LLM lokal…")
+        if candidates and (
+            analyze.gemini_available(settings)
+            or (settings.get("llm_enabled") and analyze.ollama_available(settings))
+        ):
+            _job_set(
+                job_id,
+                message="Menyempurnakan hook & skor viral via Gemini AI…"
+                if analyze.gemini_available(settings)
+                else "Minta judul ke LLM lokal…",
+            )
             analyze.refine_with_llm(candidates, settings)
 
         # 6) simpan clip AI (JANGAN hapus clip manual milik user!)

@@ -5,10 +5,12 @@ sehingga UI bisa edit bebas dan server bisa render ulang kapan saja.
 
 Struktur spec (semua opsional, ada default):
 {
-  "layout": "fit" | "crop" | "black",
+  "layout": "fit" | "crop" | "gameplay" | "split" | "black",
   "background": {"type": "blur"|"gradient"|"color", "blur": 30, "color1": "#0b0b12",
                  "color2": "#7c5cff", "darken": 0.12},
   "crop_focus": 0.5,
+  "split": {"left_x": 0.28, "left_y": 0.42, "right_x": 0.72, "right_y": 0.42, "split": 0.5},
+  "punch_in": true,
   "segments": [{"start": 12.0, "end": 20.5, "speed": 1.0}, ...],
   "captions": {"enabled": true, "word_level": true, "words_per_line": 3, "font": "Inter",
                "size": 86, "uppercase": true, "color": "#FFFFFF", "highlight": "#FFE02B",
@@ -54,6 +56,26 @@ class EditorError(RuntimeError):
 # template & gaya siap pakai
 # --------------------------------------------------------------------------- #
 CAPTION_STYLES: dict[str, dict[str, Any]] = {
+    "hormozi-gold": {
+        "label": "Hormozi Gold",
+        "size": 92, "uppercase": True, "color": "#FFFFFF", "highlight": "#FFD700",
+        "stroke": 10, "stroke_color": "#050508", "y": 0.76, "words_per_line": 3,
+    },
+    "mrbeast-neon": {
+        "label": "MrBeast Neon",
+        "size": 98, "uppercase": True, "color": "#FFFFFF", "highlight": "#00F0FF",
+        "stroke": 11, "stroke_color": "#000000", "y": 0.74, "words_per_line": 3,
+    },
+    "storyteller": {
+        "label": "Storyteller",
+        "size": 78, "uppercase": False, "color": "#FFFFFF", "highlight": "#FFE36E",
+        "stroke": 8, "stroke_color": "#08080C", "y": 0.78, "words_per_line": 4,
+    },
+    "viral-fire": {
+        "label": "Viral Fire",
+        "size": 92, "uppercase": True, "color": "#FFFFFF", "highlight": "#FF4D1C",
+        "stroke": 10, "stroke_color": "#080302", "y": 0.75, "words_per_line": 3,
+    },
     "karaoke-yellow": {
         "label": "Karaoke Kuning",
         "size": 88, "uppercase": True, "color": "#FFFFFF", "highlight": "#FFE02B",
@@ -88,16 +110,29 @@ CAPTION_STYLES: dict[str, dict[str, Any]] = {
 
 TEMPLATES: list[dict[str, Any]] = [
     {
+        "id": "hormozi-gold", "name": "Hormozi Gold", "desc": "Crop penuh + subtitle emas Hormozi",
+        "accent": ["#f59e0b", "#ffd700"],
+        "layout": "crop", "background": {"type": "color", "color1": "#080910"},
+        "captions": "hormozi-gold",
+    },
+    {
+        "id": "podcast-split", "name": "Podcast 2 Pembicara",
+        "desc": "Atas Pembicara 1, Bawah Pembicara 2 + subtitle tengah",
+        "accent": ["#6366f1", "#ffd700"],
+        "layout": "split", "background": {"type": "color", "color1": "#080910"},
+        "captions": "hormozi-gold",
+    },
+    {
         "id": "podcast-blur", "name": "Podcast Blur", "desc": "Video utuh + background blur",
         "accent": ["#1f2937", "#7c5cff"],
         "layout": "fit", "background": {"type": "blur", "blur": 32, "darken": 0.14},
         "captions": "karaoke-yellow",
     },
     {
-        "id": "mrbeast-crop", "name": "MrBeast", "desc": "Crop penuh, caption besar & tebal",
-        "accent": ["#ff2d55", "#ffb703"],
+        "id": "mrbeast-crop", "name": "MrBeast Neon", "desc": "Crop penuh, caption neon & tebal",
+        "accent": ["#ff2d55", "#00f0ff"],
         "layout": "crop", "background": {"type": "color", "color1": "#000000"},
-        "captions": "mrbeast",
+        "captions": "mrbeast-neon",
     },
     {
         "id": "neon-tiktok", "name": "Neon TikTok", "desc": "Crop + highlight cyan",
@@ -110,13 +145,13 @@ TEMPLATES: list[dict[str, Any]] = [
         "desc": "Atas gameplay, bawah facecam host + caption di tengah",
         "accent": ["#7c5cff", "#22d3ee"],
         "layout": "gameplay", "background": {"type": "color", "color1": "#080910"},
-        "captions": "karaoke-yellow",
+        "captions": "hormozi-gold",
     },
     {
         "id": "gradient-studio", "name": "Gradient Studio", "desc": "Video utuh + background gradien",
         "accent": ["#7c5cff", "#22d3ee"],
         "layout": "fit", "background": {"type": "gradient", "color1": "#160f2e", "color2": "#7c5cff"},
-        "captions": "podcast-box",
+        "captions": "storyteller",
     },
     {
         "id": "clean-vlog", "name": "Clean Vlog", "desc": "Minimalis, caption kecil rapi",
@@ -588,34 +623,46 @@ def default_spec(
     framing_raw = clip_meta.get("framing") if isinstance(clip_meta.get("framing"), dict) else {}
     framing_kind = str(framing_raw.get("kind") or "")
     gameplay_spec = _gameplay_from_meta(framing_raw)
+    split_spec = _split_from_meta(framing_raw)
 
     layout = str(settings.get("layout") or "fit")
     if settings.get("auto_framing", True):
         if framing_kind == "gameplay":
             layout = "gameplay"
-        elif framing_kind == "speaker" and framing_raw.get("ok") and layout not in ("black", "gameplay"):
+        elif framing_kind == "split":
+            layout = "split"
+        elif framing_kind == "speaker" and framing_raw.get("ok") and layout not in ("black", "gameplay", "split"):
             layout = "crop"
 
     background = {"type": "blur", "blur": 30, "color1": "#0B0B12", "color2": "#7C5CFF", "darken": 0.12}
-    if layout in ("crop", "gameplay"):
+    if layout in ("crop", "gameplay", "split"):
         background["type"] = "color"
 
-    caption_style = dict(CAPTION_STYLES["karaoke-yellow"])
-    default_cap_y = round(gameplay_spec["split"], 2) if layout == "gameplay" else 0.76
+    default_style_id = str(settings.get("caption_style") or "karaoke-yellow")
+    if default_style_id not in CAPTION_STYLES:
+        default_style_id = "karaoke-yellow"
+    caption_style = dict(CAPTION_STYLES[default_style_id])
+    if layout == "gameplay":
+        default_cap_y = round(gameplay_spec["split"], 2)
+    elif layout == "split":
+        default_cap_y = round(split_spec["split"], 2)
+    else:
+        default_cap_y = float(caption_style.get("y") or 0.76)
+
     captions = {
         "enabled": bool(settings.get("captions", True)) and clip_meta.get("captions") is not False,
         "word_level": True,
-        "words_per_line": _i(settings.get("caption_words"), 3),
+        "words_per_line": _i(settings.get("caption_words"), _i(caption_style.get("words_per_line"), 3)),
         "font": str(settings.get("caption_font") or "Inter"),
         "size": _i(caption_style["size"], 86),
-        "uppercase": bool(settings.get("caption_uppercase", True)),
-        "color": _hex(settings.get("caption_color"), "#FFFFFF"),
-        "highlight": _hex(settings.get("caption_highlight"), "#FFE02B"),
-        "stroke": 9,
-        "stroke_color": "#0B0B10",
+        "uppercase": bool(settings.get("caption_uppercase", caption_style.get("uppercase", True))),
+        "color": _hex(settings.get("caption_color"), caption_style.get("color", "#FFFFFF")),
+        "highlight": _hex(settings.get("caption_highlight"), caption_style.get("highlight", "#FFE02B")),
+        "stroke": _i(caption_style.get("stroke"), 9),
+        "stroke_color": _hex(caption_style.get("stroke_color"), "#0B0B10"),
         "y": default_cap_y,
         "mode": "caption",
-        "style": "karaoke-yellow",
+        "style": default_style_id,
         "mute_during_hook": True,
     }
     subtitles = generate_subtitles(
@@ -650,11 +697,13 @@ def default_spec(
     spec = {
         "version": 1,
         "framing_v": int(framing_raw.get("detector_v") or 0),
-        "layout": layout if layout in ("fit", "crop", "gameplay", "black") else "fit",
+        "layout": layout if layout in ("fit", "crop", "gameplay", "split", "black") else "fit",
+        "punch_in": bool(settings.get("punch_in", True)),
         "background": background,
         "crop_focus": _clamp(_f(focus, _f(settings.get("crop_focus"), 0.5)), 0.0, 1.0),
         "framing": _framing_from_meta(framing_raw),
         "gameplay": gameplay_spec,
+        "split": split_spec,
         "segments": segments,
         "captions": captions,
         "subtitles": subtitles,
@@ -667,11 +716,47 @@ def default_spec(
     default_template = str(settings.get("default_template") or "")
     if default_template and template_by_id(default_template):
         spec = apply_template(spec, default_template)
-        if settings.get("auto_framing", True) and framing_kind == "gameplay":
-            spec["layout"] = "gameplay"
-            spec["captions"]["y"] = round(gameplay_spec["split"], 2)
+        if settings.get("auto_framing", True):
+            if framing_kind == "gameplay":
+                spec["layout"] = "gameplay"
+                spec["captions"]["y"] = round(gameplay_spec["split"], 2)
+            elif framing_kind == "split":
+                spec["layout"] = "split"
+                spec["captions"]["y"] = round(split_spec["split"], 2)
         spec["output"] = output
     return spec
+
+
+def _split_from_meta(raw: Any) -> dict[str, Any]:
+    """Ambil koordinat 2 pembicara dari meta framing untuk layout Podcast Split."""
+    sp = (raw.get("split") if isinstance(raw, dict) else None) or {}
+    if not isinstance(sp, dict):
+        sp = {}
+    left_x = _clamp(_f(sp.get("left_x"), 0.28), 0.08, 0.48)
+    left_y = _clamp(_f(sp.get("left_y"), 0.42), 0.12, 0.88)
+    right_x = _clamp(_f(sp.get("right_x"), 0.72), 0.52, 0.92)
+    right_y = _clamp(_f(sp.get("right_y"), 0.42), 0.12, 0.88)
+    split = _clamp(_f(sp.get("split"), 0.50), 0.42, 0.58)
+    return {
+        "left_x": round(left_x, 4),
+        "left_y": round(left_y, 4),
+        "right_x": round(right_x, 4),
+        "right_y": round(right_y, 4),
+        "split": round(split, 3),
+    }
+
+
+def _split_from_spec(raw: Any, base: Any) -> dict[str, Any]:
+    default = base if isinstance(base, dict) else _split_from_meta({})
+    if not isinstance(raw, dict):
+        return dict(default)
+    return {
+        "left_x": round(_clamp(_f(raw.get("left_x"), _f(default.get("left_x"), 0.28)), 0.08, 0.48), 4),
+        "left_y": round(_clamp(_f(raw.get("left_y"), _f(default.get("left_y"), 0.42)), 0.12, 0.88), 4),
+        "right_x": round(_clamp(_f(raw.get("right_x"), _f(default.get("right_x"), 0.72)), 0.52, 0.92), 4),
+        "right_y": round(_clamp(_f(raw.get("right_y"), _f(default.get("right_y"), 0.42)), 0.12, 0.88), 4),
+        "split": round(_clamp(_f(raw.get("split"), _f(default.get("split"), 0.50)), 0.42, 0.58), 3),
+    }
 
 
 def _gameplay_from_meta(raw: Any) -> dict[str, Any]:
@@ -797,12 +882,14 @@ def normalize_spec(
     result["framing_v"] = int(spec.get("framing_v") or base.get("framing_v") or 0)
     result["layout"] = (
         spec.get("layout")
-        if spec.get("layout") in ("fit", "crop", "gameplay", "black")
+        if spec.get("layout") in ("fit", "crop", "gameplay", "split", "black")
         else base["layout"]
     )
+    result["punch_in"] = _flag(spec.get("punch_in"), base.get("punch_in", True))
     result["crop_focus"] = _clamp(_f(spec.get("crop_focus"), base["crop_focus"]), 0.0, 1.0)
     result["framing"] = _framing_from_spec(spec.get("framing"), base.get("framing"))
     result["gameplay"] = _gameplay_from_spec(spec.get("gameplay"), base.get("gameplay"))
+    result["split"] = _split_from_spec(spec.get("split"), base.get("split"))
     result["template"] = str(spec.get("template") or "")[:40]
     result["segments"] = normalize_segments(spec.get("segments"), clip, source_duration)
 
@@ -983,11 +1070,12 @@ def apply_template(spec: dict[str, Any], template_id: str) -> dict[str, Any]:
     spec["layout"] = template["layout"]
     spec["background"] = {**spec.get("background", {}), **template.get("background", {})}
     captions = spec.setdefault("captions", {})
-    cap_y = (
-        round(_f((spec.get("gameplay") or {}).get("split"), 0.62), 2)
-        if template["layout"] == "gameplay"
-        else style["y"]
-    )
+    if template["layout"] == "gameplay":
+        cap_y = round(_f((spec.get("gameplay") or {}).get("split"), 0.62), 2)
+    elif template["layout"] == "split":
+        cap_y = round(_f((spec.get("split") or {}).get("split"), 0.50), 2)
+    else:
+        cap_y = style["y"]
     captions.update({
         "size": style["size"],
         "uppercase": style["uppercase"],
@@ -1248,10 +1336,49 @@ def _hook_word_lines(
 # --------------------------------------------------------------------------- #
 # render
 # --------------------------------------------------------------------------- #
+def _punch_in_intervals(spec: dict[str, Any], seg_out_start: float, seg_duration: float) -> list[tuple[float, float]]:
+    """Rencanakan interval Punch-In Zoom relatif ke timeline output segmen.
+
+    Subtitle disimpan dalam waktu output (setelah trim dan perubahan speed),
+    sedangkan ``segment.start`` memakai waktu sumber. ``seg_out_start`` menjaga
+    momen penekanan tetap sejajar saat klip berisi beberapa segmen.
+
+    - Zoom pembuka saat hook awal (detik 0.15 s/d 2.35)
+    - Zoom penekanan suara pada baris subtitle yang mengandung tanda seru/tanya
+      atau kata kunci penegas, berjarak minimal 6 detik agar tidak memusingkan mata.
+    """
+    if not _flag(spec.get("punch_in"), True) or seg_duration < 4.0:
+        return []
+    intervals: list[tuple[float, float]] = [(0.15, min(2.35, seg_duration * 0.40))]
+    last_end = intervals[0][1]
+    subs = spec.get("subtitles") if isinstance(spec.get("subtitles"), list) else []
+    emphasis_re = re.compile(
+        r"(\!|\?|rahasia|ternyata|wajib|jangan|bahaya|gila|parah|penting|fakta|bocor|uang|cuan|juta|miliar)",
+        re.IGNORECASE,
+    )
+    for line in subs:
+        if not isinstance(line, dict) or line.get("hidden"):
+            continue
+        st = _f(line.get("start")) - seg_out_start
+        en = _f(line.get("end")) - seg_out_start
+        text = str(line.get("text") or "")
+        if st < last_end + 5.5 or st <= 0.5 or st >= seg_duration - 1.2:
+            continue
+        if emphasis_re.search(text) or len(intervals) == 1 and st >= 6.5:
+            dur = _clamp(en - st, 1.4, 2.3)
+            intervals.append((round(st, 2), round(min(seg_duration - 0.3, st + dur), 2)))
+            last_end = st + dur
+            if len(intervals) >= 4:
+                break
+    return intervals
+
+
 def _layout_chain(layout: str, focus: float, background: dict[str, Any], fps: int,
                   width: int = CANVAS_W, height: int = CANVAS_H,
                   framing: list[dict[str, Any]] | None = None,
-                  gameplay: dict[str, Any] | None = None) -> str:
+                  gameplay: dict[str, Any] | None = None,
+                  split_spec: dict[str, Any] | None = None,
+                  punch_intervals: list[tuple[float, float]] | None = None) -> str:
     """Filter chain yang menghasilkan [vbase] berukuran canvas (1080x1920)."""
     focus = _clamp(focus, 0.0, 1.0)
     bg_type = background.get("type", "blur")
@@ -1260,6 +1387,29 @@ def _layout_chain(layout: str, focus: float, background: dict[str, Any], fps: in
         f"[0:v]fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease:"
         f"force_divisible_by=2,setsar=1[fgs]"
     )
+
+    if layout == "split":
+        # Mode Podcast 2 Pembicara (Stacked Split — OpenShorts split_layout.py):
+        # Bagian ATAS menampilkan Pembicara 1 (kiri), bagian BAWAH menampilkan Pembicara 2 (kanan).
+        sp = split_spec if isinstance(split_spec, dict) else {}
+        split_ratio = _clamp(_f(sp.get("split"), 0.50), 0.42, 0.58)
+        top_h = max(300, min(height - 300, int(round(height * split_ratio / 2) * 2)))
+        bot_h = height - top_h
+        left_x = _clamp(_f(sp.get("left_x"), 0.28), 0.08, 0.48)
+        left_y = _clamp(_f(sp.get("left_y"), 0.42), 0.12, 0.88)
+        right_x = _clamp(_f(sp.get("right_x"), 0.72), 0.52, 0.92)
+        right_y = _clamp(_f(sp.get("right_y"), 0.42), 0.12, 0.88)
+        return (
+            f"[0:v]fps={fps},split=2[topsrc][botsrc];"
+            f"[topsrc]scale={width}:{top_h}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{top_h}:x='clip((iw*{left_x:.4f})-({width}/2),0,iw-{width})':"
+            f"y='clip((ih*{left_y:.4f})-({top_h}*0.44),0,ih-{top_h})',setsar=1[vtop];"
+            f"[botsrc]scale={width}:{bot_h}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{bot_h}:x='clip((iw*{right_x:.4f})-({width}/2),0,iw-{width})':"
+            f"y='clip((ih*{right_y:.4f})-({bot_h}*0.44),0,ih-{bot_h})',setsar=1[vbot];"
+            f"[vtop][vbot]vstack=inputs=2,"
+            f"drawbox=x=0:y={top_h - 3}:w={width}:h=6:color=0xFFD700@0.90:t=fill,setsar=1[vbase]"
+        )
 
     if layout == "gameplay":
         # Mode Gameplay (Streamer / YouTuber Gamer):
@@ -1292,16 +1442,24 @@ def _layout_chain(layout: str, focus: float, background: dict[str, Any], fps: in
     if layout == "crop":
         # Framing otomatis: kamera mengikuti pembicara (ekspresi berbasis waktu).
         # Tanpa framing: satu titik fokus tetap seperti sebelumnya.
-        if framing:
-            x_expr = framing_module.crop_expression(framing, default=focus)
-            return (
-                f"[0:v]fps={fps},scale={width}:{height}:force_original_aspect_ratio=increase,"
-                f"crop={width}:{height}:x='(iw-{width})*({x_expr})':y='(ih-{height})/2',setsar=1[vbase]"
-            )
-        return (
+        x_expr = framing_module.crop_expression(framing, default=focus) if framing else f"{focus:.3f}"
+        base_crop = (
             f"[0:v]fps={fps},scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height}:x='(iw-{width})*{focus:.3f}':y='(ih-{height})/2',setsar=1[vbase]"
+            f"crop={width}:{height}:x='(iw-{width})*({x_expr})':y='(ih-{height})/2',setsar=1"
         )
+        if punch_intervals:
+            # Dynamic Punch-In Zoom (1.11x crop tengah saat hook awal & penekanan kata)
+            cond = "+".join(f"between(t,{st:.2f},{en:.2f})" for st, en in punch_intervals)
+            pw = int(round(width / 1.11 / 2) * 2)
+            ph = int(round(height / 1.11 / 2) * 2)
+            px = (width - pw) // 2
+            py = int(round((height - ph) * 0.38))
+            return (
+                f"{base_crop},split=2[vnorm][vpunch];"
+                f"[vpunch]crop={pw}:{ph}:{px}:{py},scale={width}:{height}:flags=lanczos,setsar=1[vzoomed];"
+                f"[vnorm][vzoomed]overlay=0:0:enable='gt({cond},0)',setsar=1[vbase]"
+            )
+        return f"{base_crop}[vbase]"
 
     if layout == "black":
         return (
@@ -1402,6 +1560,7 @@ def _render_segment(
     out_path: Path,
     workdir: Path,
     info: media.MediaInfo | None = None,
+    output_start: float = 0.0,
 ) -> None:
     fps = int(spec["output"]["fps"])
     layout = spec["layout"]
@@ -1416,10 +1575,13 @@ def _render_segment(
         framing_segments = framing_module.shift_segments(
             framing_spec.get("segments") or [], start, duration
         )
+    punch_intervals = _punch_in_intervals(spec, output_start, out_duration) if layout == "crop" else []
     chain = _layout_chain(
         layout, _f(spec.get("crop_focus"), 0.5), spec["background"], fps,
         framing=framing_segments,
         gameplay=spec.get("gameplay") if isinstance(spec.get("gameplay"), dict) else None,
+        split_spec=spec.get("split") if isinstance(spec.get("split"), dict) else None,
+        punch_intervals=punch_intervals,
     )
     if speed != 1.0:
         chain += f";[vbase]setpts=PTS/{speed:.4f}[vseg]"
@@ -1491,10 +1653,13 @@ def render_spec(
 
     # ---------- pass 1: potong & sesuaikan tiap segmen ----------
     piece_paths: list[Path] = []
-    for idx, segment in enumerate(segments):
+    for idx, (segment, out_range) in enumerate(zip(segments, with_out_ranges(segments))):
         piece = workdir / f"seg_{idx:02d}.mp4"
         report(0.03 + 0.55 * (idx / max(1, len(segments))), f"Memproses segmen {idx + 1}/{len(segments)}")
-        _render_segment(source_path, segment, spec, piece, workdir, source_info)
+        _render_segment(
+            source_path, segment, spec, piece, workdir, source_info,
+            output_start=float(out_range["out_start"]),
+        )
         if not piece.exists() or piece.stat().st_size < 512:
             raise EditorError(f"Segmen {idx + 1} gagal dirender")
         piece_info = media.probe(piece)

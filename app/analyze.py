@@ -567,6 +567,10 @@ def find_candidates(
     if not sentences:
         return []
     total_span = max(0.0, sentences[-1].end - sentences[0].start)
+    # Skalakan target minimal secara proporsional untuk podcast/stream panjang (ala OpenShorts clip_selection.py)
+    if total_span >= 1500.0 and target == 5:
+        length_floor = min(12, max(5, int(total_span // 360)))
+        target = max(target, length_floor)
     if total_span >= 60.0 and float(settings.get("min_clip_seconds") or 60) >= 60.0:
         min_len = max(60.0, min_len)
         max_len = max(min_len, max_len)
@@ -791,8 +795,137 @@ def _fmt(seconds: float) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# LLM lokal (Ollama) — opsional
+# Google Gemini API (Google AI Studio — ala OpenShorts / edwins.ai.id)
+# & LLM lokal (Ollama) — opsional, fallback 100% ke lokal bila tidak diisi
 # --------------------------------------------------------------------------- #
+def gemini_available(settings: dict[str, Any] | None = None) -> bool:
+    import os
+    settings = settings or load_settings()
+    if settings.get("gemini_enabled") is False:
+        return False
+    key = str(settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY") or "").strip()
+    return len(key) >= 16
+
+
+def refine_with_gemini(
+    candidates: list[Candidate],
+    settings: dict[str, Any] | None = None,
+    on_progress: Callable[[float, str], None] | None = None,
+) -> bool:
+    """Gunakan Google Gemini API (gratis via Google AI Studio) untuk menyempurnakan
+    judul, hook pembuka, skor viral (0-100), dan hashtag tiap kandidat klip.
+
+    Mengembalikan ``True`` bila berhasil, ``False`` bila tidak aktif/gagal
+    (sehingga otomatis lanjut ke Ollama / heuristik lokal tanpa error).
+    """
+    import os
+    settings = settings or load_settings()
+    if not candidates or not gemini_available(settings):
+        return False
+    api_key = str(settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY") or "").strip()
+    model = str(settings.get("gemini_model") or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+
+    payload_items = [
+        {
+            "i": i,
+            "durasi_detik": round(c.duration, 1),
+            "skor_awal": round(c.score, 1),
+            "transkrip": c.text[:1400],
+        }
+        for i, c in enumerate(candidates)
+    ]
+    prompt = (
+        "Kamu adalah produser konten Short-Form Viral (TikTok, Reels, YouTube Shorts) kelas dunia "
+        "dengan gaya kurasi seperti Alex Hormozi & MrBeast.\n"
+        "Untuk setiap kandidat klip di bawah ini, berikan:\n"
+        "1. `judul`: Judul Bahasa Indonesia yang memancing rasa penasaran, jujur, padat, "
+        "dan IDEAL <= 60 karakter agar tidak terpotong di layar HP.\n"
+        "2. `hook`: Kalimat hook pembuka 4-7 kata yang dikutip/diringkas langsung dari kalimat "
+        "paling nendang di transkrip klip tersebut.\n"
+        "3. `viral_score`: Skor potensi viral 65-99 berdasarkan kekuatan hook, emosi, dan nilai informasi.\n"
+        "4. `alasan`: 1 kalimat singkat kenapa bagian ini berpotensi FYP/viral.\n"
+        "5. `hashtags`: Array berisi 4-5 hashtag relevan.\n\n"
+        "Balas HANYA JSON array murni dengan format:\n"
+        '[{"i":0,"judul":"...","hook":"...","viral_score":88,"alasan":"...","hashtags":["#Shorts","#Viral"]}]\n\n'
+        "Data kandidat:\n"
+        + json.dumps(payload_items, ensure_ascii=False)
+    )
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        f"?key={api_key}"
+    )
+    body = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.55,
+            "responseMimeType": "application/json",
+        },
+    }).encode("utf-8")
+
+    if on_progress:
+        on_progress(0.35, f"Menyempurnakan hook & skor viral via Gemini ({model})…")
+    req = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        candidates_resp = data.get("candidates") or []
+        if not candidates_resp:
+            return False
+        parts = ((candidates_resp[0].get("content") or {}).get("parts")) or []
+        raw = "".join(str(p.get("text") or "") for p in parts if isinstance(p, dict))
+        parsed = _parse_json_loose(raw)
+        items = parsed if isinstance(parsed, list) else (
+            parsed.get("clips") or parsed.get("data") or [] if isinstance(parsed, dict) else []
+        )
+        updated = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("i", item.get("index"))
+            if not isinstance(idx, int) or not (0 <= idx < len(candidates)):
+                continue
+            cand = candidates[idx]
+            title = str(item.get("judul") or item.get("title") or "").strip()
+            hook = str(item.get("hook") or "").strip()
+            reason = str(item.get("alasan") or item.get("reason") or "").strip()
+            vscore = item.get("viral_score", item.get("score"))
+            tags = item.get("hashtags") or item.get("tags")
+            if title:
+                old_first = cand.description.splitlines()[0] if cand.description else ""
+                cand.title = _clean_title(title, 70)
+                if old_first:
+                    cand.description = cand.description.replace(old_first, cand.title, 1)
+                else:
+                    cand.description = cand.title
+            if hook:
+                cand.hook = _clean_title(hook, 52)
+            if isinstance(vscore, (int, float)) and 10 <= float(vscore) <= 100:
+                # Blend Gemini score (65%) + local audio/hook heuristic score (35%)
+                cand.score = round(0.65 * float(vscore) + 0.35 * float(cand.score), 1)
+                cand.features["score"] = cand.score
+            if reason:
+                cand.hook_info = dict(cand.hook_info or {})
+                reasons = list(cand.hook_info.get("reasons") or [])
+                cand.hook_info["reasons"] = [reason[:120]] + [r for r in reasons if r != reason][:2]
+                cand.hook_info["gemini_reason"] = reason[:140]
+            if isinstance(tags, list) and tags:
+                cand.hashtags = " ".join(
+                    t if str(t).startswith("#") else "#" + str(t) for t in tags if str(t).strip()
+                )[:200]
+            cand.features["gemini"] = 1.0
+            updated += 1
+        return updated > 0
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError, KeyError):
+        return False
+    finally:
+        if on_progress:
+            on_progress(1.0, "Kurasi AI selesai")
+
+
 def ollama_available(settings: dict[str, Any] | None = None) -> bool:
     settings = settings or load_settings()
     url = (settings.get("llm_url") or "").rstrip("/")
@@ -810,9 +943,15 @@ def refine_with_llm(
     settings: dict[str, Any] | None = None,
     on_progress: Callable[[float, str], None] | None = None,
 ) -> None:
-    """Minta LLM lokal bikin judul/hook/hashtag lebih menarik. Gagal = diam saja."""
+    """Sempurnakan judul/hook/skor viral memakai Gemini API (jika API key diisi)
+    atau LLM lokal Ollama. Jika keduanya tidak aktif, gunakan hasil heuristik lokal."""
     settings = settings or load_settings()
-    if not settings.get("llm_enabled") or not candidates:
+    if not candidates:
+        return
+    if gemini_available(settings):
+        if refine_with_gemini(candidates, settings, on_progress=on_progress):
+            return
+    if not settings.get("llm_enabled"):
         return
     url = (settings.get("llm_url") or "").rstrip("/")
     model = settings.get("llm_model") or "llama3.1:8b"

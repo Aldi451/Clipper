@@ -13,6 +13,8 @@ const ED = {
   dirty: false,
   saving: false,
   liveSourceMode: true,
+  safeZone: "off",
+  playbackRate: 1,
   time: 0,
   playing: false,
   tab: "text",
@@ -178,6 +180,7 @@ async function renderEditor(clipId) {
           </select>
           <button class="btn small primary" data-ed="render">Render</button>
           <a class="btn small ghost" id="ed-download" href="/api/clips/${esc(clip.id)}/download" ${clip.has_file ? "" : "hidden"}>Unduh</a>
+          <button class="btn small ghost" data-ed="cover-hd" title="Ambil frame saat ini sebagai PNG 1080×1920">📸 Cover HD</button>
           <button class="btn small yt" data-ed="upload-yt" ${clip.has_file ? "" : "disabled"}
             title="Upload hasil render ini ke YouTube Shorts">Upload YT</button>
           <button class="btn small tt" data-ed="upload-tiktok" ${clip.has_file ? "" : "disabled"}
@@ -195,6 +198,9 @@ async function renderEditor(clipId) {
               <button class="btn small ${ED.spec.layout === "crop" ? "primary" : "ghost"}" data-ed="quick-layout" data-layout="crop">
                 🎙 Fokus Host / Podcast (9:16)
               </button>
+              <button class="btn small ${ED.spec.layout === "split" ? "primary" : "ghost"}" data-ed="quick-layout" data-layout="split">
+                🗣 Split 2 Pembicara
+              </button>
               <button class="btn small ${ED.spec.layout === "fit" ? "primary" : "ghost"}" data-ed="quick-layout" data-layout="fit">
                 🖼 Video Utuh + Blur
               </button>
@@ -208,9 +214,26 @@ async function renderEditor(clipId) {
             }
           </div>
 
+          <div class="ed-preview-options">
+            <label class="tiny dim">Safe Zone Preview
+              <select class="select" id="ed-safe-zone" aria-label="Safe zone preview">
+                <option value="off" ${ED.safeZone === "off" ? "selected" : ""}>Off</option>
+                <option value="tiktok" ${ED.safeZone === "tiktok" ? "selected" : ""}>TikTok</option>
+                <option value="reels" ${ED.safeZone === "reels" ? "selected" : ""}>Reels</option>
+                <option value="shorts" ${ED.safeZone === "shorts" ? "selected" : ""}>Shorts</option>
+              </select>
+            </label>
+            <span class="tiny dim">Garis menunjukkan area aman untuk teks/UI platform.</span>
+          </div>
+
           <div class="ed-preview-wrap">
             <div class="ed-preview" id="ed-preview">
               <video id="ed-video" playsinline preload="auto"></video>
+              <div class="ed-split-wrap" id="ed-split-wrap" hidden>
+                <video id="ed-video-top" muted playsinline preload="auto"></video>
+                <div class="ed-split-divider"></div>
+                <video id="ed-video-bottom" muted playsinline preload="auto"></video>
+              </div>
               <div id="ed-top-hud" class="ed-zone-hud top" hidden>🎮 Gameplay (Atas) · Drag kiri/kanan</div>
               <div id="ed-gp-divider" class="ed-gp-divider" hidden title="Tarik ke atas/bawah untuk atur tinggi Gameplay vs Host">
                 <span class="ed-gp-divider-pill">⇅ Batas Atas Game / Bawah Host</span>
@@ -232,6 +255,9 @@ async function renderEditor(clipId) {
                 <div id="ed-texts"></div>
                 <img id="ed-logo" alt="" hidden />
               </div>
+              <div class="ed-safe-zone" id="ed-safe-zone-overlay" hidden>
+                <div class="ed-safe-frame" id="ed-safe-frame"><span id="ed-safe-label">Safe zone</span></div>
+              </div>
               <div class="ed-render-badge" id="ed-render-badge" hidden></div>
             </div>
           </div>
@@ -240,6 +266,9 @@ async function renderEditor(clipId) {
 
           <div class="ed-transport">
             <button class="btn small ghost" data-ed="play">▶</button>
+            <select class="select ed-speed-select" id="ed-playback-rate" aria-label="Kecepatan preview" title="Kecepatan playback preview">
+              ${[1, 1.25, 1.5, 2].map((rate) => `<option value="${rate}" ${Number(ED.playbackRate) === rate ? "selected" : ""}>${rate}x</option>`).join("")}
+            </select>
             <span class="mono tiny" id="ed-time">0:00 / 0:00</span>
             <div class="ed-seek" id="ed-seek"><i></i></div>
             <button class="btn small ghost" data-ed="mark-in" title="Set awal segmen ke playhead">⇤ Awal</button>
@@ -287,6 +316,10 @@ function edUpdateCamLabel() {
   if (ED.spec.layout === "gameplay" || info.kind === "gameplay") {
     const corner = (ED.spec.gameplay && ED.spec.gameplay.corner) || (info.facecam && info.facecam.corner) || "pojok";
     label.textContent = `Gameplay · host ${corner}`;
+    return;
+  }
+  if (ED.spec.layout === "split") {
+    label.textContent = "Split 2 Pembicara";
     return;
   }
   const on = !!info.ok && ED.spec.framing && ED.spec.framing.mode === "auto";
@@ -342,23 +375,92 @@ function durationGateHtml(dur) {
 /* ------------------------------------------------------------------ */
 /* preview                                                           */
 /* ------------------------------------------------------------------ */
+const ED_SAFE_ZONES = {
+  tiktok: { top: 0.10, right: 0.08, bottom: 0.20, left: 0.08, label: "TikTok · area aman" },
+  reels: { top: 0.10, right: 0.10, bottom: 0.19, left: 0.10, label: "Reels · area aman" },
+  shorts: { top: 0.08, right: 0.08, bottom: 0.16, left: 0.08, label: "Shorts · area aman" },
+};
+
+function updateSafeZoneOverlay() {
+  const overlay = edEl("ed-safe-zone-overlay");
+  const frame = edEl("ed-safe-frame");
+  const label = edEl("ed-safe-label");
+  const zone = ED_SAFE_ZONES[ED.safeZone];
+  if (!overlay || !frame) return;
+  overlay.hidden = !zone;
+  if (!zone) return;
+  frame.style.inset = `${zone.top * 100}% ${zone.right * 100}% ${zone.bottom * 100}% ${zone.left * 100}%`;
+  if (label) label.textContent = zone.label;
+}
+
 function updateGameplayPreviewLayout() {
   const video = edEl("ed-video");
   const camWrap = edEl("ed-cam-wrap");
   const camVideo = edEl("ed-video-cam");
   const divider = edEl("ed-gp-divider");
   const topHud = edEl("ed-top-hud");
+  const splitWrap = edEl("ed-split-wrap");
+  const splitTop = edEl("ed-video-top");
+  const splitBottom = edEl("ed-video-bottom");
   if (!video || !ED.spec) return;
+  updateSafeZoneOverlay();
 
   const useRenderedFile = Boolean(ED.clip && ED.clip.has_file && !ED.dirty && !ED.liveSourceMode);
   if (useRenderedFile) {
+    video.style.display = "";
     video.style.height = "100%";
     video.style.objectFit = "contain";
     video.style.objectPosition = "50% 50%";
     if (camWrap) camWrap.hidden = true;
     if (divider) divider.hidden = true;
     if (topHud) topHud.hidden = true;
+    if (splitWrap) splitWrap.hidden = true;
     if (camVideo && !camVideo.paused) camVideo.pause();
+    [splitTop, splitBottom].forEach((item) => { if (item && !item.paused) item.pause(); });
+    updateSafeZoneOverlay();
+    return;
+  }
+
+  video.style.display = "";
+  if (splitWrap) splitWrap.hidden = true;
+  if (ED.spec.layout !== "split") {
+    [splitTop, splitBottom].forEach((item) => { if (item && !item.paused) item.pause(); });
+  }
+  if (ED.spec.layout === "split") {
+    const splitSpec = ED.spec.split || {};
+    const ratio = Math.max(0.42, Math.min(0.58, Number(splitSpec.split ?? 0.5)));
+    const leftX = Math.max(0.08, Math.min(0.48, Number(splitSpec.left_x ?? 0.28)));
+    const leftY = Math.max(0.12, Math.min(0.88, Number(splitSpec.left_y ?? 0.42)));
+    const rightX = Math.max(0.52, Math.min(0.92, Number(splitSpec.right_x ?? 0.72)));
+    const rightY = Math.max(0.12, Math.min(0.88, Number(splitSpec.right_y ?? 0.42)));
+    video.style.display = "none";
+    if (splitWrap) splitWrap.hidden = false;
+    const splitDivider = splitWrap && splitWrap.querySelector(".ed-split-divider");
+    if (splitDivider) splitDivider.style.top = `${(ratio * 100).toFixed(2)}%`;
+    if (splitTop && splitBottom) {
+      splitTop.style.top = "0";
+      splitTop.style.height = `${(ratio * 100).toFixed(2)}%`;
+      splitTop.style.objectPosition = `${(leftX * 100).toFixed(1)}% ${(leftY * 100).toFixed(1)}%`;
+      splitBottom.style.top = `${(ratio * 100).toFixed(2)}%`;
+      splitBottom.style.height = `${((1 - ratio) * 100).toFixed(2)}%`;
+      splitBottom.style.objectPosition = `${(rightX * 100).toFixed(1)}% ${(rightY * 100).toFixed(1)}%`;
+      const src = video.dataset.src || "";
+      [splitTop, splitBottom].forEach((item) => {
+        if (src && item.dataset.src !== src) { item.dataset.src = src; item.src = src; }
+        item.muted = true;
+        item.playbackRate = ED.playbackRate || 1;
+        if (Math.abs((item.currentTime || 0) - (video.currentTime || 0)) > 0.2) {
+          try { item.currentTime = video.currentTime || 0; } catch (err) {}
+        }
+        if (!video.paused) item.play().catch(() => {});
+        else if (!item.paused) item.pause();
+      });
+    }
+    if (camWrap) camWrap.hidden = true;
+    if (divider) divider.hidden = true;
+    if (topHud) topHud.hidden = true;
+    if (camVideo && !camVideo.paused) camVideo.pause();
+    updateSafeZoneOverlay();
     return;
   }
 
@@ -424,10 +526,20 @@ function renderPreviewSource() {
     video.dataset.src = src;
     video.src = src;
   }
+  [edEl("ed-video-top"), edEl("ed-video-bottom")].forEach((item) => {
+    if (!item) return;
+    if (item.dataset.src !== src) {
+      item.dataset.src = src;
+      item.src = src;
+    }
+    item.muted = true;
+    item.playbackRate = ED.playbackRate || 1;
+  });
   const preview = edEl("ed-preview");
   if (preview) preview.classList.toggle("no-video", !!(ED.source && !ED.source.has_video));
   video.muted = false;
   video.volume = 0.85;
+  video.playbackRate = ED.playbackRate || 1;
   updateGameplayPreviewLayout();
   // posisi awal = awal segmen pertama
   seekTo(ED.time || 0);
@@ -450,6 +562,14 @@ function seekTo(outTime) {
     try {
       camVideo.currentTime = srcTime;
     } catch (err) {}
+  }
+  const splitWrap = edEl("ed-split-wrap");
+  if (splitWrap && !splitWrap.hidden) {
+    [edEl("ed-video-top"), edEl("ed-video-bottom")].forEach((item) => {
+      if (item && Math.abs((item.currentTime || 0) - srcTime) > 0.2) {
+        try { item.currentTime = srcTime; } catch (err) {}
+      }
+    });
   }
   renderOverlay();
   updatePlayhead();
@@ -793,6 +913,7 @@ function bindOpenCutPreviewInteractions() {
   preview.addEventListener("pointerdown", (e) => {
     if (!ED.spec) return;
     if (e.target.closest(".ed-render-badge")) return;
+    if (!["gameplay", "crop"].includes(ED.spec.layout)) return;
 
     const rect = preview.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
@@ -1173,6 +1294,7 @@ function panelCaptionHtml() {
         .map((s) => `<option value="${s.id}" ${caps.style === s.id ? "selected" : ""}>${esc(s.label)}</option>`)
         .join("")}
     </select>`)}
+    <button class="btn small ghost" style="margin:-4px 0 12px" data-ed="caption-default-style">⭐ Jadikan Default Style</button>
     <div class="ed-two">
       ${fieldRow("Kata / baris", `<input class="input" type="number" min="1" max="12" data-caption-field="words_per_line" value="${Number(caps.words_per_line || 3)}" />`)}
       ${fieldRow("Ukuran", `<input type="range" min="36" max="140" step="1" data-caption-field="size" value="${Number(caps.size || 86)}" />`)}
@@ -1240,6 +1362,7 @@ function panelLayoutHtml() {
     ${fieldRow("Layout video", `<select class="select" data-spec="layout">
       ${[
         ["gameplay", "Gameplay (Atas Game · Bawah Host Berbicara)"],
+        ["split", "Split 2 Pembicara (Atas Pembicara 1 · Bawah Pembicara 2)"],
         ["crop", "Crop penuh 9:16 (Fokus Pembicara / Podcast)"],
         ["fit", "Video utuh + background (Fokus Topik)"],
         ["black", "Letterbox hitam"],
@@ -1287,7 +1410,20 @@ function panelLayoutHtml() {
       </div>
       ${fieldRow("Fokus Horizontal Gameplay (Atas)", `<input type="range" min="0" max="1" step="0.01" data-gameplay="game_x" value="${Number(gp.game_x ?? 0.56)}" />`)}
     </div>`
-        : fieldRow("Fokus crop horizontal (bisa juga digeser pakai mouse di preview)", `<input type="range" min="0" max="1" step="0.01" data-spec="crop_focus" value="${Number(spec.crop_focus)}" />`, "0% kiri · 50% tengah · 100% kanan")
+        : spec.layout === "split"
+          ? `<div class="ed-hook-box" style="margin-bottom:10px">
+              <div class="tiny" style="margin-bottom:8px"><b>Split 2 Pembicara:</b> Pembicara 1 di panel atas, Pembicara 2 di bawah. Tarik fokus tiap panel lewat slider; divider emas dan caption berada di tengah.</div>
+              ${fieldRow("Rasio panel atas / bawah", `<input type="range" min="0.42" max="0.58" step="0.01" data-split="split" value="${Number((spec.split || {}).split ?? 0.5)}" />`, "Default 50% / 50%")}
+              <div class="ed-two">
+                ${fieldRow("Pembicara 1 · fokus X", `<input type="range" min="0.08" max="0.48" step="0.01" data-split="left_x" value="${Number((spec.split || {}).left_x ?? 0.28)}" />`)}
+                ${fieldRow("Pembicara 1 · fokus Y", `<input type="range" min="0.12" max="0.88" step="0.01" data-split="left_y" value="${Number((spec.split || {}).left_y ?? 0.42)}" />`)}
+              </div>
+              <div class="ed-two">
+                ${fieldRow("Pembicara 2 · fokus X", `<input type="range" min="0.52" max="0.92" step="0.01" data-split="right_x" value="${Number((spec.split || {}).right_x ?? 0.72)}" />`)}
+                ${fieldRow("Pembicara 2 · fokus Y", `<input type="range" min="0.12" max="0.88" step="0.01" data-split="right_y" value="${Number((spec.split || {}).right_y ?? 0.42)}" />`)}
+              </div>
+            </div>`
+          : fieldRow("Fokus crop horizontal (bisa juga digeser pakai mouse di preview)", `<input type="range" min="0" max="1" step="0.01" data-spec="crop_focus" value="${Number(spec.crop_focus)}" />`, "0% kiri · 50% tengah · 100% kanan")
     }
     ${fieldRow("Jenis background", `<select class="select" data-bg="type">
       ${[["blur", "Blur video"], ["gradient", "Gradien warna"], ["color", "Warna solid"]]
@@ -1432,6 +1568,14 @@ function bindEditorEvents() {
         camVideo.currentTime = srcTime;
       } catch (err) {}
     }
+    const splitWrap = edEl("ed-split-wrap");
+    if (splitWrap && !splitWrap.hidden) {
+      [edEl("ed-video-top"), edEl("ed-video-bottom")].forEach((item) => {
+        if (item && Math.abs((item.currentTime || 0) - srcTime) > 0.25) {
+          try { item.currentTime = srcTime; } catch (err) {}
+        }
+      });
+    }
     renderOverlay();
     updatePlayhead();
   });
@@ -1443,7 +1587,17 @@ function bindEditorEvents() {
     const camVideo = edEl("ed-video-cam");
     if (camVideo && !camVideo.closest("[hidden]")) {
       camVideo.currentTime = video.currentTime;
+      camVideo.playbackRate = ED.playbackRate || 1;
       camVideo.play().catch(() => {});
+    }
+    const splitWrap = edEl("ed-split-wrap");
+    if (splitWrap && !splitWrap.hidden) {
+      [edEl("ed-video-top"), edEl("ed-video-bottom")].forEach((item) => {
+        if (!item) return;
+        item.currentTime = video.currentTime;
+        item.playbackRate = ED.playbackRate || 1;
+        item.play().catch(() => {});
+      });
     }
   });
   video.addEventListener("pause", () => {
@@ -1452,7 +1606,27 @@ function bindEditorEvents() {
     if (btn) btn.textContent = "▶";
     const camVideo = edEl("ed-video-cam");
     if (camVideo && !camVideo.paused) camVideo.pause();
+    [edEl("ed-video-top"), edEl("ed-video-bottom")].forEach((item) => {
+      if (item && !item.paused) item.pause();
+    });
   });
+
+  const rateSelect = edEl("ed-playback-rate");
+  if (rateSelect) {
+    rateSelect.addEventListener("change", () => {
+      ED.playbackRate = [1, 1.25, 1.5, 2].includes(Number(rateSelect.value)) ? Number(rateSelect.value) : 1;
+      [video, edEl("ed-video-cam"), edEl("ed-video-top"), edEl("ed-video-bottom")].forEach((item) => {
+        if (item) item.playbackRate = ED.playbackRate;
+      });
+    });
+  }
+  const safeZoneSelect = edEl("ed-safe-zone");
+  if (safeZoneSelect) {
+    safeZoneSelect.addEventListener("change", () => {
+      ED.safeZone = ED_SAFE_ZONES[safeZoneSelect.value] ? safeZoneSelect.value : "off";
+      updateSafeZoneOverlay();
+    });
+  }
 
   const title = edEl("ed-title");
   if (title) {
@@ -1667,6 +1841,9 @@ function bindPanelEvents() {
           ED.spec.gameplay = { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.32, game_x: 0.56, split: 0.62, corner: "kiri bawah" };
         }
         if (ED.spec.captions) ED.spec.captions.y = Number((ED.spec.gameplay.split || 0.62).toFixed(2));
+      } else if (key === "layout" && ED.spec.layout === "split") {
+        if (!ED.spec.split) ED.spec.split = { left_x: 0.28, left_y: 0.42, right_x: 0.72, right_y: 0.42, split: 0.5 };
+        if (ED.spec.captions) ED.spec.captions.y = Number(ED.spec.split.split || 0.5);
       }
       scheduleSave();
       renderOverlay();
@@ -1684,6 +1861,18 @@ function bindPanelEvents() {
       if (key === "split" && ED.spec.captions) {
         ED.spec.captions.y = Number(Number(el.value).toFixed(2));
       }
+      scheduleSave();
+      renderOverlay();
+      refreshChrome();
+    });
+  });
+  $$("[data-split]").forEach((el) => {
+    el.addEventListener("input", () => {
+      if (!ED.spec.split) ED.spec.split = { left_x: 0.28, left_y: 0.42, right_x: 0.72, right_y: 0.42, split: 0.5 };
+      const key = el.dataset.split;
+      ED.spec.split[key] = Number(el.value);
+      if (key === "split" && ED.spec.captions) ED.spec.captions.y = Number(el.value);
+      ED.liveSourceMode = true;
       scheduleSave();
       renderOverlay();
       refreshChrome();
@@ -1860,6 +2049,28 @@ async function editorAction(action, target) {
       await openProjectModeModal(ED.clip.job_id);
     }
     return;
+  } else if (action === "caption-default-style") {
+    const styleId = spec.captions && spec.captions.style;
+    const style = (ED.meta.caption_styles || []).find((item) => item.id === styleId);
+    if (!style || typeof saveSettings !== "function") return;
+    const saved = await saveSettings({
+      caption_style: style.id,
+      caption_color: style.color,
+      caption_highlight: style.highlight,
+      caption_uppercase: Boolean(style.uppercase),
+      caption_words: Number(style.words_per_line || 3),
+    });
+    if (saved) toast("Preset caption ini disimpan sebagai default", "ok");
+    return;
+  } else if (action === "cover-hd") {
+    const video = edEl("ed-video");
+    const rendered = Boolean(ED.clip && ED.clip.has_file && !ED.dirty && !ED.liveSourceMode);
+    let timestamp = Number(video && video.currentTime) || 0;
+    if (!rendered && timestamp < 0.01) timestamp = outToSrc(ED.time, spec.segments);
+    const query = `t=${encodeURIComponent(timestamp.toFixed(3))}${rendered ? "" : "&original=1"}`;
+    await saveCoverBlob(`/api/clips/${encodeURIComponent(ED.clipId)}/cover?${query}`, `${ED.clipId}_cover.png`);
+    toast("Cover HD 1080×1920 diunduh", "ok");
+    return;
   } else if (action === "new-manual-clip") {
     if (!ED.clip || !ED.clip.job_id) return;
     if (ED.dirty) await saveSpec();
@@ -1886,6 +2097,9 @@ async function editorAction(action, target) {
         spec.gameplay = { cam_x: 0.16, cam_y: 0.78, cam_scale: 0.28, game_x: 0.56, split: 0.62, corner: "kiri bawah" };
       }
       if (spec.captions) spec.captions.y = Number((spec.gameplay.split || 0.62).toFixed(2));
+    } else if (nextLayout === "split") {
+      if (!spec.split) spec.split = { left_x: 0.28, left_y: 0.42, right_x: 0.72, right_y: 0.42, split: 0.5 };
+      if (spec.captions) spec.captions.y = Number(spec.split.split || 0.5);
     }
     scheduleSave();
     renderPreviewSource();
