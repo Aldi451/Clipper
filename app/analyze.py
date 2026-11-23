@@ -95,6 +95,12 @@ STOPWORDS = {
 }
 
 FILLERS = {"eee", "ee", "eh", "emm", "hmm", "uh", "um", "uhh", "anu", "apa ya", "gitu"}
+INCOMPLETE_ENDINGS = {
+    "dan", "karena", "tapi", "atau", "kalau", "jika", "yang", "untuk", "dengan",
+    "sehingga", "namun", "maka", "ketika", "sebelum", "sesudah", "supaya", "agar",
+    "bahwa", "di", "ke", "dari", "and", "because", "but", "or", "if", "which",
+    "that", "with", "to", "for", "when", "while", "although", "so",
+}
 
 
 @dataclass
@@ -176,6 +182,22 @@ def build_sentences(transcript: dict[str, Any]) -> list[Sentence]:
 # --------------------------------------------------------------------------- #
 def _tokens(text: str) -> list[str]:
     return re.findall(r"[a-zA-ZÀ-ÿ']+", text.lower())
+
+
+def _ending_quality(text: str) -> float:
+    """Penalti ringan untuk filler atau klausa yang jelas terpotong di akhir klip."""
+    clean = (text or "").strip()
+    tokens = _tokens(clean)
+    if not tokens:
+        return 0.0
+    ending = clean.lower().rstrip(" .,!?'\"…")
+    if any(ending == filler or ending.endswith(" " + filler) for filler in FILLERS):
+        return 0.0
+    if tokens[-1] in INCOMPLETE_ENDINGS:
+        return 0.0
+    if re.search(r"[.!?…][\"'”’)]*$", clean):
+        return 1.0
+    return 0.55
 
 
 _energy_cache: tuple[int, int, float, float, list[float], list[float], list[float]] | None = None
@@ -455,7 +477,9 @@ def _clean_title(text: str, max_len: int = 70) -> str:
     cut = text[:max_len]
     if " " in cut:
         cut = cut[: cut.rfind(" ")]
-    return cut.strip() + "…"
+    if max_len <= 1:
+        return "…"[:max_len]
+    return cut.strip()[:max_len - 1].rstrip() + "…"
 
 
 def _make_title(sentences: list[Sentence]) -> str:
@@ -505,9 +529,102 @@ def _hashtags(keywords: Iterable[str], base: str) -> str:
     return " ".join(tags[:10])
 
 
+def _clean_hashtags(values: Any, limit: int = 5) -> str:
+    """Normalize model tags and cap them so malformed output cannot flood metadata."""
+    if not isinstance(values, list):
+        return ""
+    tags: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        name = re.sub(r"[^\w]", "", str(value or "").strip().lstrip("#"))
+        if not name:
+            continue
+        tag = "#" + name[:40]
+        if tag.lower() not in seen:
+            tags.append(tag)
+            seen.add(tag.lower())
+        if len(tags) >= max(1, limit):
+            break
+    return " ".join(tags)
+
+
 # --------------------------------------------------------------------------- #
 # pemilihan kandidat
 # --------------------------------------------------------------------------- #
+def target_clip_count(settings: dict[str, Any] | None, source_duration: float) -> int:
+    """Target akhir yang dipakai AI dari durasi sumber (termasuk aturan video panjang)."""
+    settings = settings or load_settings()
+    try:
+        target = int(settings.get("target_clips") or 5)
+    except (TypeError, ValueError):
+        target = 5
+    target = max(1, min(20, target))
+    try:
+        duration = max(0.0, float(source_duration))
+    except (TypeError, ValueError):
+        duration = 0.0
+    # Pertahankan perilaku lama untuk sumber panjang dengan target default 5.
+    if duration >= 1500.0 and target == 5:
+        target = min(12, max(5, int(duration // 360)))
+    return target
+
+
+def candidate_pool_target(settings: dict[str, Any] | None, target: int) -> int:
+    """AI mendapat pool alternatif 2x untuk membandingkan momen sebelum dipangkas."""
+    settings = settings or load_settings()
+    local_llm_configured = bool(
+        settings.get("llm_enabled") and str(settings.get("llm_url") or "").strip()
+    )
+    if gemini_available(settings) or local_llm_configured:
+        return min(20, max(1, target) * 2)
+    return max(1, target)
+
+
+def select_candidate_subset(candidates: list[Candidate], target: int) -> list[Candidate]:
+    """Pilih pool dengan skor terbaik sambil menjaga variasi pembuka dan waktu.
+
+    Dapat dipanggil lagi sesudah model mengubah skor, sehingga AI ikut menentukan
+    momen akhir, bukan hanya menulis judul untuk pilihan lokal.
+    """
+    if not candidates or target <= 0:
+        return []
+    pool = list(candidates)
+    openings = {
+        id(cand): _tokens(" ".join(x.text for x in cand.sentences[:2]) or cand.text[:300])
+        for cand in pool
+    }
+    picked: list[Candidate] = []
+    picked_openings: list[list[str]] = []
+
+    while pool and len(picked) < target:
+        best_index, best_value, best_similarity = 0, float("-inf"), 0.0
+        for index, cand in enumerate(pool):
+            opening = openings[id(cand)]
+            similarity = max((_jaccard(opening, other) for other in picked_openings), default=0.0)
+            value = float(cand.score) * (1.0 - 0.45 * similarity)
+            if value > best_value:
+                best_index, best_value, best_similarity = index, value, similarity
+
+        cand = pool.pop(best_index)
+        clash = any(
+            min(cand.end, other.end) - max(cand.start, other.start)
+            > 0.25 * min(cand.duration, other.duration)
+            or abs(cand.start - other.start) < 4
+            for other in picked
+        )
+        if clash:
+            continue
+
+        cand.features.setdefault("original_score", round(float(cand.score), 2))
+        cand.features["selection_score"] = round(best_value, 2)
+        cand.features["score"] = round(best_value, 2)
+        cand.features["opening_novelty"] = round(1.0 - best_similarity, 3)
+        picked.append(cand)
+        picked_openings.append(openings[id(cand)])
+
+    return sorted(picked, key=lambda cand: cand.start)
+
+
 def _window_score(cand: Candidate, energy: list[tuple[float, float]], base_db: float,
                   min_len: float, max_len: float,
                   opening_hook: float | None = None,
@@ -530,7 +647,7 @@ def _window_score(cand: Candidate, energy: list[tuple[float, float]], base_db: f
             for i in range(len(cand.sentences) - 1)]
     silence = sum(g for g in gaps if g > 0.7)
     continuity = _clamp(1.0 - silence / max(3.0, dur * 0.2))
-    filled = 0.0 if text.lower().strip(" .,!?").endswith(tuple(FILLERS)) else 1.0
+    clean_ending = _ending_quality(text)
     features = {
         "hook": round(hook, 3),
         "opening": round(opening_hook, 3),
@@ -539,11 +656,11 @@ def _window_score(cand: Candidate, energy: list[tuple[float, float]], base_db: f
         "density": round(density, 3),
         "length": round(length_fit, 3),
         "continuity": round(continuity, 3),
-        "clean_ending": filled,
+        "clean_ending": clean_ending,
     }
     raw = (
-        30 * hook + 16 * opening_hook + 16 * loud + 6 * lively +
-        12 * density + 12 * length_fit + 6 * continuity + 2 * filled
+        30 * hook + 16 * opening_hook + 12 * loud + 6 * lively +
+        12 * density + 12 * length_fit + 6 * continuity + 6 * clean_ending
     )
     return round(raw, 2), features
 
@@ -557,20 +674,16 @@ def find_candidates(
     settings = settings or load_settings()
     min_len = float(settings.get("min_clip_seconds") or 60)
     max_len = float(settings.get("max_clip_seconds") or 180)
-    target = int(settings.get("target_clips") or 5)
     # 1 menit .. 3 menit untuk video panjang; adaptif bila video sumber lebih pendek dari 60d
     min_len = max(15.0, min(180.0, min_len))
     max_len = max(min_len, min(180.0, max_len))
-    target = max(1, min(20, target))
 
     sentences = build_sentences(transcript)
     if not sentences:
         return []
     total_span = max(0.0, sentences[-1].end - sentences[0].start)
-    # Skalakan target minimal secara proporsional untuk podcast/stream panjang (ala OpenShorts clip_selection.py)
-    if total_span >= 1500.0 and target == 5:
-        length_floor = min(12, max(5, int(total_span // 360)))
-        target = max(target, length_floor)
+    target = target_clip_count(settings, total_span)
+    pool_target = candidate_pool_target(settings, target)
     if total_span >= 60.0 and float(settings.get("min_clip_seconds") or 60) >= 60.0:
         min_len = max(60.0, min_len)
         max_len = max(min_len, max_len)
@@ -627,40 +740,9 @@ def find_candidates(
         return []
 
     raw.sort(key=lambda c: -c.score)
-    picked: list[Candidate] = []
-    picked_openings: list[list[str]] = []
-    pool = list(raw)
-    # pembuka tiap kandidat sudah dihitung sekali (bukan berulang di dalam loop)
-    openings = {id(c): _tokens(" ".join(x.text for x in c.sentences[:2])) for c in pool}
-
-    while pool and len(picked) < target:
-        best_index, best_value = 0, -1.0
-        for index, cand in enumerate(pool):
-            opening = openings[id(cand)]
-            # clip yang pembukanya mirip clip terpilih didorong ke bawah, supaya
-            # isi project tidak terasa "semua sama" (keluhan paling umum)
-            similarity = max((_jaccard(opening, other) for other in picked_openings), default=0.0)
-            value = cand.score * (1.0 - 0.45 * similarity)
-            if value > best_value:
-                best_index, best_value = index, value
-        cand = pool.pop(best_index)
-        clash = False
-        for other in picked:
-            overlap = min(cand.end, other.end) - max(cand.start, other.start)
-            if overlap > 0.25 * min(cand.duration, other.duration):
-                clash = True
-                break
-            if abs(cand.start - other.start) < 4:
-                clash = True
-                break
-        if clash:
-            continue
-        cand.features["original_score"] = round(cand.score, 2)
-        cand.features["score"] = round(best_value, 2)
-        cand.features["opening_novelty"] = round(
-            1.0 - max((_jaccard(openings[id(cand)], o) for o in picked_openings), default=0.0), 3)
-        picked.append(cand)
-        picked_openings.append(openings[id(cand)])
+    # Jika AI aktif, simpan kandidat alternatif yang beragam untuk dibandingkan
+    # secara semantik; proses akhir tetap dibatasi ke jumlah target di pipeline.
+    picked = select_candidate_subset(raw, pool_target)
 
     # rapikan tepi clip: buang hening di awal/akhir
     for cand in picked:
@@ -828,26 +910,35 @@ def refine_with_gemini(
     payload_items = [
         {
             "i": i,
+            "mulai_detik": round(c.start, 1),
             "durasi_detik": round(c.duration, 1),
-            "skor_awal": round(c.score, 1),
+            "skor_lokal": round(c.score, 1),
+            "sinyal_lokal": {
+                key: round(float(c.features[key]), 2)
+                for key in ("hook", "opening", "continuity", "clean_ending")
+                if isinstance(c.features.get(key), (int, float))
+            },
             "transkrip": c.text[:1400],
         }
         for i, c in enumerate(candidates)
     ]
     prompt = (
-        "Kamu adalah produser konten Short-Form Viral (TikTok, Reels, YouTube Shorts) kelas dunia "
-        "dengan gaya kurasi seperti Alex Hormozi & MrBeast.\n"
-        "Untuk setiap kandidat klip di bawah ini, berikan:\n"
-        "1. `judul`: Judul Bahasa Indonesia yang memancing rasa penasaran, jujur, padat, "
-        "dan IDEAL <= 60 karakter agar tidak terpotong di layar HP.\n"
-        "2. `hook`: Kalimat hook pembuka 4-7 kata yang dikutip/diringkas langsung dari kalimat "
-        "paling nendang di transkrip klip tersebut.\n"
-        "3. `viral_score`: Skor potensi viral 65-99 berdasarkan kekuatan hook, emosi, dan nilai informasi.\n"
-        "4. `alasan`: 1 kalimat singkat kenapa bagian ini berpotensi FYP/viral.\n"
-        "5. `hashtags`: Array berisi 4-5 hashtag relevan.\n\n"
-        "Balas HANYA JSON array murni dengan format:\n"
-        '[{"i":0,"judul":"...","hook":"...","viral_score":88,"alasan":"...","hashtags":["#Shorts","#Viral"]}]\n\n'
-        "Data kandidat:\n"
+        "Kamu editor senior video pendek untuk YouTube Shorts, Reels, dan TikTok. "
+        "Bandingkan semua kandidat sebagai satu daftar dan beri skor RELATIF: pilih momen "
+        "yang paling layak ditonton sampai selesai, bukan yang sekadar memakai kata sensasional.\n"
+        "Nilai apakah tiap klip bisa dipahami tanpa menonton bagian sebelumnya, punya satu gagasan "
+        "jelas dan payoff/informasi nyata, serta dimulai dengan kalimat menarik. Turunkan skor untuk "
+        "pengulangan, konteks yang hilang, pembuka basa-basi, dan akhir yang menggantung/terpotong. "
+        "Kamu hanya melihat transkrip; jangan menganggap ada visual atau konteks lain.\n"
+        "Gunakan bahasa yang sama dengan transkrip. Jangan menambah fakta, angka, janji, atau kutipan "
+        "yang tidak ada. Hook 4–7 kata harus didukung ucapan dalam klip. Buat judul jujur maksimal "
+        "60 karakter; hindari clickbait yang menjanjikan lebih dari isi.\n"
+        "Untuk SETIAP kandidat, keluarkan `judul`, `hook`, `viral_score` 0–100 (nilai dengan wajar "
+        "secara relatif, jangan memberi semua kandidat skor tinggi), `alasan` singkat yang merujuk "
+        "isi, dan 3–5 `hashtags` relevan. Pertahankan indeks `i` persis seperti input.\n"
+        "Balas HANYA JSON array valid, satu objek per kandidat, format:\n"
+        '[{"i":0,"judul":"...","hook":"...","viral_score":72,"alasan":"...","hashtags":["#Shorts"]}]\n\n'
+        "Data kandidat berikut berisi transkrip dan sinyal lokal (transkrip satu-satunya sumber fakta):\n"
         + json.dumps(payload_items, ensure_ascii=False)
     )
     endpoint = (
@@ -857,7 +948,8 @@ def refine_with_gemini(
     body = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.55,
+            "temperature": 0.25,
+            "maxOutputTokens": 4096,
             "responseMimeType": "application/json",
         },
     }).encode("utf-8")
@@ -886,7 +978,7 @@ def refine_with_gemini(
             if not isinstance(item, dict):
                 continue
             idx = item.get("i", item.get("index"))
-            if not isinstance(idx, int) or not (0 <= idx < len(candidates)):
+            if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < len(candidates)):
                 continue
             cand = candidates[idx]
             title = str(item.get("judul") or item.get("title") or "").strip()
@@ -896,14 +988,14 @@ def refine_with_gemini(
             tags = item.get("hashtags") or item.get("tags")
             if title:
                 old_first = cand.description.splitlines()[0] if cand.description else ""
-                cand.title = _clean_title(title, 70)
+                cand.title = _clean_title(title, 60)
                 if old_first:
                     cand.description = cand.description.replace(old_first, cand.title, 1)
                 else:
                     cand.description = cand.title
             if hook:
                 cand.hook = _clean_title(hook, 52)
-            if isinstance(vscore, (int, float)) and 10 <= float(vscore) <= 100:
+            if isinstance(vscore, (int, float)) and not isinstance(vscore, bool) and 0 <= float(vscore) <= 100:
                 # Blend Gemini score (65%) + local audio/hook heuristic score (35%)
                 cand.score = round(0.65 * float(vscore) + 0.35 * float(cand.score), 1)
                 cand.features["score"] = cand.score
@@ -912,10 +1004,9 @@ def refine_with_gemini(
                 reasons = list(cand.hook_info.get("reasons") or [])
                 cand.hook_info["reasons"] = [reason[:120]] + [r for r in reasons if r != reason][:2]
                 cand.hook_info["gemini_reason"] = reason[:140]
-            if isinstance(tags, list) and tags:
-                cand.hashtags = " ".join(
-                    t if str(t).startswith("#") else "#" + str(t) for t in tags if str(t).strip()
-                )[:200]
+            cleaned_tags = _clean_hashtags(tags)
+            if cleaned_tags:
+                cand.hashtags = cleaned_tags
             cand.features["gemini"] = 1.0
             updated += 1
         return updated > 0
@@ -955,17 +1046,30 @@ def refine_with_llm(
         return
     url = (settings.get("llm_url") or "").rstrip("/")
     model = settings.get("llm_model") or "llama3.1:8b"
-    if not url:
+    if not url or not ollama_available(settings):
         return
     payload_items = [
-        {"i": i, "transkrip": c.text[:1200]}
+        {
+            "i": i,
+            "mulai_detik": round(c.start, 1),
+            "durasi_detik": round(c.duration, 1),
+            "skor_lokal": round(c.score, 1),
+            "transkrip": c.text[:1400],
+        }
         for i, c in enumerate(candidates)
     ]
     prompt = (
-        "Kamu editor konten short-form. Untuk tiap transkrip, buat judul clickbait jujur "
-        "(maks 60 karakter, bahasa sama dengan transkrip), hook 4-6 kata, dan 3 hashtag. "
-        "Balas HANYA JSON array: "
-        '[{"i":0,"judul":"...","hook":"...","hashtags":["#a","#b"]}]\n\n'
+        "Kamu editor senior video pendek. Bandingkan semua kandidat dan pilih momen yang "
+        "paling menarik sebagai klip mandiri: konteks cukup, satu gagasan jelas, payoff nyata, "
+        "pembuka kuat, serta akhir yang selesai. Turunkan nilai untuk pengulangan, basa-basi, "
+        "konteks hilang, atau kalimat terpotong. Nilai hanya dari transkrip; jangan menambah "
+        "fakta, angka, janji, atau kutipan. Gunakan bahasa yang sama dengan transkrip.\n"
+        "Untuk setiap kandidat buat judul jujur maksimal 60 karakter, hook 4–7 kata yang didukung "
+        "ucapan, skor relatif 0–100 (jangan semua tinggi), alasan singkat yang spesifik, dan 3–5 "
+        "hashtag relevan. Pertahankan indeks `i`. Balas HANYA JSON array valid:\n"
+        '[{"i":0,"judul":"...","hook":"...","viral_score":72,"alasan":"...",'
+        '"hashtags":["#a","#b"]}]\n\n'
+        "Data kandidat (transkrip satu-satunya sumber fakta):\n"
         + json.dumps(payload_items, ensure_ascii=False)
     )
     body = json.dumps({
@@ -973,7 +1077,7 @@ def refine_with_llm(
         "prompt": prompt,
         "stream": False,
         "format": "json",
-        "options": {"temperature": 0.6},
+        "options": {"temperature": 0.25},
     }).encode("utf-8")
     if on_progress:
         on_progress(0.5, "Minta judul ke LLM lokal…")
@@ -984,26 +1088,38 @@ def refine_with_llm(
             data = json.loads(resp.read().decode("utf-8", "replace"))
         raw = data.get("response") or ""
         parsed = _parse_json_loose(raw)
-        items = parsed if isinstance(parsed, list) else parsed.get("clips") or parsed.get("data") or []
+        items = parsed if isinstance(parsed, list) else (
+            parsed.get("clips") or parsed.get("data") or [] if isinstance(parsed, dict) else []
+        )
         for item in items:
             if not isinstance(item, dict):
                 continue
             idx = item.get("i", item.get("index"))
-            if not isinstance(idx, int) or not (0 <= idx < len(candidates)):
+            if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < len(candidates)):
                 continue
             cand = candidates[idx]
             title = str(item.get("judul") or item.get("title") or "").strip()
             hook = str(item.get("hook") or "").strip()
+            reason = str(item.get("alasan") or item.get("reason") or "").strip()
+            vscore = item.get("viral_score", item.get("score"))
             tags = item.get("hashtags") or item.get("tags")
             if title:
-                cand.title = _clean_title(title, 70)
-                cand.description = cand.description.replace(cand.description.splitlines()[0], cand.title)
+                old_first = cand.description.splitlines()[0] if cand.description else ""
+                cand.title = _clean_title(title, 60)
+                cand.description = (
+                    cand.description.replace(old_first, cand.title, 1) if old_first else cand.title
+                )
             if hook:
-                cand.hook = _clean_title(hook, 48)
-            if isinstance(tags, list) and tags:
-                cand.hashtags = " ".join(
-                    t if str(t).startswith("#") else "#" + str(t) for t in tags if str(t).strip()
-                )[:200]
+                cand.hook = _clean_title(hook, 52)
+            if isinstance(vscore, (int, float)) and not isinstance(vscore, bool) and 0 <= float(vscore) <= 100:
+                cand.score = round(0.65 * float(vscore) + 0.35 * float(cand.score), 1)
+                cand.features["score"] = cand.score
+            if reason:
+                cand.hook_info = dict(cand.hook_info or {})
+                cand.hook_info["llm_reason"] = reason[:140]
+            cleaned_tags = _clean_hashtags(tags)
+            if cleaned_tags:
+                cand.hashtags = cleaned_tags
             cand.features["llm"] = 1.0
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return

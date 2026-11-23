@@ -109,6 +109,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "min_clip_seconds": 60,      # paling pendek 1 menit
     "max_clip_seconds": 180,     # paling panjang 3 menit
     "target_clips": 5,
+    "target_clips_mode": "custom",  # auto (berdasarkan durasi) | custom (jumlah tetap)
     "language": "auto",          # auto | id | en | ...
     "whisper_model": "small",    # tiny | base | small | medium | large-v3
     "whisper_device": "auto",    # auto | cpu | cuda
@@ -133,8 +134,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "caption_font": "Inter",
     "caption_color": "#FFFFFF",
     "caption_highlight": "#FFE02B",
-    "hook_overlay": False,       # judul TIDAK ditulis di dalam video (default mati)
-    "hook_style": "highlight",   # kalau hook_overlay nyala: capsule | highlight | typewriter
+    "hook_overlay": False,       # hook overlay manual: default mati
+    "ai_hook_overlay": True,     # Render Hook AI menampilkan hook otomatis di dalam video
+    "hook_style": "highlight",   # gaya overlay: capsule | highlight | typewriter
     "hook_seconds": 4.5,         # berapa lama hook tampil
     "hook_words": 12,            # maksimal berapa kata di hook overlay
     "auto_framing": True,        # layout crop: kamera mengikuti pembicara (deteksi wajah lokal)

@@ -621,10 +621,12 @@ cari momen → render → upload). Bisa juga centang beberapa video lalu **Buat 
 Nilai di luar 60–180 dirapikan otomatis (juga kalau `settings.json` diedit manual), dan analisis
 tanpa transkrip memakai panjang di antara min–max (bukan 45 detik seperti versi lama).
 
-**Judul tidak ditulis di dalam video.** `hook_overlay` default **mati**. Judul/hook tetap dipakai
-untuk judul unggahan + caption. Clip lama yang masih punya teks judul menempel di gambar bisa
-dibersihkan sekali: **Pengaturan → Hapus teks judul dari semua clip lama**
-(atau `POST /api/clips/strip-hooks`). Setelah dibersihkan, clip perlu di-render ulang.
+**Hook clip AI otomatis tampil di video** (default aktif, bisa dimatikan lewat `ai_hook_overlay`),
+sementara caption karaoke tetap berjalan setelah hook selesai. Untuk clip manual, hook di video
+masih mengikuti `hook_overlay` (default mati). Judul/hook tetap dipakai untuk judul unggahan + caption.
+Clip lama yang masih punya teks judul menempel di gambar bisa dibersihkan sekali:
+**Pengaturan → Hapus teks judul dari semua clip lama** (atau `POST /api/clips/strip-hooks`).
+Setelah dibersihkan, clip perlu di-render ulang.
 
 **Caption tidak berkedip & sinkron.** Setiap kata kini punya event ASS sendiri dengan timing yang
 disambung (akhir kata = awal kata berikutnya, overlap 30 ms) dan `ade` hanya muncul di awal baris.
@@ -1070,7 +1072,8 @@ Clipper/
 | `mute_during_hook` | Caption di bawah tidak diulang selama hook tampil (default aktif). |
 | `hook_style` | `capsule` / `highlight` / `typewriter` — gaya hook saat hook di dalam video dinyalakan. |
 | `hook_seconds`, `hook_words` | Lama hook tampil (default 4,5 dtk) dan jumlah kata maksimal (default 12). |
-| `hook_overlay` | **Default mati.** Judul/hook dipakai sebagai judul unggahan & caption, *tidak* ditulis di dalam video. Nyalakan hanya kalau memang ingin teks besar di 5 detik pertama. |
+| `hook_overlay` | **Default mati** untuk clip manual; menyalakan hook di dalam video. |
+| `ai_hook_overlay` | **Default aktif** untuk clip AI; menampilkan hook otomatis, caption karaoke lanjut setelah hook. |
 | `fps`, `crf`, `normalize_audio` | Kualitas render. |
 | `export_height`, `export_sharpen`, `default_template` | Default export editor: 1080p/2K/4K, pertajam saat upscale, template awal. |
 | `yt_privacy`, `yt_category`, `yt_hashtags`, `yt_notify_subscribers` | Default upload. |
