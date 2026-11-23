@@ -3004,7 +3004,11 @@ async function renderSettings() {
         </label>
         <label class="switch">
           <input type="checkbox" data-setting="hook_overlay" ${s.hook_overlay ? "checked" : ""} />
-          <span class="track"></span><span>Hook di dalam video (teks dari ucapan, default mati)</span>
+          <span class="track"></span><span>Hook di video untuk clip manual</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" data-setting="ai_hook_overlay" ${s.ai_hook_overlay !== false ? "checked" : ""} />
+          <span class="track"></span><span>Hook otomatis di video clip AI</span>
         </label>
         <label class="switch">
           <input type="checkbox" data-setting="normalize_audio" ${s.normalize_audio ? "checked" : ""} />

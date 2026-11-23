@@ -5,6 +5,7 @@ import json
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any, BinaryIO, Callable
 
 from .config import UPLOAD_DIR, WORK_DIR, ensure_dirs, ffmpeg_for_ytdlp, load_settings
@@ -48,6 +49,18 @@ def save_upload(stream: BinaryIO, filename: str, on_progress: Callable[[int], No
 
 def is_url(value: str) -> bool:
     return bool(re.match(r"^https?://", (value or "").strip(), re.I))
+
+
+def is_youtube_url(value: str) -> bool:
+    """Recognize canonical YouTube, Shorts, embed, and short links without substring matches."""
+    try:
+        host = (urlsplit((value or "").strip()).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return any(
+        host == domain or host.endswith("." + domain)
+        for domain in ("youtube.com", "youtube-nocookie.com", "youtu.be")
+    )
 
 
 class DownloadError(RuntimeError):
@@ -284,8 +297,11 @@ LOGIN_HINTS = ("login required", "sign in to confirm", "please log in", "this vi
 GEO_HINTS = ("available in your country", "country", "geo restricted", "geo-restricted", "geo-blocked")
 UNAVAILABLE_HINTS = ("video unavailable", "has been removed", "no longer available", "does not exist",
                      "removed by the uploader", "account associated with this video has been terminated")
-NETWORK_HINTS = ("timed out", "connection", "getaddrinfo", "ssl", "temporary failure", "network",
-                 "unable to download webpage", "http error 5", "proxy")
+NETWORK_HINTS = (
+    "timed out", "connection", "getaddrinfo", "ssl", "temporary failure", "network",
+    "unable to download webpage", "http error 403", "http error 5", "http error 408", "http error 429",
+    "too many requests", "rate limit", "proxy",
+)
 RELOAD_HINTS = ("the page needs to be reloaded", "page needs to be reloaded",
                 "needs to be reloaded", "page needs reloading")
 FFMPEG_HINTS = ("ffmpeg is not installed", "ffmpeg not installed", "requested merging of multiple formats",
@@ -372,6 +388,17 @@ def friendly_download_error(message: str, has_cookies: bool = False) -> str:
             "· detail: " + detail
         )
     if kind == "network":
+        low_raw = raw.lower()
+        if "http error 429" in low_raw or "too many requests" in low_raw or "rate limit" in low_raw:
+            return (
+                "YouTube sedang membatasi permintaan download. Tunggu sebentar sebelum mencoba lagi; "
+                f"jika terus terjadi, kurangi unduhan paralel. · detail: {detail}"
+            )
+        if "http error 403" in low_raw:
+            return (
+                "YouTube menolak stream pada percobaan ini. Coba perbarui yt-dlp (pip install -U yt-dlp), "
+                "lalu coba lagi; video yang perlu login mungkin membutuhkan cookies. · detail: " + detail
+            )
         return (
             "Tidak bisa menghubungi server video (jaringan/DNS/proxy/SSL). Cek koneksi internet, "
             f"atau isi Proxy di Pengaturan kalau memakai VPN. · detail: {detail}"
@@ -383,6 +410,7 @@ def friendly_download_error(message: str, has_cookies: bool = False) -> str:
 # download
 # --------------------------------------------------------------------------- #
 TV_PLAYER_ARGS = {"youtube": {"player_client": ["tv", "web_safari"]}}
+WEB_SAFARI_PLAYER_ARGS = {"youtube": {"player_client": ["web_safari"]}}
 
 
 def _build_opts(out_dir: Path, settings: dict, hook: Callable[[dict], None], extra: dict | None = None) -> dict:
@@ -541,18 +569,29 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
         attempts.append(("tv", {"extractor_args": TV_PLAYER_ARGS}))
     elif client_pref == "default":
         attempts.append(("default", None))
-    else:  # auto: client biasa dulu, lalu client tv kalau diblokir
-        attempts.append(("default", None))
-        attempts.append(("tv", {"extractor_args": TV_PLAYER_ARGS}))
+    elif is_youtube_url(url):
+        # Pisahkan fallback Safari web dari TV agar setiap client bisa dicoba
+        # dengan opts sendiri; ini berguna saat player YouTube tertentu berubah.
+        attempts.extend([
+            ("default", None),
+            ("web_safari", {"extractor_args": WEB_SAFARI_PLAYER_ARGS}),
+            ("tv", {"extractor_args": TV_PLAYER_ARGS}),
+        ])
+    else:  # format auto legacy untuk extractor non-YouTube
+        attempts.extend([
+            ("default", None),
+            ("tv", {"extractor_args": TV_PLAYER_ARGS}),
+        ])
 
     ffmpeg_ok = ffmpeg_for_ytdlp() is not None
-    RETRYABLE = ("age", "bot", "login", "format", "reload", "ffmpeg")
+    RETRYABLE = ("age", "bot", "login", "format", "reload", "network", "ffmpeg")
     RETRY_MESSAGE = {
         "age": "Diblokir batas umur, mencoba metode lain…",
         "bot": "YouTube mendeteksi bot, mencoba metode lain…",
         "login": "Video butuh login, mencoba metode lain…",
         "format": "Format tidak tersedia, mencoba format lain…",
         "reload": "YouTube meminta halaman dimuat ulang, mengulang unduhan…",
+        "network": "Koneksi video terputus atau dibatasi, mencoba ulang…",
         "ffmpeg": "ffmpeg tidak ditemukan, memakai format tunggal tanpa gabung…",
     }
     # tanpa ffmpeg, format gabungan (bv+ba) mustahil di-merge → langsung format tunggal
@@ -573,7 +612,8 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
     # "reload"/"network" biasanya sesi YouTube basi → ulangi sekali lagi dengan
     # instance YoutubeDL baru (dan buang file parsial sisa unduhan sebelumnya).
     for pass_no in range(2):
-        for label, extra in attempts:
+        retry_pass = False
+        for _label, extra in attempts:
             for fmt in format_chain:
                 path, error = attempt(extra, fmt)
                 if path is not None:
@@ -582,17 +622,19 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
                 last_kind = classify_download_error(last_error)
                 if last_kind not in RETRYABLE:
                     raise DownloadError(friendly_download_error(last_error, has_cookies))
+                if last_kind in ("reload", "network"):
+                    retry_pass = True
                 if on_progress and last_kind in RETRY_MESSAGE:
                     on_progress(0.02, RETRY_MESSAGE[last_kind])
                 # error format/ffmpeg masih bisa diselamatkan format lain;
                 # error lain → langsung ganti client/percobaan berikutnya
                 if last_kind not in ("format", "ffmpeg"):
                     break
-        if last_kind not in ("reload", "network"):
+        if not retry_pass:
             break
         if on_progress:
             on_progress(0.02, "Mengulang unduhan dari awal…")
-        time.sleep(1.5)
+        time.sleep(1.5 * (pass_no + 1))
 
     _clean_partials(out_dir)
     raise DownloadError(friendly_download_error(last_error, has_cookies))

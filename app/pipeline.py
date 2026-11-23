@@ -253,7 +253,47 @@ def _run_analysis(job_id: str) -> None:
         if not candidates:
             candidates = analyze.fixed_windows(info.duration, settings)
 
-        # 5b) auto-framing & deteksi jenis video (gameplay vs podcast/pembicara vs topik)
+        segments_for_target = (transcript or {}).get("segments") or []
+        if segments_for_target:
+            span_start = float(segments_for_target[0].get("start") or 0.0)
+            span_end = float(segments_for_target[-1].get("end") or info.duration)
+            target_span = max(0.0, span_end - span_start)
+        else:
+            target_span = float(info.duration or 0.0)
+        final_target = analyze.target_clip_count(settings, target_span)
+
+        # AI membandingkan kandidat lokal yang lebih luas, lalu kita render-framing
+        # hanya kandidat akhir supaya kualitas naik tanpa menggandakan proses CV/CPU.
+        ai_refinement = bool(
+            candidates
+            and any(cand.text.strip() for cand in candidates)
+            and (
+                analyze.gemini_available(settings)
+                or (settings.get("llm_enabled") and settings.get("llm_url"))
+            )
+        )
+        if ai_refinement:
+            def _refine_progress(fraction: float, message: str = "") -> None:
+                progress = 0.94 + 0.02 * max(0.0, min(1.0, float(fraction)))
+                _job_set(job_id, stage="ai_rank", progress=progress,
+                         message=message or "Membandingkan momen kandidat dengan AI…")
+
+            _job_set(
+                job_id,
+                stage="ai_rank",
+                progress=0.94,
+                message="Membandingkan momen, hook, dan konteks dengan Gemini AI…"
+                if analyze.gemini_available(settings)
+                else "Membandingkan kandidat dengan LLM lokal…",
+            )
+            analyze.refine_with_llm(candidates, settings, on_progress=_refine_progress)
+
+        # Kandidat pool yang lebih lebar selalu dipangkas ke jumlah yang diminta,
+        # termasuk jika layanan AI tidak tersedia dan skor lokal menjadi fallback.
+        if len(candidates) > final_target:
+            candidates = analyze.select_candidate_subset(candidates, final_target)
+
+        # 5b) auto-framing hanya untuk momen yang terpilih akhir.
         framing_results: dict[int, dict[str, Any]] = {}
         tpl = editor.template_by_id(str(settings.get("default_template") or "")) or {}
         effective_layout = str(tpl.get("layout") or settings.get("layout") or "")
@@ -263,9 +303,11 @@ def _run_analysis(job_id: str) -> None:
 
                 if framing_module.available() and source_path:
                     gameplay_count = 0
+                    frame_start = 0.96 if ai_refinement else 0.94
+                    frame_span = 0.025
                     for index, cand in enumerate(candidates):
                         _job_set(job_id, stage="framing",
-                                 progress=0.94 + 0.03 * index / max(1, len(candidates)),
+                                 progress=frame_start + frame_span * index / max(1, len(candidates)),
                                  message=f"Mendeteksi pembicara / gameplay clip {index + 1}/{len(candidates)}…")
                         ctx = {
                             **(source_meta if isinstance(source_meta, dict) else {}),
@@ -288,17 +330,8 @@ def _run_analysis(job_id: str) -> None:
             except Exception:  # noqa: BLE001 - framing opsional, jangan gagalkan job
                 traceback.print_exc()
 
-        if candidates and (
-            analyze.gemini_available(settings)
-            or (settings.get("llm_enabled") and analyze.ollama_available(settings))
-        ):
-            _job_set(
-                job_id,
-                message="Menyempurnakan hook & skor viral via Gemini AI…"
-                if analyze.gemini_available(settings)
-                else "Minta judul ke LLM lokal…",
-            )
-            analyze.refine_with_llm(candidates, settings)
+        _job_set(job_id, stage="finalisasi", progress=0.99,
+                 message="Menyusun hasil kandidat klip…")
 
         # 6) simpan clip AI (JANGAN hapus clip manual milik user!)
         existing = db.list_clips(job_id)

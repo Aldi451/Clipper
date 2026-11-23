@@ -500,6 +500,35 @@ def _srt_ts(seconds: float) -> str:
     return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d},{ms:03d}"
 
 
+def _clip_text_transcript(clip: dict[str, Any], source_duration: float = 0.0) -> dict[str, Any] | None:
+    """Fallback word timing dari teks kandidat AI bila transkrip project tidak tersedia."""
+    meta = clip.get("meta") if isinstance(clip.get("meta"), dict) else {}
+    text = str(meta.get("transcript") or "").strip()
+    tokens = text.split()
+    if not tokens:
+        return None
+    start = max(0.0, _f(clip.get("start")))
+    end = start + max(0.2, _f(clip.get("duration"), 30.0))
+    if source_duration > 0:
+        end = min(end, source_duration)
+    if end - start < 0.2:
+        return None
+    step = (end - start) / len(tokens)
+    words = [
+        {
+            "start": round(start + index * step, 3),
+            "end": round(start + (index + 1) * step, 3),
+            "text": token,
+            "prob": 0.4,
+        }
+        for index, token in enumerate(tokens)
+    ]
+    return {
+        "language": str(meta.get("language") or ""),
+        "segments": [{"start": start, "end": end, "text": text, "words": words}],
+    }
+
+
 # --------------------------------------------------------------------------- #
 # hook overlay: teks harus sama dengan yang diucapkan
 # --------------------------------------------------------------------------- #
@@ -613,7 +642,9 @@ def default_spec(
     source_duration: float = 0.0,
 ) -> dict[str, Any]:
     settings = settings or load_settings()
-    clip_meta = clip.get("meta") or {}
+    clip_meta = clip.get("meta") if isinstance(clip.get("meta"), dict) else {}
+    if not transcript or not (transcript.get("segments") or []):
+        transcript = _clip_text_transcript(clip, source_duration)
     segments = normalize_segments(
         [{"start": clip.get("start"), "end": _f(clip.get("start")) + _f(clip.get("duration"), 30),
           "speed": 1.0}],
@@ -668,11 +699,28 @@ def default_spec(
     subtitles = generate_subtitles(
         transcript, segments, captions["words_per_line"], captions["word_level"]
     ) if captions["enabled"] else []
+    if captions["enabled"] and not subtitles:
+        fallback_transcript = _clip_text_transcript(clip, source_duration)
+        if fallback_transcript:
+            subtitles = generate_subtitles(
+                fallback_transcript, segments, captions["words_per_line"], captions["word_level"]
+            )
+            if subtitles:
+                transcript = fallback_transcript
 
     texts: list[dict[str, Any]] = []
     hook = (clip.get("hook") or "").strip()
-    if settings.get("hook_overlay") and hook:
-        entry = build_hook_text(clip, transcript, segments, settings)
+    is_ai_clip = clip_meta.get("origin") == "ai" and not clip_meta.get("manual", False)
+    show_hook_overlay = (
+        bool(settings.get("ai_hook_overlay", True))
+        if is_ai_clip
+        else bool(settings.get("hook_overlay"))
+    )
+    if show_hook_overlay and hook:
+        entry = build_hook_text(
+            clip, transcript, segments, settings,
+            source="title" if is_ai_clip else None,
+        )
         if entry:
             texts.append(entry)
 
@@ -1881,7 +1929,8 @@ def load_or_create_spec(
         try:
             data = json.loads(raw)
             if isinstance(data, dict) and data.get("segments"):
-                framing_meta = (clip.get("meta") or {}).get("framing") or {}
+                clip_meta = clip.get("meta") if isinstance(clip.get("meta"), dict) else {}
+                framing_meta = clip_meta.get("framing") or {}
                 meta_v = int(framing_meta.get("detector_v") or 0)
                 spec_v = int(data.get("framing_v") or 0)
                 if meta_v > spec_v and settings.get("auto_framing", True):
@@ -1894,7 +1943,21 @@ def load_or_create_spec(
                         data["layout"] = base["layout"]
                         if base["layout"] == "gameplay":
                             data.setdefault("captions", {})["y"] = base["captions"]["y"]
-                return normalize_spec(data, clip, settings, source_duration)
+                result = normalize_spec(data, clip, settings, source_duration)
+                is_ai_clip = clip_meta.get("origin") == "ai" and not clip_meta.get("manual", False)
+                if is_ai_clip and not clip_meta.get("edited"):
+                    # Pulihkan title/hook dan caption otomatis pada clip AI lama yang
+                    # pernah tersimpan tanpa keduanya, tetapi jangan timpa edit manual.
+                    base = default_spec(clip, settings, transcript, source_duration)
+                    if settings.get("captions", True) and clip_meta.get("captions") is not False:
+                        result["captions"]["enabled"] = True
+                        if not result["subtitles"] and base["subtitles"]:
+                            result["subtitles"] = base["subtitles"]
+                    show_hook = bool(settings.get("ai_hook_overlay", True))
+                    if show_hook and base["texts"] and not has_hook_overlay(result):
+                        result["texts"] = [*result["texts"], *base["texts"]]
+                    result = normalize_spec(result, clip, settings, source_duration)
+                return result
         except (json.JSONDecodeError, TypeError):
             pass
     return default_spec(clip, settings, transcript, source_duration)
