@@ -618,8 +618,11 @@ cari momen → render → upload). Bisa juga centang beberapa video lalu **Buat 
 ## Durasi clip, caption, dan Whisper
 
 **Durasi clip = 1–3 menit.** Default `min_clip_seconds = 60`, `max_clip_seconds = 180`.
-Nilai di luar 60–180 dirapikan otomatis (juga kalau `settings.json` diedit manual), dan analisis
-tanpa transkrip memakai panjang di antara min–max (bukan 45 detik seperti versi lama).
+Nilai di luar 60–180 dirapikan otomatis (juga kalau `settings.json` diedit manual). Bila ada
+transkrip/subtitle, Clipper menilai kandidat di seluruh timeline—termasuk bagian tengah dan akhir—
+dan mengutamakan hook yang muncul dalam 8 detik pertama clip. Bila transkrip tidak tersedia,
+fallback menggeser jendela audio ke seluruh video dan memberi peringkat dari energi/dinamika audio;
+mode ini tidak bisa menilai makna ucapan atau menjamin hook semantik.
 
 **Hook clip AI otomatis tampil di video** (default aktif, bisa dimatikan lewat `ai_hook_overlay`),
 sementara caption karaoke tetap berjalan setelah hook selesai. Untuk clip manual, hook di video
@@ -646,9 +649,12 @@ pendek dari 1 menit, Clipper memberi tahu bahwa target tidak bisa dicapai.
 **Render ulang N clip berubah** → `POST /api/jobs/{id}/render` dengan `{"only_dirty": true}`,
 hanya mengantre clip yang spesifikasinya berubah (mis. setelah membersihkan teks judul).
 
-**Hook: dinilai, bukan dipotong 6 kata pertama.** Mulai v1.1.8 setiap clip mendapat hook yang
-dipilih dari kalimat terbaik di dalamnya, lengkap dengan **skor 0–100** dan **grade**
-(Kuat ≥ 60, Sedang ≥ 40, Lemah). Penilaiannya memakai enam sinyal:
+**Hook: dinilai dari pembuka clip, bukan kata pemicu yang kebetulan muncul di tengah.**
+Clipper memberi bobot utama pada kualitas ucapan dalam 8 detik pertama, lalu menilai hook/topik,
+energi audio, kepadatan, kesinambungan, durasi, dan kelengkapan akhir. Clip mendapat **skor 0–100**
+dan **grade** (Kuat ≥ 60, Sedang ≥ 40, Lemah). Kalau Gemini atau Ollama tersedia, ranker membandingkan
+pool kandidat yang lebih luas dan tidak memihak timestamp awal; tanpa transkrip, skor hanya proxy audio.
+Sinyal hook mencakup:
 
 | Sinyal | Contoh pemicu |
 |---|---|
@@ -712,8 +718,9 @@ Pemasangan/pelepasan hook di video juga tersedia lewat API:
 
 **Whisper: library vs model.** Sidebar membedakan dua hal:
 - `Whisper ✓` = library `faster-whisper` terpasang (ikut saat instalasi Clipper),
-- tanpa tanda = library ada tapi **model** belum diunduh → transkripsi akan memakai subtitle video
-  bila ada, atau mode potong otomatis.
+- tanpa tanda = library belum terpasang; jika subtitle video tidak ada, Clipper memakai fallback
+  pencarian energi audio yang mencakup seluruh timeline. Untuk ranking hook berdasarkan makna ucapan,
+  pasang/aktifkan transkrip dengan Whisper atau gunakan subtitle sumber.
 
 Unduh model kapan saja di **Pengaturan → Analisis & transkripsi**: pilih `tiny` (75 MB) sampai
 `large-v3` (3,1 GB) lewat tombol **Unduh**, lengkap dengan progres. Setelah terunduh, transkripsi

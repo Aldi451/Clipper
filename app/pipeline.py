@@ -251,7 +251,9 @@ def _run_analysis(job_id: str) -> None:
         else:
             candidates = []
         if not candidates:
-            candidates = analyze.fixed_windows(info.duration, settings)
+            # Bila transkrip tidak tersedia, tetap cari jendela audio di seluruh video;
+            # jangan kembali ke potongan berurutan yang selalu dimulai dari 00:00.
+            candidates = analyze.fixed_windows(info.duration, settings, energy=energy)
 
         segments_for_target = (transcript or {}).get("segments") or []
         if segments_for_target:

@@ -12,7 +12,10 @@ from app.analyze import (
     Sentence,
     _clean_title,
     _ending_quality,
+    _window_score,
     candidate_pool_target,
+    find_candidates,
+    fixed_windows,
     refine_with_gemini,
     refine_with_llm,
     select_candidate_subset,
@@ -125,11 +128,15 @@ class ProEngineTests(unittest.TestCase):
         self.assertEqual(candidate_pool_target({"target_clips": 4}, 4), 4)
         self.assertEqual(
             candidate_pool_target({"gemini_enabled": True, "gemini_api_key": "test-gemini-key-12345"}, 4),
-            8,
+            12,
         )
         self.assertEqual(
             candidate_pool_target({"llm_enabled": True, "llm_url": "http://localhost:11434"}, 4),
-            8,
+            12,
+        )
+        self.assertEqual(
+            candidate_pool_target({"gemini_enabled": True, "gemini_api_key": "test-gemini-key-12345"}, 12),
+            30,
         )
         self.assertEqual(
             candidate_pool_target({"gemini_enabled": True, "gemini_api_key": "short"}, 12),
@@ -173,6 +180,103 @@ class ProEngineTests(unittest.TestCase):
         self.assertEqual(_ending_quality("Ceritanya masih berjalan"), 0.55)
         self.assertLessEqual(len(_clean_title("Sebuah judul yang sangat panjang " * 6, 60)), 60)
 
+    def test_opening_hook_scores_above_same_hook_delayed_in_clip(self) -> None:
+        def sentence(start: float, end: float, text: str) -> Sentence:
+            tokens = text.split()
+            step = (end - start) / max(1, len(tokens))
+            words = [
+                {"start": start + index * step, "end": start + (index + 1) * step, "text": token}
+                for index, token in enumerate(tokens)
+            ]
+            return Sentence(start, end, text, words)
+
+        hook = "Jangan lakukan ini, rahasia yang bisa bikin kamu rugi 1 juta rupiah."
+        payoff = "Ternyata langkah sederhana ini terbukti mengubah hasil akhirnya."
+        strong_start = [sentence(0.0, 6.0, hook), sentence(6.0, 30.0, payoff)]
+        delayed_hook = [
+            sentence(0.0, 10.0, "Oke kita membahas beberapa hal yang sudah disampaikan sebelumnya."),
+            sentence(10.0, 16.0, hook),
+            sentence(16.0, 30.0, payoff),
+        ]
+
+        def score(sentences: list[Sentence]) -> tuple[float, float]:
+            candidate = Candidate(
+                start=sentences[0].start,
+                end=sentences[-1].end,
+                score=0.0,
+                text=" ".join(item.text for item in sentences),
+                title="",
+                hook="",
+                description="",
+                hashtags="",
+                sentences=sentences,
+            )
+            value, features = _window_score(candidate, [], -30.0, 20.0, 40.0)
+            return value, features["opening"]
+
+        strong_score, strong_opening = score(strong_start)
+        delayed_score, delayed_opening = score(delayed_hook)
+
+        self.assertGreater(strong_opening, delayed_opening)
+        self.assertGreater(strong_score, delayed_score)
+
+    def test_candidate_search_can_choose_a_strong_hook_from_later_in_source(self) -> None:
+        ordinary = "Peristiwa itu berlangsung sesuai rencana yang sudah disampaikan oleh tim."
+        strong = [
+            "Jangan lakukan ini, rahasia yang bisa bikin kamu rugi 1 juta rupiah.",
+            "Ternyata yang paling penting adalah 3 langkah sederhana.",
+            "Banyak orang nggak tahu, kesalahan terbesar ini bikin rugi.",
+            "Kenapa hasilnya berbeda? Cara ini terbukti berhasil dalam 7 hari.",
+        ]
+        segments = []
+        for index in range(40):
+            start = float(index * 5)
+            text = strong[(index - 22) % len(strong)] if index >= 22 else ordinary
+            segments.append({"start": start, "end": start + 5.0, "text": text})
+
+        candidates = find_candidates(
+            {"segments": segments}, [],
+            {"min_clip_seconds": 15, "max_clip_seconds": 30, "target_clips": 2},
+        )
+
+        self.assertEqual(len(candidates), 2)
+        strongest = max(candidates, key=lambda item: item.score)
+        self.assertGreaterEqual(strongest.start, 95.0)
+        self.assertGreater(strongest.features["opening"], 0.4)
+
+    def test_audio_only_fallback_finds_late_high_energy_moment(self) -> None:
+        energy = []
+        for second in range(601):
+            db = -35.0
+            if 500 <= second <= 550:
+                db = -12.0 if second % 2 == 0 else -28.0
+            energy.append((float(second), db))
+
+        candidates = fixed_windows(
+            600.0,
+            {"min_clip_seconds": 30, "max_clip_seconds": 60, "target_clips": 1},
+            energy=energy,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertGreater(candidates[0].start, 300.0)
+        self.assertEqual(candidates[0].features["audio_only"], 1.0)
+        self.assertGreater(candidates[0].score, 0.0)
+
+    def test_audio_only_fallback_without_energy_covers_the_whole_timeline(self) -> None:
+        candidates = fixed_windows(
+            600.0,
+            {"min_clip_seconds": 30, "max_clip_seconds": 60, "target_clips": 3},
+        )
+
+        starts = [candidate.start for candidate in candidates]
+        self.assertEqual(len(starts), 3)
+        self.assertAlmostEqual(starts[0], 0.0)
+        self.assertGreater(starts[1], 200.0)
+        self.assertLess(starts[1], 350.0)
+        self.assertGreater(starts[2], 500.0)
+        self.assertTrue(all(candidate.score == 0.0 for candidate in candidates))
+
     def test_gemini_refinement_updates_candidate_and_blends_score(self) -> None:
         candidate = Candidate(
             start=0.0, end=25.0, score=60.0,
@@ -201,7 +305,8 @@ class ProEngineTests(unittest.TestCase):
         request_body = json.loads(request.data.decode("utf-8"))
         prompt = request_body["contents"][0]["parts"][0]["text"]
         self.assertIn("transkrip satu-satunya sumber fakta", prompt)
-        self.assertIn("konteks yang hilang", prompt)
+        self.assertIn("8 detik pertama", prompt)
+        self.assertIn("tengah", prompt)
         self.assertEqual(request_body["generationConfig"]["temperature"], 0.25)
         self.assertLessEqual(len(candidate.title), 60)
         self.assertTrue(updated)
