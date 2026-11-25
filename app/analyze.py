@@ -570,24 +570,34 @@ def target_clip_count(settings: dict[str, Any] | None, source_duration: float) -
 
 
 def candidate_pool_target(settings: dict[str, Any] | None, target: int) -> int:
-    """AI mendapat pool alternatif 2x untuk membandingkan momen sebelum dipangkas."""
+    """Berikan lebih banyak alternatif ke ranker agar momen tengah/akhir ikut dinilai."""
     settings = settings or load_settings()
     local_llm_configured = bool(
         settings.get("llm_enabled") and str(settings.get("llm_url") or "").strip()
     )
     if gemini_available(settings) or local_llm_configured:
-        return min(20, max(1, target) * 2)
+        return min(30, max(1, target) * 3)
     return max(1, target)
 
 
-def select_candidate_subset(candidates: list[Candidate], target: int) -> list[Candidate]:
-    """Pilih pool dengan skor terbaik sambil menjaga variasi pembuka dan waktu.
+def select_candidate_subset(
+    candidates: list[Candidate],
+    target: int,
+    *,
+    source_duration: float = 0.0,
+    timeline_diversity: float = 0.0,
+) -> list[Candidate]:
+    """Pilih skor terbaik, hindari duplikat, dan opsional sebar fallback sepanjang video.
 
-    Dapat dipanggil lagi sesudah model mengubah skor, sehingga AI ikut menentukan
-    momen akhir, bukan hanya menulis judul untuk pilihan lokal.
+    ``timeline_diversity`` hanya dipakai ketika tidak ada transkrip untuk dinilai;
+    bonusnya sengaja lembut agar momen dengan sinyal audio terbaik tetap menang.
     """
     if not candidates or target <= 0:
         return []
+    try:
+        source_duration = max(0.0, float(source_duration))
+    except (TypeError, ValueError):
+        source_duration = 0.0
     pool = list(candidates)
     openings = {
         id(cand): _tokens(" ".join(x.text for x in cand.sentences[:2]) or cand.text[:300])
@@ -597,13 +607,21 @@ def select_candidate_subset(candidates: list[Candidate], target: int) -> list[Ca
     picked_openings: list[list[str]] = []
 
     while pool and len(picked) < target:
-        best_index, best_value, best_similarity = 0, float("-inf"), 0.0
+        best_index, best_value, best_similarity, best_spread = 0, float("-inf"), 0.0, 0.0
         for index, cand in enumerate(pool):
             opening = openings[id(cand)]
             similarity = max((_jaccard(opening, other) for other in picked_openings), default=0.0)
             value = float(cand.score) * (1.0 - 0.45 * similarity)
+            spread_bonus = 0.0
+            if timeline_diversity > 0 and source_duration > 0 and picked:
+                center = (cand.start + cand.end) / 2.0
+                nearest = min(abs(center - (other.start + other.end) / 2.0) for other in picked)
+                spread_bonus = timeline_diversity * _clamp(nearest / max(1.0, source_duration / 2.0))
+                value += spread_bonus
             if value > best_value:
-                best_index, best_value, best_similarity = index, value, similarity
+                best_index, best_value, best_similarity, best_spread = (
+                    index, value, similarity, spread_bonus
+                )
 
         cand = pool.pop(best_index)
         clash = any(
@@ -619,10 +637,47 @@ def select_candidate_subset(candidates: list[Candidate], target: int) -> list[Ca
         cand.features["selection_score"] = round(best_value, 2)
         cand.features["score"] = round(best_value, 2)
         cand.features["opening_novelty"] = round(1.0 - best_similarity, 3)
+        if timeline_diversity > 0:
+            cand.features["timeline_spread"] = round(best_spread, 2)
         picked.append(cand)
         picked_openings.append(openings[id(cand)])
 
     return sorted(picked, key=lambda cand: cand.start)
+
+
+def _opening_text(
+    sentences: list[Sentence],
+    max_seconds: float = 8.0,
+    max_words: int = 28,
+) -> str:
+    """Teks ucapan awal klip; jangan hitung hook yang baru muncul jauh setelah clip mulai."""
+    if not sentences or max_words <= 0:
+        return ""
+    origin = sentences[0].start
+    words: list[str] = []
+    for sentence in sentences:
+        if sentence.start - origin > max_seconds:
+            break
+        if sentence.words:
+            for word in sentence.words:
+                if not isinstance(word, dict):
+                    continue
+                try:
+                    word_start = float(word.get("start", sentence.start))
+                except (TypeError, ValueError):
+                    word_start = sentence.start
+                if word_start - origin > max_seconds:
+                    break
+                text = str(word.get("text") or "").strip()
+                if text:
+                    words.extend(text.split())
+                    if len(words) >= max_words:
+                        return " ".join(words[:max_words])
+        else:
+            words.extend(sentence.text.split())
+            if len(words) >= max_words:
+                return " ".join(words[:max_words])
+    return " ".join(words[:max_words])
 
 
 def _window_score(cand: Candidate, energy: list[tuple[float, float]], base_db: float,
@@ -635,9 +690,9 @@ def _window_score(cand: Candidate, energy: list[tuple[float, float]], base_db: f
     density = _clamp((n_tokens / dur) / 3.0)               # ~3 kata/detik = ideal
     hook = _hook_score(text)
     if opening_hook is None:
-        opening_hook = _hook_score(" ".join(s.text for s in cand.sentences[:2]))
+        opening_hook = _hook_score(_opening_text(cand.sentences))
     mean_db, std_db = _energy_stats(energy, cand.start, cand.end)
-    loud = _clamp((mean_db - (base_db - 12)) / 14.0) if base_db > -90 else 0.5
+    loud = _clamp((mean_db - (base_db - 12)) / 14.0) if energy and base_db > -90 else 0.5
     lively = _clamp(std_db / 6.0)
     ideal = (1.4 * min_len + max(min_len, max_len)) / 2.4
     ideal = max(min_len, min(max(min_len, max_len), ideal))
@@ -658,9 +713,11 @@ def _window_score(cand: Candidate, energy: list[tuple[float, float]], base_db: f
         "continuity": round(continuity, 3),
         "clean_ending": clean_ending,
     }
+    # Hook yang benar-benar terdengar pada 8 detik pertama menjadi sinyal utama.
+    # Kata pemicu yang muncul di pertengahan clip saja tidak boleh mengalahkan pembuka kuat.
     raw = (
-        30 * hook + 16 * opening_hook + 12 * loud + 6 * lively +
-        12 * density + 12 * length_fit + 6 * continuity + 6 * clean_ending
+        32 * opening_hook + 18 * hook + 11 * loud + 7 * lively +
+        11 * density + 8 * length_fit + 7 * continuity + 6 * clean_ending
     )
     return round(raw, 2), features
 
@@ -699,14 +756,18 @@ def find_candidates(
     for i, start_sentence in enumerate(sentences):
         if on_progress and i % 25 == 0:
             on_progress(0.9 * i / total_starts, f"Menilai {i}/{total_starts} kandidat…")
+        opening_sentences: list[Sentence] = []
+        for opening_index in range(i, len(sentences)):
+            opening_sentence = sentences[opening_index]
+            if opening_sentence.start - start_sentence.start > 8.0:
+                break
+            opening_sentences.append(opening_sentence)
+        opening_hook = _hook_score(_opening_text(opening_sentences))
         chunk: list[Sentence] = []
         chunk_tokens = 0
-        opening_hook: float | None = None
         for j in range(i, len(sentences)):
             chunk.append(sentences[j])
             chunk_tokens += sent_tokens[j]
-            if len(chunk) == 2:
-                opening_hook = _hook_score(" ".join(s.text for s in chunk[:2]))
             dur = sentences[j].end - start_sentence.start
             if dur > max_len:
                 break
@@ -715,8 +776,6 @@ def find_candidates(
             if chunk_tokens < 12:
                 continue
             text = " ".join(s.text for s in chunk)
-            if opening_hook is None:
-                opening_hook = _hook_score(" ".join(s.text for s in chunk[:2]))
             cand = Candidate(
                 start=start_sentence.start,
                 end=sentences[j].end,
@@ -801,7 +860,9 @@ def choose_hook(text: str, used: list[list[str]] | None = None) -> tuple[str, di
 
 
 def _pick_hook(cand: Candidate, used: list[list[str]]) -> tuple[str, dict[str, Any]]:
-    opening_text = " ".join(x.text for x in cand.sentences[:3]) or cand.title
+    # Hook overlay harus merujuk ke ucapan dekat awal clip, bukan payoff yang baru
+    # muncul belasan detik kemudian.
+    opening_text = _opening_text(cand.sentences) or cand.title
     return choose_hook(opening_text or cand.text, used)
 
 
@@ -841,34 +902,87 @@ def _build_description(cand: Candidate, keywords: list[str]) -> str:
 # --------------------------------------------------------------------------- #
 # fallback tanpa transkrip (Whisper belum ada / bahasa tidak terdeteksi)
 # --------------------------------------------------------------------------- #
-def fixed_windows(duration: float, settings: dict[str, Any] | None = None) -> list[Candidate]:
+def fixed_windows(
+    duration: float,
+    settings: dict[str, Any] | None = None,
+    energy: list[tuple[float, float]] | None = None,
+) -> list[Candidate]:
+    """Fallback tanpa transkrip: cari sinyal audio di seluruh video, bukan potong dari awal.
+
+    Skor pada mode ini hanya proxy energi/dinamika audio, bukan penilaian hook semantik.
+    Tanpa data audio, jendela dipilih tersebar sepanjang timeline dengan skor nol.
+    """
     settings = settings or load_settings()
-    min_len = float(settings.get("min_clip_seconds") or 60)
-    max_len = float(settings.get("max_clip_seconds") or 180)
-    target = max(1, min(20, int(settings.get("target_clips") or 5)))
+    try:
+        duration = max(0.0, float(duration))
+    except (TypeError, ValueError):
+        return []
     if duration <= 0:
         return []
-    # tanpa transkrip: pakai panjang ideal di antara min–max, tidak pernah di bawah min
-    length = max(min_len, min(max_len, (min_len + max_len) / 2))
-    length = min(length, max(min_len, duration))
+
+    try:
+        min_len = float(settings.get("min_clip_seconds") or 60)
+    except (TypeError, ValueError):
+        min_len = 60.0
+    try:
+        max_len = float(settings.get("max_clip_seconds") or 180)
+    except (TypeError, ValueError):
+        max_len = 180.0
+    min_len = max(5.0, min(180.0, min_len))
+    max_len = max(min_len, min(180.0, max_len))
+    target = target_clip_count(settings, duration)
+
+    ideal = (1.4 * min_len + max_len) / 2.4
+    length = min(duration, max(min_len, min(max_len, ideal)))
+    max_start = max(0.0, duration - length)
+    starts = [0.0]
+    if max_start > 0:
+        # Sliding search keeps the tail and middle in scope; cap work for very long videos.
+        step = max(5.0, min(30.0, length / 4.0), max_start / 999.0)
+        start = step
+        while start < max_start:
+            starts.append(start)
+            start += step
+        starts.append(max_start)
+
+    energy = energy or []
+    base_db = _global_loudness(energy) if energy else -30.0
     results: list[Candidate] = []
-    step = max(length * 0.9, 5.0)
-    start = 0.0
-    index = 0
-    while start + min_len <= duration + 0.5 and len(results) < target:
+    for index, start in enumerate(starts, 1):
         end = min(duration, start + length)
-        if end - start < min(8.0, min_len):
-            break
-        index += 1
+        if energy:
+            mean_db, std_db = _energy_stats(energy, start, end)
+            loud = _clamp((mean_db - (base_db - 12.0)) / 14.0) if mean_db > -90 else 0.0
+            lively = _clamp(std_db / 6.0)
+            score = round(100.0 * (0.55 * loud + 0.45 * lively), 2)
+        else:
+            loud = lively = score = 0.0
         cand = Candidate(
-            start=round(start, 2), end=round(end, 2), score=float(max(1, 100 - index * 6)),
-            text="", title=f"Clip {index} · {_fmt(start)}–{_fmt(end)}",
-            hook="", description="", hashtags=settings.get("yt_hashtags") or "#Shorts",
+            start=round(start, 2),
+            end=round(end, 2),
+            score=score,
+            text="",
+            title=f"Clip {index} · {_fmt(start)}–{_fmt(end)}",
+            hook="",
+            description="",
+            hashtags=settings.get("yt_hashtags") or "#Shorts",
         )
-        cand.features = {"auto_window": 1.0}
+        cand.features = {
+            "auto_window": 1.0,
+            "audio_only": 1.0,
+            "audio_loudness": round(loud, 3),
+            "audio_liveliness": round(lively, 3),
+            "no_transcript": 1.0,
+        }
         results.append(cand)
-        start += step
-    return results
+
+    picked = select_candidate_subset(
+        results, target, source_duration=duration, timeline_diversity=8.0
+    )
+    for index, cand in enumerate(picked, 1):
+        cand.title = f"Clip {index} · {_fmt(cand.start)}–{_fmt(cand.end)}"
+        cand.features["order"] = float(index - 1)
+    return picked
 
 
 def _fmt(seconds: float) -> str:
@@ -926,9 +1040,11 @@ def refine_with_gemini(
         "Kamu editor senior video pendek untuk YouTube Shorts, Reels, dan TikTok. "
         "Bandingkan semua kandidat sebagai satu daftar dan beri skor RELATIF: pilih momen "
         "yang paling layak ditonton sampai selesai, bukan yang sekadar memakai kata sensasional.\n"
-        "Nilai apakah tiap klip bisa dipahami tanpa menonton bagian sebelumnya, punya satu gagasan "
-        "jelas dan payoff/informasi nyata, serta dimulai dengan kalimat menarik. Turunkan skor untuk "
-        "pengulangan, konteks yang hilang, pembuka basa-basi, dan akhir yang menggantung/terpotong. "
+        "Kandidat berasal dari seluruh timeline. Jangan memihak detik awal: momen di awal, tengah, "
+        "atau akhir sama-sama layak menang. Nilai apakah klip bisa dipahami mandiri, punya satu "
+        "gagasan jelas dan payoff nyata, serta hook kuat pada 8 detik pertama. Jika hook baru muncul "
+        "jauh setelah klip dimulai, turunkan skornya; kandidat yang dimulai dekat momen hook lebih baik. "
+        "Turunkan skor untuk pengulangan, konteks hilang, basa-basi, dan akhir menggantung/terpotong. "
         "Kamu hanya melihat transkrip; jangan menganggap ada visual atau konteks lain.\n"
         "Gunakan bahasa yang sama dengan transkrip. Jangan menambah fakta, angka, janji, atau kutipan "
         "yang tidak ada. Hook 4–7 kata harus didukung ucapan dalam klip. Buat judul jujur maksimal "
@@ -1059,11 +1175,13 @@ def refine_with_llm(
         for i, c in enumerate(candidates)
     ]
     prompt = (
-        "Kamu editor senior video pendek. Bandingkan semua kandidat dan pilih momen yang "
-        "paling menarik sebagai klip mandiri: konteks cukup, satu gagasan jelas, payoff nyata, "
-        "pembuka kuat, serta akhir yang selesai. Turunkan nilai untuk pengulangan, basa-basi, "
-        "konteks hilang, atau kalimat terpotong. Nilai hanya dari transkrip; jangan menambah "
-        "fakta, angka, janji, atau kutipan. Gunakan bahasa yang sama dengan transkrip.\n"
+        "Kamu editor senior video pendek. Kandidat berasal dari seluruh timeline; jangan memihak "
+        "detik awal—momen di awal, tengah, atau akhir sama-sama boleh mendapat nilai tertinggi. "
+        "Pilih momen yang paling menarik sebagai klip mandiri: konteks cukup, satu gagasan jelas, "
+        "payoff nyata, hook kuat dalam 8 detik pertama, serta akhir yang selesai. Jika hook baru "
+        "muncul jauh setelah klip dimulai, turunkan nilainya. Turunkan juga nilai pengulangan, basa-basi, "
+        "konteks hilang, atau kalimat terpotong. Nilai hanya dari transkrip; jangan menambah fakta, "
+        "angka, janji, atau kutipan. Gunakan bahasa yang sama dengan transkrip.\n"
         "Untuk setiap kandidat buat judul jujur maksimal 60 karakter, hook 4–7 kata yang didukung "
         "ucapan, skor relatif 0–100 (jangan semua tinggi), alasan singkat yang spesifik, dan 3–5 "
         "hashtag relevan. Pertahankan indeks `i`. Balas HANYA JSON array valid:\n"
