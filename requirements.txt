@@ -16,7 +16,9 @@ opencv-python-headless>=4.8,<5
 faster-whisper>=1.0.3
 
 # --- ambil video dari link (YouTube/TikTok/IG/X/dll) ---
-yt-dlp>=2024.4.9
+# EJS + Deno menjaga extractor YouTube tetap bisa mendapatkan format terbaru.
+# 2026.10.21 adalah rilis Python 3.10 terakhir yang kompatibel; Py3.11+ memakai yang terbaru.
+yt-dlp[default,deno]>=2026.10.21
 
 # --- upload otomatis ke YouTube Shorts ---
 google-api-python-client>=2.120.0

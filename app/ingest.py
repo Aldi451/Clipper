@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Any, BinaryIO, Callable
 
+from .cancellation import OperationCancelled
 from .config import UPLOAD_DIR, WORK_DIR, ensure_dirs, ffmpeg_for_ytdlp, load_settings
 from .fsutil import safe_rmtree
 
@@ -313,22 +314,24 @@ FORMAT_HINTS = ("requested format is not available", "requested format not avail
 
 def classify_download_error(message: str) -> str:
     low = strip_ansi(message).lower()
-    if any(k in low for k in RELOAD_HINTS):
-        return "reload"
+    # Penyebab spesifik (login/umur/geo) lebih berguna daripada gejala reload
+    # yang menyertainya; jangan sembunyikan petunjuk cookies di balik retry umum.
+    if any(k in low for k in AGE_HINTS):
+        return "age"
+    if any(k in low for k in BOT_HINTS):
+        return "bot"
+    if any(k in low for k in LOGIN_HINTS):
+        return "login"
+    if any(k in low for k in GEO_HINTS):
+        return "geo"
+    if any(k in low for k in UNAVAILABLE_HINTS):
+        return "unavailable"
     if any(k in low for k in FFMPEG_HINTS):
         return "ffmpeg"
     if any(k in low for k in FORMAT_HINTS):
         return "format"
-    if any(k in low for k in BOT_HINTS):
-        return "bot"
-    if any(k in low for k in AGE_HINTS):
-        return "age"
-    if any(k in low for k in GEO_HINTS):
-        return "geo"
-    if any(k in low for k in LOGIN_HINTS):
-        return "login"
-    if any(k in low for k in UNAVAILABLE_HINTS):
-        return "unavailable"
+    if any(k in low for k in RELOAD_HINTS):
+        return "reload"
     if any(k in low for k in NETWORK_HINTS):
         return "network"
     return "other"
@@ -367,17 +370,21 @@ def friendly_download_error(message: str, has_cookies: bool = False) -> str:
         return f"Video tidak tersedia (dihapus/private/diblokir pemiliknya). Coba link lain. · detail: {detail}"
     if kind == "format":
         return (
-            "Video ini tidak menyediakan format yang diminta (sering pada video lama atau "
-            "Shorts yang hanya punya satu format gabungan). Clipper sudah mencoba beberapa "
-            "alternatif otomatis. Kalau masih gagal: Pengaturan → Format unduhan → 'Best', "
-            "lalu coba lagi. · detail: " + detail
+            "yt-dlp tidak menemukan stream video yang bisa dipilih. Clipper sudah mencoba "
+            "beberapa format dan player. Untuk link YouTube, tutup lalu buka lagi lewat "
+            "run.bat (Windows) atau run.sh (macOS/Linux) agar versi yt-dlp + runtime EJS/Deno dicek. "
+            "Kalau masih gagal, video mungkin "
+            "memerlukan cookies atau memang tidak menyediakan stream yang bisa diunduh. "
+            "· detail: " + detail
         )
     if kind == "reload":
         return (
-            "YouTube mengirim halaman/player yang sudah kedaluwarsa, jadi unduhan berhenti di "
-            "tengah jalan. Ini biasanya sementara dan Clipper sudah mengulanginya otomatis. "
-            "Kalau terus terjadi: 1) perbarui yt-dlp (pip install -U yt-dlp), 2) pasang cookies "
-            "(Pengaturan → Cookies), 3) coba Client YouTube → TV. · detail: " + detail
+            "YouTube meminta halaman/player dimuat ulang. Clipper sudah mencoba ulang otomatis, "
+            "tetapi semua percobaan mengunduh stream tetap gagal. Ini terjadi sebelum proses "
+            "editing/render. Tutup Clipper lalu jalankan run.bat / run.sh agar runtime yt-dlp + "
+            "EJS/Deno diperiksa dan diperbarui bila perlu. Jika masih gagal, video mungkin "
+            "membutuhkan login/cookies atau sedang dibatasi — tambahkan cookies YouTube di "
+            "Pengaturan → Cookies, lalu klik Coba lagi. · detail: " + detail
         )
     if kind == "ffmpeg":
         return (
@@ -396,8 +403,9 @@ def friendly_download_error(message: str, has_cookies: bool = False) -> str:
             )
         if "http error 403" in low_raw:
             return (
-                "YouTube menolak stream pada percobaan ini. Coba perbarui yt-dlp (pip install -U yt-dlp), "
-                "lalu coba lagi; video yang perlu login mungkin membutuhkan cookies. · detail: " + detail
+                "YouTube menolak stream pada percobaan ini. Periksa/perbarui runtime dengan "
+                "menjalankan run.bat (Windows) atau run.sh (macOS/Linux), lalu coba lagi; "
+                "video yang perlu login mungkin membutuhkan cookies. · detail: " + detail
             )
         return (
             "Tidak bisa menghubungi server video (jaringan/DNS/proxy/SSL). Cek koneksi internet, "
@@ -535,13 +543,19 @@ def _extract(yt_dlp, url: str, opts: dict, out_dir: Path) -> Path:
     return path
 
 
-def download(url: str, job_label: str = "download", on_progress: Callable[[float, str], None] | None = None) -> Path:
+def download(
+    url: str,
+    job_label: str = "download",
+    on_progress: Callable[[float, str], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> Path:
     """Download video dari link pakai yt-dlp (YouTube, TikTok, IG, X, FB, dll)."""
     try:
         import yt_dlp  # type: ignore
     except ImportError as exc:
         raise DownloadError(
-            "yt-dlp belum terinstall. Jalankan: pip install yt-dlp"
+            'yt-dlp belum terinstall. Jalankan run.bat / run.sh atau '
+            'python -m pip install -U "yt-dlp[default,deno]>=2026.10.21".'
         ) from exc
 
     ensure_dirs()
@@ -549,7 +563,12 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
     out_dir.mkdir(parents=True, exist_ok=True)
     settings = load_settings()
 
+    def check_cancelled() -> None:
+        if cancel_check and cancel_check():
+            raise OperationCancelled("Unduhan dibatalkan")
+
     def hook(status: dict) -> None:
+        check_cancelled()
         if not on_progress:
             return
         if status.get("status") == "downloading":
@@ -599,42 +618,65 @@ def download(url: str, job_label: str = "download", on_progress: Callable[[float
 
     def attempt(extra: dict | None, fmt: str | None) -> tuple[Path | None, str]:
         _clean_partials(out_dir)
+        check_cancelled()
         opts = _build_opts(out_dir, settings, hook, extra)
         if fmt:
             opts["format"] = fmt
         try:
-            return _extract(yt_dlp, url, opts, out_dir), ""
+            path = _extract(yt_dlp, url, opts, out_dir)
+            check_cancelled()
+            return path, ""
+        except OperationCancelled:
+            _clean_partials(out_dir)
+            raise
         except Exception as exc:  # noqa: BLE001 - error yt-dlp apa pun
+            if cancel_check and cancel_check():
+                _clean_partials(out_dir)
+                raise OperationCancelled("Unduhan dibatalkan") from exc
             return None, str(exc)
 
     last_error = ""
     last_kind = "other"
     # "reload"/"network" biasanya sesi YouTube basi → ulangi sekali lagi dengan
     # instance YoutubeDL baru (dan buang file parsial sisa unduhan sebelumnya).
-    for pass_no in range(2):
-        retry_pass = False
-        for _label, extra in attempts:
-            for fmt in format_chain:
-                path, error = attempt(extra, fmt)
-                if path is not None:
-                    return path
-                last_error = error
-                last_kind = classify_download_error(last_error)
-                if last_kind not in RETRYABLE:
-                    raise DownloadError(friendly_download_error(last_error, has_cookies))
-                if last_kind in ("reload", "network"):
-                    retry_pass = True
-                if on_progress and last_kind in RETRY_MESSAGE:
-                    on_progress(0.02, RETRY_MESSAGE[last_kind])
-                # error format/ffmpeg masih bisa diselamatkan format lain;
-                # error lain → langsung ganti client/percobaan berikutnya
-                if last_kind not in ("format", "ffmpeg"):
-                    break
-        if not retry_pass:
-            break
-        if on_progress:
-            on_progress(0.02, "Mengulang unduhan dari awal…")
-        time.sleep(1.5 * (pass_no + 1))
+    try:
+        for pass_no in range(2):
+            retry_pass = False
+            for _label, extra in attempts:
+                for fmt in format_chain:
+                    check_cancelled()
+                    path, error = attempt(extra, fmt)
+                    check_cancelled()
+                    if path is not None:
+                        return path
+                    last_error = error
+                    last_kind = classify_download_error(last_error)
+                    if last_kind not in RETRYABLE:
+                        raise DownloadError(friendly_download_error(last_error, has_cookies))
+                    if last_kind in ("reload", "network"):
+                        retry_pass = True
+                    if on_progress and last_kind in RETRY_MESSAGE:
+                        on_progress(0.02, RETRY_MESSAGE[last_kind])
+                    # error format/ffmpeg masih bisa diselamatkan format lain;
+                    # error lain → langsung ganti client/percobaan berikutnya
+                    if last_kind not in ("format", "ffmpeg"):
+                        break
+            if not retry_pass or pass_no == 1:
+                break
+            if on_progress:
+                on_progress(0.02, "Mengulang unduhan dari awal…")
+            remaining = 1.5 * (pass_no + 1)
+            if cancel_check is None:
+                time.sleep(remaining)
+            else:
+                while remaining > 0:
+                    check_cancelled()
+                    delay = min(0.1, remaining)
+                    time.sleep(delay)
+                    remaining -= delay
+    except OperationCancelled:
+        _clean_partials(out_dir)
+        raise
 
     _clean_partials(out_dir)
     raise DownloadError(friendly_download_error(last_error, has_cookies))

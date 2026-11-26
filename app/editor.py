@@ -34,11 +34,12 @@ import math
 import re
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from . import framing as framing_module
 from . import speech
 from . import media
+from .cancellation import OperationCancelled
 from .config import CLIP_DIR, WORK_DIR, ffmpeg_exe, load_settings
 from .fsutil import safe_replace, safe_rmtree
 
@@ -1609,6 +1610,7 @@ def _render_segment(
     workdir: Path,
     info: media.MediaInfo | None = None,
     output_start: float = 0.0,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> None:
     fps = int(spec["output"]["fps"])
     layout = spec["layout"]
@@ -1638,6 +1640,8 @@ def _render_segment(
         last = "vbase"
 
     def build_and_run(force_still: bool) -> None:
+        if cancel_check and cancel_check():
+            raise OperationCancelled("Render dibatalkan")
         inputs, audio_idx = _visual_input(
             source_path, info, start, duration, workdir, fps, CANVAS_W, CANVAS_H,
             spec.get("background"), force_still=force_still,
@@ -1654,12 +1658,17 @@ def _render_segment(
         if speed != 1.0:
             cmd.insert(-1, "-af")
             cmd.insert(-1, f"atempo={speed:.4f},aresample=48000")
-        media.run_with_progress(cmd, out_duration, None, cwd=workdir)
+        media.run_with_progress(cmd, out_duration, None, cwd=workdir, cancel_check=cancel_check)
 
     build_and_run(force_still=False)
+    if cancel_check and cancel_check():
+        raise OperationCancelled("Render dibatalkan")
     # Kalau hasilnya ternyata tanpa gambar (video sumber habis / hanya audio),
     # render ulang memakai frame statis / kanvas gradien supaya ada video-nya.
-    if not (out_path.exists() and out_path.stat().st_size > 512) or not media.probe(out_path).has_video:
+    has_video = bool(out_path.exists() and out_path.stat().st_size > 512 and media.probe(out_path).has_video)
+    if cancel_check and cancel_check():
+        raise OperationCancelled("Render dibatalkan")
+    if not has_video:
         build_and_run(force_still=True)
 
 
@@ -1670,6 +1679,8 @@ def render_spec(
     source_info: media.MediaInfo,
     on_progress: ProgressFn | None = None,
     settings: dict[str, Any] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    before_commit: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Render spec editor → file mp4 (bisa 1080p/2K/4K) tanpa watermark."""
     settings = settings or load_settings()
@@ -1684,7 +1695,12 @@ def render_spec(
     # terkunci (sedang diputar di browser) sehingga ffmpeg gagal menimpanya.
     render_path = workdir / f"{clip_id}.mp4"
 
+    def check_cancelled() -> None:
+        if cancel_check and cancel_check():
+            raise OperationCancelled("Render dibatalkan")
+
     def report(fraction: float, message: str) -> None:
+        check_cancelled()
         if on_progress:
             on_progress(_clamp(fraction, 0.0, 1.0), message)
 
@@ -1707,10 +1723,13 @@ def render_spec(
         _render_segment(
             source_path, segment, spec, piece, workdir, source_info,
             output_start=float(out_range["out_start"]),
+            cancel_check=cancel_check,
         )
+        check_cancelled()
         if not piece.exists() or piece.stat().st_size < 512:
             raise EditorError(f"Segmen {idx + 1} gagal dirender")
         piece_info = media.probe(piece)
+        check_cancelled()
         if not piece_info.has_video:
             raise EditorError(
                 f"Segmen {idx + 1} keluar tanpa gambar (hanya suara). "
@@ -1735,7 +1754,7 @@ def render_spec(
                 "-f", "concat", "-safe", "0", "-i", str(list_file),
                 "-c", "copy", str(base_path),
             ],
-            total_out, None, cwd=workdir,
+            total_out, None, cwd=workdir, cancel_check=cancel_check,
         )
         if not base_path.exists():
             raise EditorError("Gagal menggabungkan segmen")
@@ -1839,11 +1858,13 @@ def render_spec(
     def ffprog(fraction: float) -> None:
         report(0.7 + 0.26 * fraction, f"Render {fraction * 100:.0f}% · {width}×{height}")
 
-    media.run_with_progress(cmd, total_out, ffprog, cwd=workdir)
+    media.run_with_progress(cmd, total_out, ffprog, cwd=workdir, cancel_check=cancel_check)
+    check_cancelled()
     if not render_path.exists() or render_path.stat().st_size < 2048:
         raise EditorError("Hasil render kosong — coba layout/pengaturan lain")
     # pastikan hasil akhir benar-benar punya gambar (bukan audio saja)
     result_info = media.probe(render_path)
+    check_cancelled()
     if not result_info.has_video:
         raise EditorError(
             "Hasil render tidak punya track video (hanya suara). Coba Render ulang; "
@@ -1854,6 +1875,9 @@ def render_spec(
             "Hasil render tidak punya track audio padahal sumbernya bersuara. Coba render ulang."
         )
 
+    check_cancelled()
+    if before_commit:
+        before_commit()
     if not safe_replace(render_path, out_path):
         raise EditorError(
             "Hasil render tidak bisa disimpan karena file lama masih dipakai "

@@ -54,9 +54,10 @@ if not exist ".venv\Scripts\python.exe" (
 call ".venv\Scripts\activate.bat"
 
 REM --- dependensi ---
-python -c "import fastapi, uvicorn, imageio_ffmpeg" >nul 2>nul
+REM yt-dlp + EJS/Deno wajib cukup baru karena extractor YouTube sering berubah.
+python -c "import datetime, sys, fastapi, uvicorn, imageio_ffmpeg; from importlib.metadata import version; y=tuple(int(p) for p in version('yt-dlp').split('.')[:3]); e=tuple(int(p) for p in version('yt-dlp-ejs').split('.')[:3]); d=tuple(int(p) for p in version('deno').split('.')[:3]); age=(datetime.date.today()-datetime.date(*y)).days; assert y >= (2026,10,21) and (sys.version_info < (3,11) or age <= 45) and e >= (0,8,0) and d >= (2,9,8)" >nul 2>nul
 if errorlevel 1 (
-  echo   [..] Memasang dependensi ^(butuh internet, sekali saja^)
+  echo   [..] Memasang / memperbarui dependensi ^(termasuk extractor YouTube^)
   python -m pip install --upgrade pip >nul 2>nul
   python -m pip install -r requirements.txt
   if errorlevel 1 (
@@ -64,8 +65,14 @@ if errorlevel 1 (
     pause
     exit /b 1
   )
+  python -m pip install --upgrade "yt-dlp[default,deno]>=2026.10.21"
+  if errorlevel 1 (
+    echo   [!] Gagal memperbarui yt-dlp. Cek koneksi internet lalu coba lagi.
+    pause
+    exit /b 1
+  )
 ) else (
-  echo   [OK] Dependensi sudah terpasang
+  echo   [OK] Dependensi dan runtime YouTube sudah siap
 )
 
 REM --- kalau venv tetap bermasalah, arahkan ke repair.bat ---

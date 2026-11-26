@@ -196,10 +196,11 @@ lalu jalankan `run.bat` lagi.
 ## Cara pakai (3 langkah)
 
 1. **Buat Clip** → tempel link atau drop file. Atur jumlah clip, durasi min/maks, gaya video.
-2. Clipper jalan sendiri: *download → baca metadata → ekstrak audio → transkrip/subtitle →
-   cari momen → buat clip kandidat*. Progress muncul real-time.
-3. Di halaman project: buka **✂ Editor** untuk memotong/menambah teks/caption, atau langsung
-   **Render** / **Render semua**, cek preview, lalu **Upload** ke YouTube Shorts.
+2. Clipper lebih dulu **mengunduh/menyiapkan video sumber**. Setelah siap, pilih **Render Hook AI**
+   atau **Edit Manual**. Saat membuka project yang sudah ada, Clipper langsung masuk ke project;
+   ganti mode lewat tombol AI/Manual di dalam project.
+3. Mode AI lalu mencari momen dan membuat kandidat clip; mode Manual membuka video sumber di editor.
+   Setelah itu edit, render, cek preview, lalu upload ke YouTube Shorts.
 
 Tips: buka **Pengaturan** dan aktifkan `Render otomatis` + `Upload otomatis` di tab YouTube
 untuk alur sekali klik (tempel link → Shorts terbit).
@@ -267,24 +268,24 @@ Sebagai jaring pengaman, kalau ffmpeg benar-benar tidak ada Clipper otomatis ber
 **format tunggal** (`b`) yang tidak perlu penggabungan, jadi unduhan tetap jalan walau
 kualitasnya mengikuti file gabungan yang disediakan YouTube.
 
-**Kalau unduhan berhenti di tengah (mis. 3%) dengan “The page needs to be reloaded”**
+**Kalau unduhan berhenti di tengah dengan “The page needs to be reloaded”**
 
-YouTube membagikan halaman/player yang sudah kedaluwarsa, sehingga unduhan terputus beberapa
-detik setelah mulai. Clipper sekarang:
+Pesan ini muncul saat yt-dlp sedang mengambil stream YouTube, sebelum proses editing/render.
+Pesan itu sendiri belum memastikan penyebab pastinya: versi yt-dlp atau runtime JavaScript yang
+lama/belum lengkap, sesi/player YouTube, kebutuhan login/cookies, atau pembatasan video bisa terlibat.
+Clipper mencoba ulang dengan sesi unduhan baru dan, dalam mode otomatis, mencoba beberapa player
+YouTube sebelum menampilkan langkah manual.
 
-1. **mengulang otomatis** — percobaan kedua memakai instance yt-dlp baru dan membuang file
-   parsial (`.part`) sisa unduhan sebelumnya,
-2. **berganti client** (web → TV) kalau percobaan pertama masih gagal,
-3. menampilkan pesan yang menjelaskan langkah manual kalau semuanya gagal.
-
-Kalau masih berulang, biasanya **yt-dlp kamu sudah tua** (YouTube sering mengubah halamannya):
+Kalau masih berulang, periksa **yt-dlp dan runtime JavaScript YouTube**. `run.bat` / `run.sh`
+memeriksa EJS + Deno dan versi minimum yt-dlp; pada Python 3.11+ launcher juga memperbarui yt-dlp
+kalau rilisnya lebih tua dari 45 hari. Kalau perlu memperbarui manual:
 
 ```bash
-pip install -U yt-dlp          # macOS/Linux
-.venv\Scripts\python -m pip install -U yt-dlp   # Windows (venv project)
+python -m pip install -U "yt-dlp[default,deno]>=2026.10.21"          # macOS/Linux
+.venv\Scripts\python -m pip install -U "yt-dlp[default,deno]>=2026.10.21"   # Windows (venv project)
 ```
 
-Pengaturan → Diagnostik sekarang menunjukkan umur rilis yt-dlp dan menampilkan peringatan kalau
+Pengaturan → Diagnostik menunjukkan umur rilis yt-dlp; pada Python 3.11+ peringatan muncul kalau
 lebih dari 45 hari. Cara lain: pasang cookies (Pengaturan → Cookies) atau ganti **Client YouTube → TV**.
 
 **Kalau unduhan gagal karena format**
@@ -297,8 +298,9 @@ rantai format otomatis:
 video+audio (mp4/m4a) → video+audio (ekstensi apa pun) → format gabungan → apa pun
 ```
 
-Kalau masih gagal, set **Pengaturan → Format unduhan → Best** lalu ulangi. Kalau videonya
-butuh login, lihat bagian *batas umur* di atas (pasang cookies dulu — daftar format ikut berubah).
+Kalau masih gagal, jalankan perintah update manual di bagian atas;
+Clipper sudah mencoba format `Best` sebagai fallback, jadi mengganti preset biasanya tidak cukup.
+Kalau videonya butuh login, lihat bagian *batas umur* di atas (pasang cookies dulu — daftar format ikut berubah).
 
 **Kalau unggahan gagal**
 

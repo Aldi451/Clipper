@@ -35,6 +35,57 @@ class IngestDownloadTests(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertEqual(ingest.classify_download_error(message), "network")
 
+    def test_format_error_explains_youtube_runtime_update(self) -> None:
+        message = ingest.friendly_download_error(
+            "ERROR: [youtube] LRAVVzTJSK0: Requested format is not available", has_cookies=False
+        )
+
+        self.assertIn("EJS/Deno", message)
+        self.assertIn("run.bat", message)
+        self.assertIn("run.sh", message)
+
+    def test_reload_error_points_to_updated_runtime_and_cookies(self) -> None:
+        message = ingest.friendly_download_error(
+            "[youtube] LRAVVzTJSK0: The page needs to be reloaded", has_cookies=False
+        )
+
+        self.assertIn("mencoba ulang", message)
+        self.assertIn("EJS/Deno", message)
+        self.assertIn("Cookies", message)
+
+    def test_authentication_hint_wins_over_reload_symptom(self) -> None:
+        message = "The page needs to be reloaded; Sign in to confirm your age"
+        self.assertEqual(ingest.classify_download_error(message), "age")
+
+    def test_persistent_reload_error_retries_then_shows_runtime_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            attempts = 0
+
+            def extract(*_args):
+                nonlocal attempts
+                attempts += 1
+                raise RuntimeError("[youtube] LRAVVzTJSK0: The page needs to be reloaded")
+
+            with (
+                patch.dict(sys.modules, {"yt_dlp": types.SimpleNamespace()}),
+                patch.object(ingest, "WORK_DIR", root),
+                patch.object(ingest, "ensure_dirs"),
+                patch.object(ingest, "load_settings", return_value={"ytdlp_player_client": "default"}),
+                patch.object(ingest, "cookie_path", return_value=None),
+                patch.object(ingest, "ffmpeg_for_ytdlp", return_value="/ffmpeg"),
+                patch.object(ingest, "_extract", side_effect=extract),
+                patch.object(ingest.time, "sleep") as sleep,
+            ):
+                with self.assertRaises(ingest.DownloadError) as caught:
+                    ingest.download("https://youtu.be/LRAVVzTJSK0", job_label="reload-test")
+
+        self.assertEqual(attempts, 2)
+        sleep.assert_called_once_with(1.5)
+        self.assertIn("mencoba ulang", str(caught.exception))
+        self.assertIn("EJS/Deno", str(caught.exception))
+        self.assertIn("Cookies", str(caught.exception))
+
     def test_youtube_download_falls_back_to_web_safari_client(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
