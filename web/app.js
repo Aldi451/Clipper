@@ -1,6 +1,16 @@
 /* Clipper — frontend tanpa framework, full offline. */
 "use strict";
 
+function loadProjectModes() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("clipper.project-modes") || "{}");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+    return Object.fromEntries(Object.entries(saved).filter(([, mode]) => mode === "ai" || mode === "manual"));
+  } catch (err) {
+    return {};
+  }
+}
+
 const state = {
   health: null,
   settings: {},
@@ -9,7 +19,7 @@ const state = {
   job: null,
   clips: [],
   clipView: { jobId: "", filter: "all", sort: "score", selected: new Set() },
-  projectMode: {},
+  projectMode: loadProjectModes(),
   modeModalPoll: null,
   poll: null,
   yt: null,
@@ -26,6 +36,19 @@ const state = {
     backend: "",
   },
 };
+
+function setProjectMode(jobId, mode) {
+  if (!jobId || (mode !== "ai" && mode !== "manual")) return;
+  state.projectMode[jobId] = mode;
+  try {
+    localStorage.setItem("clipper.project-modes", JSON.stringify(state.projectMode));
+  } catch (err) {}
+}
+
+function projectRouteHash(jobId) {
+  const mode = state.projectMode[jobId];
+  return `#/project/${encodeURIComponent(jobId)}${mode ? `?mode=${encodeURIComponent(mode)}` : ""}`;
+}
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -242,7 +265,7 @@ function parseRoute() {
     if (queryPart) {
       const qs = new URLSearchParams(queryPart);
       const m = qs.get("mode");
-      if (m === "ai" || m === "manual") state.projectMode[parts[1]] = m;
+      if (m === "ai" || m === "manual") setProjectMode(parts[1], m);
     }
     return { route: "project", param: parts[1] };
   }
@@ -490,6 +513,7 @@ function statusTag(job) {
     queued: ["Antrean", ""],
     running: ["Diproses", "run"],
     done: ["Selesai", "done"],
+    cancelled: ["Dibatalkan", ""],
     error: ["Gagal", "err"],
   };
   const [label, cls] = map[job.status] || [job.status, ""];
@@ -504,7 +528,7 @@ function jobCardHtml(job) {
   const aiCount = Number(job.ai_clip_count || 0);
   const manualCount = Number(job.manual_clip_count || 0);
   return `
-    <div class="project" data-action="open-job" data-id="${esc(job.id)}" title="Klik untuk pilih Render Hook AI atau Edit Manual">
+    <div class="project" data-action="open-job" data-id="${esc(job.id)}" title="Klik untuk membuka project">
       <div class="pthumb">${thumb}</div>
       <div class="pbody">
         <div class="ptitle">${esc(job.title || job.source || "Tanpa judul")}</div>
@@ -520,7 +544,7 @@ function jobCardHtml(job) {
           job.status === "running" || job.status === "queued"
             ? `<div class="bar thin"><i style="width:${progress}%"></i></div>
                <div class="tiny dim">${esc(job.message || job.stage || "")}</div>`
-            : `<div class="tiny dim">${new Date(job.created_at * 1000).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" })} · Klik untuk pilih mode</div>`
+            : `<div class="tiny dim">${new Date(job.created_at * 1000).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" })} · Klik untuk membuka project</div>`
         }
       </div>
     </div>`;
@@ -910,8 +934,8 @@ async function viralMakeClip(id, button) {
   }
   try {
     const res = await api("/api/discover/" + id + "/clip", { method: "POST", body: {} });
-    toast("Video masuk antrean — menganalisa momen…", "ok");
-    location.hash = "#/project/" + res.job.id;
+    toast("Video masuk project — menyiapkan video full dulu…", "ok");
+    location.hash = projectRouteHash(res.job.id);
   } catch (err) {
     toast(err.message, "bad");
     if (button) {
@@ -964,6 +988,7 @@ function clipStatusTag(clip) {
     rendered: ["Siap upload", "done"],
     uploading: ["Upload", "run"],
     uploaded: ["Terupload", "up"],
+    cancelled: ["Dibatalkan", ""],
     error: ["Error", "err"],
   };
   const [label, cls] = map[clip.status] || [clip.status, ""];
@@ -1183,6 +1208,7 @@ function clipCardHtml(clip) {
     ? `<img src="/api/clips/${esc(clip.id)}/thumb?v=${Math.round(clip.updated_at)}" onerror="this.style.display='none'" />`
     : `<span>${clip.status === "rendered" || clip.status === "uploaded" ? "🎞️" : "✂️"}</span>`;
   const active = clip.status === "rendering" || clip.status === "uploading";
+  const cancelling = (clip.message || "").toLowerCase().startsWith("membatalkan");
   const progress = Math.round((clip.progress || 0) * 100);
   const score = Number(clip.score || 0);
   const scoreText = score > 0 && score <= 100 ? Math.round(score) : Math.round(Math.min(100, score / 1.2));
@@ -1234,6 +1260,7 @@ function clipCardHtml(clip) {
           <button class="btn small" data-action="render" data-id="${esc(clip.id)}" ${active ? "disabled" : ""}>
             ${clip.has_file ? "Render ulang" : "Render"}
           </button>
+          ${clip.status === "rendering" ? `<button class="btn small ghost danger" data-action="cancel-render" data-id="${esc(clip.id)}" ${cancelling ? "disabled" : ""}>${cancelling ? "Membatalkan…" : "Batalkan render"}</button>` : ""}
           <button class="btn small yt" data-action="upload" data-id="${esc(clip.id)}" ${!clip.has_file || active ? "disabled" : ""}>Upload YT</button>
           ${ttOn ? `<button class="btn small tt" data-action="upload-tt" data-id="${esc(clip.id)}" ${!clip.has_file || active ? "disabled" : ""}>TikTok</button>` : ""}
           ${clip.has_file ? `<a class="btn small ghost" href="/api/clips/${esc(clip.id)}/download">Unduh</a>` : ""}
@@ -1260,7 +1287,30 @@ function isClipManual(clip) {
   return Boolean(meta.manual || meta.origin === "manual");
 }
 
+function projectSourceReady(job) {
+  if (!job) return false;
+  const meta = job.meta || {};
+  const clipCount = Number(job.ai_clip_count || 0) + Number(job.manual_clip_count || 0);
+  const hasClips = clipCount > 0 || (Array.isArray(job.clips) && job.clips.length > 0);
+  const hasSource = typeof job.has_source === "boolean" ? job.has_source : Boolean(job.source_path);
+  const hasDuration = Number(job.duration || 0) > 3;
+
+  if (meta.prepared || hasClips) return true;
+  if (job.status === "cancelled") return false;
+  if (job.status === "error") return hasSource && hasDuration;
+
+  const preparingStages = ["antre", "memuat", "download", "probe"];
+  if (["queued", "running"].includes(job.status) && preparingStages.includes(job.stage || "") && !hasDuration) {
+    return false;
+  }
+  return hasSource || job.status === "done";
+}
+
 function renderModeModalContent(job) {
+  const sourceReady = projectSourceReady(job);
+  const prepareCancelled = !sourceReady && job.status === "cancelled";
+  const prepareFailed = !sourceReady && job.status === "error";
+  const cancelPending = (job.message || "").toLowerCase().startsWith("membatalkan");
   const aiCount = Number(job.ai_clip_count || 0);
   const manualCount = Number(job.manual_clip_count || 0);
   const aiRendered = Number(job.ai_rendered_count || 0);
@@ -1275,10 +1325,15 @@ function renderModeModalContent(job) {
       <div class="modal mode-modal">
         <div class="mode-modal-head">
           <div>
-            <h2 class="mode-modal-title">Pilih Mode Editing: ${esc(job.title || job.source || "Project")}</h2>
+            <h2 class="mode-modal-title">${sourceReady ? `Pilih Mode Editing: ${esc(job.title || job.source || "Project")}` : prepareCancelled ? "Persiapan dibatalkan" : prepareFailed ? "Video belum siap" : "Menyiapkan video full…"}</h2>
             <p class="mode-modal-sub">
-              Tentukan bagaimana Anda ingin mengedit klip untuk proyek ini.
-              ${job.duration ? ` · Durasi video full: <b>${fmtDur(job.duration)}</b>` : ""}
+              ${sourceReady
+                ? `Tentukan bagaimana Anda ingin mengedit klip untuk proyek ini.${job.duration ? ` · Durasi video full: <b>${fmtDur(job.duration)}</b>` : ""}`
+                : prepareCancelled
+                  ? "Persiapan video dihentikan. Kamu bisa mencoba lagi kapan saja."
+                  : prepareFailed
+                    ? "Unduhan atau pemeriksaan video gagal. Perbaiki lalu coba siapkan ulang project."
+                    : "Video sumber sedang disiapkan. Opsi edit muncul setelah videonya siap."}
             </p>
           </div>
           <button class="btn small ghost" data-action="close-modal" title="Tutup">✕</button>
@@ -1292,11 +1347,30 @@ function renderModeModalContent(job) {
                   <span class="mono">${pct}%</span>
                 </div>
                 <div class="bar thin"><i style="width:${pct}%"></i></div>
+                ${!sourceReady ? `<div class="row" style="justify-content:center;margin-top:10px">
+                  <button class="btn small ghost danger" data-action="cancel-job" data-id="${esc(job.id)}" ${cancelPending ? "disabled" : ""}>${cancelPending ? "Membatalkan…" : "Batalkan persiapan"}</button>
+                </div>` : ""}
               </div>`
             : ""
         }
 
-        <div class="mode-cards-grid">
+        ${sourceReady && job.source_path ? `
+          <div class="row" style="justify-content:center;margin:12px 0">
+            <a class="btn small ghost" href="/api/jobs/${esc(job.id)}/source" target="_blank" rel="noopener">▶ Tonton video sumber full</a>
+          </div>` : ""}
+
+        ${!sourceReady ? `
+          <div class="card tight" style="margin:12px 0;text-align:center">
+            ${prepareFailed || prepareCancelled
+              ? `<p class="tiny" style="color:${prepareCancelled ? "var(--muted)" : "#fca5a5"};margin:0 0 12px">${esc(job.error || (prepareCancelled ? "Persiapan video dibatalkan." : "Unduhan atau pemeriksaan video gagal."))}</p>
+                 <div class="row" style="justify-content:center">
+                   <button class="btn small" data-action="retry-job" data-id="${esc(job.id)}">Coba siapkan ulang</button>
+                   <button class="btn small ghost" data-action="close-modal">Tutup</button>
+                 </div>`
+              : `<div class="tiny dim">${esc(job.message || "Menyiapkan video full…")} Opsi edit akan muncul setelah video siap.</div>`}
+          </div>` : ""}
+
+        <div class="mode-cards-grid" style="${sourceReady ? "" : "display:none"}">
           <div class="mode-card mode-card-ai" data-action="choose-mode-ai" data-id="${esc(job.id)}">
             <div class="mode-card-icon ai">
               <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
@@ -1356,7 +1430,7 @@ function renderModeModalContent(job) {
           </div>
         </div>
 
-        <div class="tiny dim" style="text-align:center;margin-top:14px">
+        <div class="tiny dim" style="text-align:center;margin-top:14px;${sourceReady ? "" : "display:none"}">
           💡 Hasil <b>Render Hook AI</b> dan hasil <b>Edit Manual</b> disimpan terpisah di project ini — memilih salah satu <b>tidak akan menghapus</b> hasil mode lainnya.
         </div>
       </div>
@@ -1416,17 +1490,19 @@ async function renderProject(jobId) {
 
   const aiClips = allClips.filter((c) => !isClipManual(c));
   const manualClips = allClips.filter((c) => isClipManual(c));
+  const sourceReady = projectSourceReady(job);
 
   let activeMode = state.projectMode[jobId];
-  if (!activeMode) {
+  if (activeMode !== "ai" && activeMode !== "manual") {
     if (manualClips.length > 0 && aiClips.length === 0) activeMode = "manual";
     else activeMode = "ai";
-    state.projectMode[jobId] = activeMode;
+    if (sourceReady) setProjectMode(jobId, activeMode);
   }
 
   const clips = activeMode === "manual" ? manualClips : aiClips;
   const visibleClips = filterAndSortClips(clips, state.clipView);
   const running = job.status === "running" || job.status === "queued";
+  const cancelPending = (job.message || "").toLowerCase().startsWith("membatalkan");
   const pct = Math.round((job.progress || 0) * 100);
   const dirtyCount = clips.filter((c) => c.meta && c.meta.dirty && c.status !== "uploaded").length;
   let ttOn = true;
@@ -1451,22 +1527,21 @@ async function renderProject(jobId) {
         </p>
       </div>
       <div class="row">
-        <button class="btn ghost" data-action="open-mode-modal" data-id="${esc(job.id)}">⇄ Pilih Mode Editing</button>
-        <button class="btn" data-action="render-all" data-mode="${activeMode}" ${!clips.length || running ? "disabled" : ""}>Render semua (${clips.length})</button>
-        ${clips.length ? `<button class="btn ghost" data-action="detect-all-speakers" ${running ? "disabled" : ""}
+        <button class="btn" data-action="render-all" data-mode="${activeMode}" style="${sourceReady ? "" : "display:none"}" ${!clips.length || running ? "disabled" : ""}>Render semua (${clips.length})</button>
+        ${clips.length ? `<button class="btn ghost" data-action="detect-all-speakers" style="${sourceReady ? "" : "display:none"}" ${running ? "disabled" : ""}
           title="Deteksi wajah pembicara / gameplay untuk semua clip di project ini">Deteksi pembicara ${clips.length} clip</button>` : ""}
-        ${activeMode === "ai" && clips.length ? `<button class="btn ghost" data-action="hooks-from-speech-all" ${running ? "disabled" : ""}
+        ${activeMode === "ai" && clips.length ? `<button class="btn ghost" data-action="hooks-from-speech-all" style="${sourceReady ? "" : "display:none"}" ${running ? "disabled" : ""}
           title="Ganti hook semua clip dengan kata yang benar-benar diucapkan (paling anti-melenceng)">Hook dari ucapan ${clips.length} clip</button>` : ""}
-        ${activeMode === "ai" && clips.length ? `<button class="btn ghost" data-action="refresh-hooks" ${running ? "disabled" : ""}
+        ${activeMode === "ai" && clips.length ? `<button class="btn ghost" data-action="refresh-hooks" style="${sourceReady ? "" : "display:none"}" ${running ? "disabled" : ""}
           title="Hitung ulang kekuatan hook & variannya untuk semua clip di project ini">Perbarui hook ${clips.length} clip</button>` : ""}
-        ${dirtyCount ? `<button class="btn ghost" data-action="render-dirty" data-mode="${activeMode}" ${running ? "disabled" : ""}>Render ulang ${dirtyCount} clip berubah</button>` : ""}
-        <button class="btn yt" data-action="upload-all" data-mode="${activeMode}" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload YT</button>
-        ${ttOn ? `<button class="btn tt" data-action="upload-all-tt" data-mode="${activeMode}" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload TikTok</button>` : ""}
+        ${dirtyCount ? `<button class="btn ghost" data-action="render-dirty" data-mode="${activeMode}" style="${sourceReady ? "" : "display:none"}" ${running ? "disabled" : ""}>Render ulang ${dirtyCount} clip berubah</button>` : ""}
+        <button class="btn yt" data-action="upload-all" data-mode="${activeMode}" style="${sourceReady ? "" : "display:none"}" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload YT</button>
+        ${ttOn ? `<button class="btn tt" data-action="upload-all-tt" data-mode="${activeMode}" style="${sourceReady ? "" : "display:none"}" ${!clips.some((c) => c.has_file) ? "disabled" : ""}>Upload TikTok</button>` : ""}
         <button class="btn ghost danger" data-action="delete-job" data-id="${esc(job.id)}">Hapus project</button>
       </div>
     </div>
 
-    <div class="mode-switch-bar">
+    <div class="mode-switch-bar" style="${sourceReady ? "" : "display:none"}">
       <div class="row" style="gap:8px;flex-wrap:wrap">
         <button class="mode-switch-tab ${activeMode === "ai" ? "active ai" : ""}" data-action="switch-project-mode" data-id="${esc(job.id)}" data-mode="ai">
           🪄 Render Hook AI Otomatis <span class="badge">${aiClips.length}</span>
@@ -1492,16 +1567,19 @@ async function renderProject(jobId) {
     </div>
 
     ${
-      running || job.error
+      running || job.error || !sourceReady
         ? `<div class="card tight" style="margin-bottom:16px">
             <div class="status-line">
               <span>${esc(job.message || job.stage || "Memproses…")}</span>
               <span class="mono">${pct}%</span>
             </div>
             <div class="bar ${job.status === "error" ? "err" : ""}"><i style="width:${job.status === "error" ? 100 : pct}%"></i></div>
-            ${job.error ? `<p class="tiny" style="color:#fca5a5;margin:10px 0 0">${esc(job.error)}</p>
+            ${!sourceReady && running ? `<div class="row" style="margin-top:10px">
+              <button class="btn small ghost danger" data-action="cancel-job" data-id="${esc(job.id)}" ${cancelPending ? "disabled" : ""}>${cancelPending ? "Membatalkan…" : "Batalkan persiapan"}</button>
+            </div>` : ""}
+            ${job.error || job.status === "cancelled" ? `<p class="tiny" style="color:${job.status === "cancelled" ? "var(--muted)" : "#fca5a5"};margin:10px 0 0">${esc(job.error || "Persiapan video dibatalkan.")}</p>
               <div class="row" style="margin-top:10px">
-                <button class="btn small" data-action="retry-job" data-id="${esc(job.id)}">Coba lagi</button>
+                <button class="btn small" data-action="retry-job" data-id="${esc(job.id)}">${job.status === "cancelled" ? "Coba siapkan ulang" : "Coba lagi"}</button>
                 ${needsCookies(job.error) ? `<a class="btn small ghost" href="#/settings">Atur cookies / unduhan</a>` : ""}
               </div>` : ""}
           </div>`
@@ -1518,7 +1596,7 @@ async function renderProject(jobId) {
         : ""
     }
 
-    <div class="card tight" style="margin-bottom:18px">
+    <div class="card tight" style="margin-bottom:18px;${sourceReady ? "" : "display:none"}">
       <div class="row" style="justify-content:space-between">
         <div class="row" style="gap:18px">
           <div class="stat"><span class="v">${clips.length}</span><span class="k">${activeMode === "manual" ? "clip manual" : "clip AI"}</span></div>
@@ -1536,9 +1614,9 @@ async function renderProject(jobId) {
       </div>
     </div>
 
-    ${clips.length ? clipViewToolbarHtml(job.id, clips, visibleClips) : ""}
+    ${sourceReady && clips.length ? clipViewToolbarHtml(job.id, clips, visibleClips) : ""}
 
-    <div id="clips">
+    <div id="clips" style="${sourceReady ? "" : "display:none"}">
       ${
         clips.length
           ? `<div class="clips" id="clip-list">${visibleClips.length ? visibleClips.map(clipCardHtml).join("") : '<div class="clip-filter-empty">Tidak ada clip pada filter ini.</div>'}</div>`
@@ -3279,11 +3357,17 @@ async function renderSettings() {
         <div class="stat"><span class="v">${health.ffmpeg ? "✓" : "✗"}</span><span class="k">ffmpeg</span></div>
         <div class="stat"><span class="v">${health.whisper ? "✓" : "✗"}</span><span class="k">faster-whisper</span></div>
         <div class="stat"><span class="v">${health.ytdlp ? esc(health.ytdlp_version) : "✗"}</span><span class="k">yt-dlp</span></div>
+        <div class="stat"><span class="v">${health.ytdlp_runtime_ready ? "✓" : "✗"}</span><span class="k">EJS + Deno</span></div>
         ${health.ytdlp_outdated ? `<div class="tiny" style="color:#fbbf24;grid-column:1/-1;line-height:1.7">
-          yt-dlp kamu berumur ${health.ytdlp_age_days} hari. YouTube sering mengubah halamannya,
+          yt-dlp ${esc(health.ytdlp_version || "tidak tersedia")} perlu diperbarui. YouTube sering mengubah halamannya,
           sehingga unduhan bisa gagal dengan pesan seperti “The page needs to be reloaded”.
-          Perbarui dengan: <span class="mono">pip install -U yt-dlp</span> (atau
-          <span class="mono">.venv\\Scripts\\python -m pip install -U yt-dlp</span> di Windows).
+          Perbarui dengan <span class="mono">python -m pip install -U &quot;yt-dlp[default,deno]&gt;=2026.10.21&quot;</span>
+          (Windows: <span class="mono">.venv\\Scripts\\python -m pip install -U &quot;yt-dlp[default,deno]&gt;=2026.10.21&quot;</span>).
+          run.bat / run.sh memeriksa dan memperbarui runtime YouTube kalau diperlukan.
+        </div>` : ""}
+        ${health.ytdlp && !health.ytdlp_runtime_ready ? `<div class="tiny" style="color:#fbbf24;grid-column:1/-1;line-height:1.7">
+          Runtime JS untuk extractor YouTube belum lengkap (butuh yt-dlp-ejs + Deno).
+          Jalankan <span class="mono">run.bat</span> / <span class="mono">run.sh</span> untuk memasangnya otomatis.
         </div>` : ""}
         ${health.ffmpeg && !health.ffmpeg_ytdlp ? `<div class="tiny" style="color:#fbbf24;grid-column:1/-1;line-height:1.7">
           yt-dlp tidak tahu lokasi ffmpeg, jadi unduhan video+audio bisa gagal dengan pesan
@@ -3484,10 +3568,7 @@ document.addEventListener("click", async (e) => {
       return;
     } else if (action === "open-job") {
       e.preventDefault();
-      await openProjectModeModal(id);
-    } else if (action === "open-mode-modal") {
-      e.preventDefault();
-      await openProjectModeModal(id || (state.job && state.job.id));
+      location.hash = projectRouteHash(id);
     } else if (action === "choose-mode-ai") {
       e.preventDefault();
       const jobId = id || (state.job && state.job.id);
@@ -3501,7 +3582,7 @@ document.addEventListener("click", async (e) => {
         method: "POST",
         body: { force: false },
       });
-      state.projectMode[jobId] = "ai";
+      setProjectMode(jobId, "ai");
       closeModal();
       if (res.already_exists) {
         toast(`Membuka ${res.ai_clip_count} clip hasil Render Hook AI yang tersimpan`, "ok");
@@ -3525,7 +3606,7 @@ document.addEventListener("click", async (e) => {
         method: "POST",
         body: { force: true },
       });
-      state.projectMode[jobId] = "ai";
+      setProjectMode(jobId, "ai");
       toast("Memulai analisa ulang Render Hook AI…", "ok");
       await renderProject(jobId);
     } else if (action === "choose-mode-manual" || action === "open-manual-editor-direct" || action === "create-manual-clip-open") {
@@ -3543,7 +3624,7 @@ document.addEventListener("click", async (e) => {
         method: "POST",
         body: { create_new: createNew },
       });
-      state.projectMode[jobId] = "manual";
+      setProjectMode(jobId, "manual");
       closeModal();
       const targetClipId = (res.clip && res.clip.id) || res.active_clip_id;
       if ((res.created || forceEditor) && targetClipId) {
@@ -3562,8 +3643,8 @@ document.addEventListener("click", async (e) => {
       const jobId = id || (state.job && state.job.id);
       const nextMode = target.dataset.mode === "manual" ? "manual" : "ai";
       if (!jobId) return;
-      state.projectMode[jobId] = nextMode;
-      await renderProject(jobId);
+      setProjectMode(jobId, nextMode);
+      location.hash = projectRouteHash(jobId);
     } else if (action === "new-job") {
       location.hash = "#/new";
     } else if (action === "edit") {
@@ -3581,6 +3662,40 @@ document.addEventListener("click", async (e) => {
       state.editing._rangeEnd = start + dur;
       video.currentTime = Math.max(0, start);
       video.play().catch(() => {});
+    } else if (action === "cancel-job") {
+      target.disabled = true;
+      target.textContent = "Membatalkan…";
+      try {
+        const res = await api(`/api/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+        if (res.cancel_requested) {
+          toast("Pembatalan persiapan video diminta", "ok");
+        } else {
+          toast(res.state === "finishing" ? "Persiapan hampir selesai; pembatalan sudah tidak tersedia." : "Proses sudah berhenti.", "warn");
+          if (res.state === "finishing") target.textContent = "Hampir selesai…";
+          else target.disabled = false;
+        }
+      } catch (err) {
+        target.disabled = false;
+        target.textContent = "Batalkan persiapan";
+        throw err;
+      }
+    } else if (action === "cancel-render") {
+      target.disabled = true;
+      target.textContent = "Membatalkan…";
+      try {
+        const res = await api(`/api/clips/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+        if (res.cancel_requested) {
+          toast("Pembatalan render diminta", "ok");
+        } else {
+          toast(res.state === "finishing" ? "Render hampir selesai; pembatalan sudah tidak tersedia." : "Render sudah berhenti.", "warn");
+          if (res.state === "finishing") target.textContent = "Hampir selesai…";
+          else target.disabled = false;
+        }
+      } catch (err) {
+        target.disabled = false;
+        target.textContent = "Batalkan render";
+        throw err;
+      }
     } else if (action === "render") {
       target.dataset.label = target.textContent.trim();
       target.disabled = true;
@@ -3607,9 +3722,13 @@ document.addEventListener("click", async (e) => {
       toast("Project dihapus", "ok");
       location.hash = "#/projects";
     } else if (action === "retry-job") {
-      await api("/api/jobs/" + id + "/retry", { method: "POST" });
-      toast("Mencoba ulang analisis…", "ok");
-      renderProject(id);
+      const res = await api("/api/jobs/" + id + "/retry", { method: "POST" });
+      toast(res.stage === "prepare" ? "Mencoba menyiapkan ulang video…" : "Mencoba ulang analisis…", "ok");
+      if (state.route === "new" && $("#modal-root")?.innerHTML) {
+        await openProjectModeModal(id);
+      } else {
+        await renderProject(id);
+      }
     } else if (action === "detect-speaker") {
       toast("Mendeteksi host / gameplay… (beberapa detik)", "ok");
       const res = await api("/api/clips/" + id + "/framing", { method: "POST" });

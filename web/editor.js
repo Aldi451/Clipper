@@ -307,6 +307,7 @@ async function renderEditor(clipId) {
   renderTimeline();
   renderPanel();
   refreshChrome();
+  updateEditorRenderControls();
 }
 
 function edUpdateCamLabel() {
@@ -1469,6 +1470,7 @@ function panelExportHtml() {
   const est = Math.round(dur * (1.4 * Math.pow(scale, 1.8) + 0.6) + 12);
   const clip = ED.clip;
   const rendering = clip.status === "rendering";
+  const cancelPending = rendering && (clip.message || "").toLowerCase().startsWith("membatalkan");
   return `
     ${fieldRow("Resolusi", `<select class="select" data-out="height">
       ${ED.meta.resolutions.map((r) => `<option value="${r.height}" ${Number(out.height) === r.height ? "selected" : ""}>${esc(r.label)}</option>`).join("")}
@@ -1522,6 +1524,7 @@ function panelExportHtml() {
       <button class="btn primary" data-ed="render" ${rendering ? "disabled" : ""}>
         ${rendering ? `<span class="spinner"></span> Merender…` : "Render video"}
       </button>
+      ${rendering ? `<button class="btn ghost danger" data-ed="cancel-render" ${cancelPending ? "disabled" : ""}>${cancelPending ? "Membatalkan…" : "Batalkan render"}</button>` : ""}
       <button class="btn ghost" data-ed="download-srt">Unduh subtitle (.srt)</button>
       ${clip.has_file ? `<a class="btn ghost" href="/api/clips/${esc(clip.id)}/download">Unduh video</a>` : ""}
       <button class="btn ghost" data-ed="upload-yt" ${clip.has_file ? "" : "disabled"}>Upload ke Shorts</button>
@@ -2438,6 +2441,33 @@ async function editorAction(action, target) {
     } catch (err) {
       toast(err.message, "bad");
     }
+  } else if (action === "cancel-render") {
+    target.disabled = true;
+    target.textContent = "Membatalkan…";
+    try {
+      const res = await api(`/api/clips/${ED.clipId}/cancel`, { method: "POST" });
+      if (res.cancel_requested) {
+        ED.clip = { ...ED.clip, message: "Membatalkan render…" };
+        updateEditorRenderControls();
+        $$('[data-ed="cancel-render"]').forEach((button) => {
+          button.disabled = true;
+          button.textContent = "Membatalkan…";
+        });
+        showRenderBadge("Membatalkan render…", -1);
+        toast("Pembatalan render diminta", "ok");
+      } else if (res.state === "finishing") {
+        target.textContent = "Hampir selesai…";
+        toast("Render hampir selesai; pembatalan sudah tidak tersedia.", "warn");
+      } else {
+        target.disabled = false;
+        target.textContent = "Batalkan render";
+        toast("Render sudah berhenti", "warn");
+      }
+    } catch (err) {
+      target.disabled = false;
+      target.textContent = "Batalkan render";
+      toast(err.message, "bad");
+    }
   } else if (action === "render") {
     await renderFromEditor();
   }
@@ -2495,22 +2525,51 @@ async function runAutoSubtitle() {
 }
 
 async function renderFromEditor() {
-  const btn = document.querySelector('[data-ed="render"]');
-  if (btn) {
+  const btns = $$('[data-ed="render"]');
+  btns.forEach((btn) => {
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner"></span> Merender…`;
-  }
+  });
   try {
     await saveSpec();
     await api(`/api/clips/${ED.clipId}/render`, { method: "POST" });
+    ED.clip = { ...ED.clip, status: "rendering", progress: 0, message: "Mulai render…" };
+    renderPanel();
+    updateEditorRenderControls();
     showRenderBadge("Render dimulai…", 0);
     pollRenderStatus();
   } catch (err) {
     toast(err.message, "bad");
-    if (btn) {
+    btns.forEach((btn) => {
       btn.disabled = false;
-      btn.innerHTML = "Render video";
+      btn.innerHTML = ED.clip.has_file ? "Render ulang" : "Render";
+    });
+    renderPanel();
+    updateEditorRenderControls();
+  }
+}
+
+function updateEditorRenderControls() {
+  const topbar = document.querySelector(".ed-topbar");
+  const render = topbar && topbar.querySelector('[data-ed="render"]');
+  if (!render || !ED.clip) return;
+  const rendering = ED.clip.status === "rendering";
+  render.disabled = rendering;
+  render.innerHTML = rendering
+    ? `<span class="spinner"></span> ${Math.round((ED.clip.progress || 0) * 100) || "Merender…"}`
+    : (ED.clip.has_file ? "Render ulang" : "Render");
+
+  let cancel = topbar.querySelector('[data-ed="cancel-render"]');
+  if (rendering) {
+    if (!cancel) {
+      render.insertAdjacentHTML("afterend", `<button class="btn small ghost danger" data-ed="cancel-render">Batalkan render</button>`);
+      cancel = topbar.querySelector('[data-ed="cancel-render"]');
     }
+    const cancelling = (ED.clip.message || "").toLowerCase().startsWith("membatalkan");
+    cancel.disabled = cancelling;
+    cancel.textContent = cancelling ? "Membatalkan…" : "Batalkan render";
+  } else if (cancel) {
+    cancel.remove();
   }
 }
 
@@ -2530,14 +2589,23 @@ function pollRenderStatus() {
       const clip = await api(`/api/clips/${ED.clipId}`);
       const pct = Math.round((clip.progress || 0) * 100);
       if (clip.status === "rendering") {
+        ED.clip = { ...ED.clip, status: "rendering", progress: clip.progress || 0, message: clip.message || "Merender…" };
+        updateEditorRenderControls();
         showRenderBadge(clip.message || "Merender…", pct);
-        const btn = document.querySelector('[data-ed="render"]');
-        if (btn) btn.innerHTML = `<span class="spinner"></span> ${pct}%`;
+        $$('[data-ed="render"]').forEach((btn) => {
+          btn.disabled = true;
+          btn.innerHTML = `<span class="spinner"></span> ${pct}%`;
+        });
+        $$('[data-ed="cancel-render"]').forEach((cancelBtn) => {
+          const cancelling = (clip.message || "").toLowerCase().startsWith("membatalkan");
+          cancelBtn.disabled = cancelling;
+          cancelBtn.textContent = cancelling ? "Membatalkan…" : "Batalkan render";
+        });
       } else {
         stopPolling();
         const badge = edEl("ed-render-badge");
         if (clip.status === "rendered") {
-          ED.clip = { ...ED.clip, has_file: true, status: "rendered" };
+          ED.clip = { ...ED.clip, has_file: true, status: "rendered", progress: 1, message: clip.message || "Clip siap", error: "" };
           ED.liveSourceMode = false;
           showRenderBadge("✓ Render selesai", 100);
           setTimeout(() => {
@@ -2547,6 +2615,7 @@ function pollRenderStatus() {
           ED.clip.has_file = true;
           renderPreviewSource();
           renderPanel();
+          updateEditorRenderControls();
           refreshChrome();
           const dl = edEl("ed-download");
           if (dl) dl.hidden = false;
@@ -2557,14 +2626,23 @@ function pollRenderStatus() {
           $$('[data-ed="upload-yt"], [data-ed="upload-tiktok"]').forEach((b) => {
             b.disabled = false;
           });
+        } else if (clip.status === "cancelled") {
+          ED.clip = { ...ED.clip, status: "cancelled", progress: 0, message: clip.message || "Render dibatalkan", error: "" };
+          showRenderBadge("Render dibatalkan", -1);
+          renderPanel();
+          updateEditorRenderControls();
+          refreshChrome();
+          setTimeout(() => {
+            if (badge) badge.hidden = true;
+          }, 3000);
+          toast("Render dibatalkan", "warn");
         } else if (clip.status === "error") {
+          ED.clip = { ...ED.clip, status: "error", message: clip.message || "Render gagal", error: clip.error || "" };
           showRenderBadge("✗ " + (clip.error || "Render gagal"), 100);
           toast(clip.error || "Render gagal", "bad");
-          const btn = document.querySelector('[data-ed="render"]');
-          if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = "Render video";
-          }
+          renderPanel();
+          updateEditorRenderControls();
+          refreshChrome();
         }
       }
     } catch (err) {
@@ -2581,6 +2659,10 @@ async function renderEditorRoute(clipId) {
   view.innerHTML = `<div class="empty"><div class="spinner"></div> Memuat editor…</div>`;
   try {
     await renderEditor(clipId);
+    if (ED.clip.status === "rendering") {
+      showRenderBadge(ED.clip.message || "Merender…", Math.round((ED.clip.progress || 0) * 100));
+      pollRenderStatus();
+    }
     const upload = edEl("ed-logo-file");
     if (upload) {
       upload.addEventListener("change", async () => {

@@ -38,15 +38,19 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-if ! python -c "import fastapi, uvicorn, imageio_ffmpeg" >/dev/null 2>&1; then
-  echo "  [..] Memasang dependensi (butuh internet, sekali saja)"
+if ! python -c "import datetime, sys, fastapi, uvicorn, imageio_ffmpeg; from importlib.metadata import version; y=tuple(int(p) for p in version('yt-dlp').split('.')[:3]); e=tuple(int(p) for p in version('yt-dlp-ejs').split('.')[:3]); d=tuple(int(p) for p in version('deno').split('.')[:3]); age=(datetime.date.today()-datetime.date(*y)).days; assert y >= (2026,10,21) and (sys.version_info < (3,11) or age <= 45) and e >= (0,8,0) and d >= (2,9,8)" >/dev/null 2>&1; then
+  echo "  [..] Memasang / memperbarui dependensi (termasuk extractor YouTube)"
   python -m pip install --upgrade pip >/dev/null 2>&1
   if ! python -m pip install -r requirements.txt; then
     echo "  [!] Gagal memasang dependensi. Cek koneksi internet lalu coba lagi."
     exit 1
   fi
+  if ! python -m pip install --upgrade "yt-dlp[default,deno]>=2026.10.21"; then
+    echo "  [!] Gagal memperbarui yt-dlp. Cek koneksi internet lalu coba lagi."
+    exit 1
+  fi
 else
-  echo "  [OK] Dependensi sudah terpasang"
+  echo "  [OK] Dependensi dan runtime YouTube sudah siap"
 fi
 
 echo

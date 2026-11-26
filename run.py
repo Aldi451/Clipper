@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import errno
 import os
+import pathlib
 import signal
 import socket
 import subprocess
@@ -22,13 +23,17 @@ import threading
 import time
 import traceback
 import webbrowser
-import pathlib
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 MIN_PYTHON = (3, 10)
+MIN_YTDLP_VERSION = (2026, 10, 21)
+MIN_YTDLP_MAX_AGE_DAYS = 45
+MIN_YTDLP_EJS_VERSION = (0, 8, 0)
+MIN_DENO_VERSION = (2, 9, 8)
 LINE = "=" * 62
 
 
@@ -113,6 +118,47 @@ def check_modules() -> list[str]:
         except Exception:
             bad(f"paket {package} belum ada (opsional: {note})")
     return missing
+
+
+def check_ytdlp_runtime() -> bool:
+    """Pastikan yt-dlp cukup baru dan paket EJS/Deno tersedia untuk YouTube."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        installed = version("yt-dlp")
+        parsed = tuple(int(part) for part in installed.split(".")[:3])
+        released = date(*parsed)
+        age_days = (date.today() - released).days
+        ejs_version = version("yt-dlp-ejs")
+        ejs_parsed = tuple(int(part) for part in ejs_version.split(".")[:3])
+        deno_version = version("deno")
+        deno_parsed = tuple(int(part) for part in deno_version.split(".")[:3])
+    except (PackageNotFoundError, TypeError, ValueError):
+        bad("yt-dlp atau runtime JavaScript YouTube belum lengkap / versinya terlalu lama")
+        info('Perbaiki: python -m pip install -U "yt-dlp[default,deno]>=2026.10.21"')
+        return False
+
+    # yt-dlp memakai versi tanggal. Di Python 3.11+ pip dapat memasang rilis
+    # terbaru; Python 3.10 tetap didukung pada baseline terakhir yang kompatibel.
+    needs_refresh = (
+        sys.version_info >= (3, 11)
+        and age_days > MIN_YTDLP_MAX_AGE_DAYS
+    )
+    if (
+        parsed < MIN_YTDLP_VERSION
+        or needs_refresh
+        or ejs_parsed < MIN_YTDLP_EJS_VERSION
+        or deno_parsed < MIN_DENO_VERSION
+    ):
+        bad(
+            f"Runtime YouTube perlu diperbarui "
+            f"(yt-dlp {installed}, EJS {ejs_version}, Deno {deno_version})"
+        )
+        info('Perbaiki: python -m pip install -U "yt-dlp[default,deno]>=2026.10.21"')
+        return False
+
+    ok(f"yt-dlp {installed} · EJS {ejs_version} · Deno {deno_version}")
+    return True
 
 
 def check_ffmpeg() -> bool:
@@ -202,6 +248,8 @@ def doctor(host: str, port: int) -> int:
     say("")
     missing = check_modules()
     if missing:
+        problems += 1
+    if "yt-dlp" not in missing and not check_ytdlp_runtime():
         problems += 1
     say("")
     problems += 0 if check_ffmpeg() else 1

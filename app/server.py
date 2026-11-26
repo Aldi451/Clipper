@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
@@ -71,20 +72,43 @@ def create_app() -> FastAPI:
         except Exception:
             ytdlp_version = ""
         try:
+            from importlib.metadata import version as package_version
+
+            ytdlp_ejs_version = package_version("yt-dlp-ejs")
+        except Exception:
+            ytdlp_ejs_version = ""
+        try:
+            from importlib.metadata import version as package_version
+
+            deno_version = package_version("deno")
+        except Exception:
+            deno_version = ""
+        try:
             import faster_whisper  # type: ignore  # noqa: F401
 
             whisper_ok = True
         except Exception:
             whisper_ok = False
-        # yt-dlp berbasis tanggal rilis: kalau terlalu tua, YouTube sering menolak
-        # ("The page needs to be reloaded" / signature error).
+        try:
+            ejs_tuple = tuple(int(part) for part in ytdlp_ejs_version.split(".")[:3])
+            deno_tuple = tuple(int(part) for part in deno_version.split(".")[:3])
+            ytdlp_runtime_ready = ejs_tuple >= (0, 8, 0) and deno_tuple >= (2, 9, 8)
+        except (TypeError, ValueError):
+            ytdlp_runtime_ready = False
+
+        # yt-dlp berbasis tanggal rilis. Versi di bawah baseline perlu diperbarui;
+        # di Python 3.11+ beri peringatan juga kalau rilisnya lebih tua dari 45 hari.
+        minimum_ytdlp = (2026, 10, 21)
+        ytdlp_minimum_ok = False
         ytdlp_age_days = None
         try:
             parts = ytdlp_version.split(".")
             if len(parts) >= 3:
                 from datetime import date
 
-                released = date(int(parts[0]), int(parts[1]), int(parts[2]))
+                version_tuple = tuple(int(part) for part in parts[:3])
+                ytdlp_minimum_ok = version_tuple >= minimum_ytdlp
+                released = date(*version_tuple)
                 ytdlp_age_days = (date.today() - released).days
         except Exception:
             ytdlp_age_days = None
@@ -99,7 +123,19 @@ def create_app() -> FastAPI:
             "ytdlp": bool(ytdlp_version),
             "ytdlp_version": ytdlp_version,
             "ytdlp_age_days": ytdlp_age_days,
-            "ytdlp_outdated": bool(ytdlp_age_days is not None and ytdlp_age_days > 45),
+            "ytdlp_outdated": bool(
+                ytdlp_version and (
+                    not ytdlp_minimum_ok
+                    or (
+                        sys.version_info >= (3, 11)
+                        and ytdlp_age_days is not None
+                        and ytdlp_age_days > 45
+                    )
+                )
+            ),
+            "ytdlp_ejs_version": ytdlp_ejs_version,
+            "deno_version": deno_version,
+            "ytdlp_runtime_ready": ytdlp_runtime_ready,
             "whisper": whisper_ok,
             "whisper_model": transcribe.current_model(),
             "whisper_model_ready": transcribe.model_downloaded(transcribe.current_model()),
@@ -405,8 +441,19 @@ def create_app() -> FastAPI:
         if not job:
             raise HTTPException(404, "Project tidak ditemukan")
         db.update_job(job_id, status="queued", stage="antre", progress=0.0, error="", message="")
-        pipeline.start_analysis(job_id)
-        return {"ok": True}
+        prepared = bool((job.get("meta") or {}).get("prepared"))
+        if prepared:
+            pipeline.start_analysis(job_id)
+        else:
+            pipeline.start_prepare(job_id)
+        return {"ok": True, "stage": "analysis" if prepared else "prepare"}
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str) -> dict[str, Any]:
+        if not db.get_job(job_id):
+            raise HTTPException(404, "Project tidak ditemukan")
+        outcome = pipeline.cancel_job(job_id)
+        return {"ok": True, "cancel_requested": outcome == "requested", "state": outcome}
 
     @app.post("/api/jobs/{job_id}/render")
     def render_all(job_id: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
@@ -670,6 +717,13 @@ def create_app() -> FastAPI:
             safe_unlink(paths.resolve_media_path(srt, (WORK_DIR / clip["job_id"],)) or srt)
         db.delete_clip(clip_id)
         return {"ok": True}
+
+    @app.post("/api/clips/{clip_id}/cancel")
+    def cancel_clip_render(clip_id: str) -> dict[str, Any]:
+        if not db.get_clip(clip_id):
+            raise HTTPException(404, "Clip tidak ditemukan")
+        outcome = pipeline.cancel_render(clip_id)
+        return {"ok": True, "cancel_requested": outcome == "requested", "state": outcome}
 
     @app.post("/api/clips/{clip_id}/render")
     def render_clip(clip_id: str) -> dict[str, Any]:
@@ -1488,7 +1542,7 @@ def create_app() -> FastAPI:
             },
         )
         db.mark_discovery_used(item["id"], job["id"])
-        pipeline.start_analysis(job["id"])
+        pipeline.start_prepare(job["id"])
         return job
 
     @app.post("/api/discover/{discovery_id}/clip")

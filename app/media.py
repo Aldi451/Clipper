@@ -2,13 +2,18 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
 import subprocess
 import tempfile
+import threading
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
+from .cancellation import OperationCancelled
 from .config import ffmpeg_exe, ffprobe_exe
 from .fsutil import safe_rmtree
 
@@ -212,8 +217,12 @@ def run_with_progress(
     on_progress: Callable[[float], None] | None = None,
     cwd: str | Path | None = None,
     timeout: float | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> None:
-    """Jalankan ffmpeg dengan `-progress pipe:1` dan laporkan persentase."""
+    """Jalankan ffmpeg, laporkan progres, dan hentikan proses saat diminta."""
+    if cancel_check and cancel_check():
+        raise OperationCancelled("Render dibatalkan")
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -222,10 +231,45 @@ def run_with_progress(
         text=True,
         bufsize=1,
     )
-    tail: list[str] = []
+    output: queue.Queue[str | None] = queue.Queue()
+    stderr_tail: deque[str] = deque(maxlen=200)
+    stderr_lock = threading.Lock()
+
+    def read_stdout() -> None:
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                output.put(line)
+        finally:
+            output.put(None)
+
+    def read_stderr() -> None:
+        if proc.stderr is None:
+            return
+        for line in proc.stderr:
+            with stderr_lock:
+                stderr_tail.append(line)
+
+    stdout_thread = threading.Thread(target=read_stdout, name="ffmpeg-stdout", daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, name="ffmpeg-stderr", daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    stdout_done = False
+
     try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
+        while not stdout_done or proc.poll() is None:
+            if cancel_check and cancel_check():
+                raise OperationCancelled("Render dibatalkan")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            try:
+                line = output.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if line is None:
+                stdout_done = True
+                continue
             line = line.strip()
             if line.startswith("out_time_ms=") and on_progress and total_seconds > 0:
                 try:
@@ -233,14 +277,34 @@ def run_with_progress(
                 except ValueError:
                     continue
                 on_progress(max(0.0, min(1.0, done / total_seconds)))
-        proc.wait(timeout=timeout)
+        proc.wait()
+    except BaseException:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        raise
     finally:
-        if proc.stderr is not None:
-            tail.append(proc.stderr.read() or "")
         if proc.poll() is None:
             proc.kill()
+            proc.wait()
+        stdout_thread.join(timeout=1)
+        stderr_thread.join(timeout=1)
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
+
     if proc.returncode != 0:
-        raise FFmpegError(("".join(tail))[-2000:] or "ffmpeg gagal")
+        with stderr_lock:
+            detail = "".join(stderr_tail)[-2000:]
+        raise FFmpegError(detail or "ffmpeg gagal")
 
 
 def thumb(src: str | Path, at: float, dst: str | Path, width: int = 540) -> Path:

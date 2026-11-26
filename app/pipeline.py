@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import analyze, db, editor, ingest, media, speech, subs, tiktok, transcribe, youtube
+from .cancellation import OperationCancelled
 from .config import WORK_DIR, load_settings
 from .fsutil import safe_unlink
 from .paths import resolve_media_path
@@ -23,6 +24,7 @@ render_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
 upload_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="upload")
 
 _busy: dict[str, bool] = {}
+_cancel_events: dict[str, threading.Event] = {}
 _busy_lock = threading.Lock()
 
 
@@ -31,12 +33,63 @@ def _claim(key: str) -> bool:
         if _busy.get(key):
             return False
         _busy[key] = True
+        _cancel_events[key] = threading.Event()
         return True
 
 
 def _release(key: str) -> None:
     with _busy_lock:
         _busy.pop(key, None)
+        _cancel_events.pop(key, None)
+
+
+def _cancel_requested(key: str) -> bool:
+    with _busy_lock:
+        event = _cancel_events.get(key)
+        return bool(event and event.is_set())
+
+
+def _check_cancelled(key: str) -> None:
+    if _cancel_requested(key):
+        raise OperationCancelled("Proses dibatalkan")
+
+
+def _seal_cancellation(key: str) -> None:
+    """Tutup jendela cancel secara atomik sebelum hasil final disimpan."""
+    with _busy_lock:
+        event = _cancel_events.get(key)
+        if event and event.is_set():
+            raise OperationCancelled("Proses dibatalkan")
+        _cancel_events.pop(key, None)
+
+
+def _request_cancel(key: str, message_update: Callable[[], None] | None = None) -> str:
+    """Hasil: requested, finishing, atau not_running."""
+    with _busy_lock:
+        if not _busy.get(key):
+            return "not_running"
+        event = _cancel_events.get(key)
+        if event is None:
+            return "finishing"
+        if not event.is_set():
+            if message_update:
+                message_update()
+            event.set()
+        return "requested"
+
+
+def cancel_job(job_id: str) -> str:
+    return _request_cancel(
+        f"analyze:{job_id}",
+        lambda: _job_set(job_id, message="Membatalkan persiapan video…"),
+    )
+
+
+def cancel_render(clip_id: str) -> str:
+    return _request_cancel(
+        f"render:{clip_id}",
+        lambda: db.update_clip(clip_id, message="Membatalkan render…"),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -47,7 +100,10 @@ def _job_set(job_id: str, **fields: Any) -> None:
 
 
 def _progress_fn(job_id: str, floor: float, ceil: float) -> Callable[[float, str], None]:
+    key = f"analyze:{job_id}"
+
     def inner(fraction: float, message: str = "") -> None:
+        _check_cancelled(key)
         value = floor + max(0.0, min(1.0, fraction)) * (ceil - floor)
         fields: dict[str, Any] = {"progress": round(value, 4)}
         if message:
@@ -79,7 +135,9 @@ def _run_prepare(job_id: str) -> None:
         return
     workdir = WORK_DIR / job_id
     workdir.mkdir(parents=True, exist_ok=True)
+    key = f"analyze:{job_id}"
     try:
+        _check_cancelled(key)
         _job_set(job_id, status="running", stage="memuat", progress=0.02, message="Menyiapkan video full…", error="")
 
         source_path = resolve_media_path(job.get("source_path"), (WORK_DIR / job_id,))
@@ -92,14 +150,18 @@ def _run_prepare(job_id: str) -> None:
             source_path = ingest.download(
                 job["source"], job_label=job_id,
                 on_progress=_progress_fn(job_id, 0.05, 0.90),
+                cancel_check=lambda: _cancel_requested(key),
             )
+            _check_cancelled(key)
             _job_set(job_id, source_path=str(source_path))
         if not source_path or not source_path.exists():
             raise RuntimeError("Sumber video tidak ditemukan")
 
         # 2) probe metadata video full
+        _check_cancelled(key)
         _job_set(job_id, stage="probe", progress=0.94, message="Membaca metadata video full…")
         info = media.probe(source_path)
+        _check_cancelled(key)
         source_meta = ingest.load_source_meta(workdir) or (job.get("meta") or {}).get("source_meta") or {}
         if info.duration <= 3:
             raise RuntimeError("Video terlalu pendek (minimal 3 detik)")
@@ -108,6 +170,7 @@ def _run_prepare(job_id: str) -> None:
         if not current_title or current_title.lower() == "source":
             best_title = str(source_meta.get("title") or source_path.stem)[:80]
 
+        _seal_cancellation(key)
         _job_set(
             job_id,
             title=best_title,
@@ -117,7 +180,7 @@ def _run_prepare(job_id: str) -> None:
             status="done",
             stage="siap_pilih",
             progress=1.0,
-            message="Video full siap — klik Project untuk pilih Render Hook AI atau Edit Manual",
+            message="Video full siap — pilih Render Hook AI atau Edit Manual di project",
             error="",
             meta={
                 **(job.get("meta") or {}),
@@ -134,6 +197,9 @@ def _run_prepare(job_id: str) -> None:
                 },
             },
         )
+    except OperationCancelled:
+        _job_set(job_id, status="cancelled", stage="dibatalkan", progress=0.0,
+                 message="Persiapan video dibatalkan", error="")
     except Exception as exc:
         traceback.print_exc()
         _job_set(job_id, status="error", stage="gagal", progress=0.0,
@@ -156,7 +222,9 @@ def _run_analysis(job_id: str) -> None:
         return
     workdir = WORK_DIR / job_id
     workdir.mkdir(parents=True, exist_ok=True)
+    key = f"analyze:{job_id}"
     try:
+        _check_cancelled(key)
         _job_set(job_id, status="running", stage="memuat", progress=0.01, message="Menyiapkan…", error="")
 
         source_path = resolve_media_path(job.get("source_path"), (WORK_DIR / job_id,))
@@ -172,14 +240,18 @@ def _run_analysis(job_id: str) -> None:
             source_path = ingest.download(
                 job["source"], job_label=job_id,
                 on_progress=_progress_fn(job_id, 0.03, 0.22),
+                cancel_check=lambda: _cancel_requested(key),
             )
+            _check_cancelled(key)
             _job_set(job_id, source_path=str(source_path))
         if not source_path or not source_path.exists():
             raise RuntimeError("Sumber video tidak ditemukan")
 
         # 2) probe
+        _check_cancelled(key)
         _job_set(job_id, stage="probe", progress=0.24, message="Membaca metadata video…")
         info = media.probe(source_path)
+        _check_cancelled(key)
         source_meta = ingest.load_source_meta(workdir) or (job.get("meta") or {}).get("source_meta") or {}
         _job_set(job_id,
                  duration=info.duration, width=info.width, height=info.height,
@@ -202,9 +274,14 @@ def _run_analysis(job_id: str) -> None:
         energy: list[tuple[float, float]] = []
         if info.has_audio:
             try:
+                _check_cancelled(key)
                 media.extract_audio(source_path, audio_path)
+                _check_cancelled(key)
                 _job_set(job_id, stage="audio", progress=0.3, message="Analisa energi audio…")
                 energy = media.audio_energy(audio_path, window=0.5)
+                _check_cancelled(key)
+            except OperationCancelled:
+                raise
             except Exception as exc:  # analisa energi tidak boleh menggagalkan job
                 print(f"[clipper] analisa energi audio dilewati: {exc}", flush=True)
                 energy = []
@@ -236,6 +313,8 @@ def _run_analysis(job_id: str) -> None:
                     transcript = whisper
                     transcribe.save_transcript(job_id, transcript)
                     transcript_error = ""
+            except OperationCancelled:
+                raise
             except Exception as exc:  # model belum ke-download / OOM
                 transcript_error = _friendly_transcribe_error(exc)
                 traceback.print_exc()
@@ -276,6 +355,7 @@ def _run_analysis(job_id: str) -> None:
         )
         if ai_refinement:
             def _refine_progress(fraction: float, message: str = "") -> None:
+                _check_cancelled(key)
                 progress = 0.94 + 0.02 * max(0.0, min(1.0, float(fraction)))
                 _job_set(job_id, stage="ai_rank", progress=progress,
                          message=message or "Membandingkan momen kandidat dengan AI…")
@@ -314,6 +394,7 @@ def _run_analysis(job_id: str) -> None:
                     frame_start = 0.96 if ai_refinement else 0.94
                     frame_span = 0.025
                     for index, cand in enumerate(candidates):
+                        _check_cancelled(key)
                         _job_set(job_id, stage="framing",
                                  progress=frame_start + frame_span * index / max(1, len(candidates)),
                                  message=f"Mendeteksi pembicara / gameplay clip {index + 1}/{len(candidates)}…")
@@ -335,11 +416,17 @@ def _run_analysis(job_id: str) -> None:
                         _job_set(job_id, message="Video gameplay terdeteksi: atas gameplay, bawah host…")
                     else:
                         _job_set(job_id, message="Pembicara terdeteksi, kamera akan mengikuti…")
+            except OperationCancelled:
+                raise
             except Exception:  # noqa: BLE001 - framing opsional, jangan gagalkan job
                 traceback.print_exc()
 
+        _check_cancelled(key)
         _job_set(job_id, stage="finalisasi", progress=0.99,
                  message="Menyusun hasil kandidat klip…")
+
+        # Batalkan selama analisa masih berlangsung; finalisasi hasil DB tidak lagi dibatalkan.
+        _seal_cancellation(key)
 
         # 6) simpan clip AI (JANGAN hapus clip manual milik user!)
         existing = db.list_clips(job_id)
@@ -417,6 +504,9 @@ def _run_analysis(job_id: str) -> None:
         if settings.get("auto_render") and candidates:
             render_job_all(job_id, mode="ai")
 
+    except OperationCancelled:
+        _job_set(job_id, status="cancelled", stage="dibatalkan", progress=0.0,
+                 message="Proses analisis dibatalkan", error="")
     except Exception as exc:
         traceback.print_exc()
         _job_set(job_id, status="error", stage="gagal", progress=0.0,
@@ -481,12 +571,14 @@ def render_job_all(job_id: str, only_dirty: bool = False, mode: str | None = Non
 
 
 def _run_render(clip_id: str) -> None:
+    key = f"render:{clip_id}"
     clip = db.get_clip(clip_id)
     if not clip:
         _release(f"render:{clip_id}")
         return
     job = db.get_job(clip["job_id"])
     try:
+        _check_cancelled(key)
         if not job:
             raise RuntimeError("Project tidak ditemukan")
         settings = load_settings()
@@ -498,16 +590,21 @@ def _run_render(clip_id: str) -> None:
             # path tersimpan masih menunjuk folder lama → rapikan sekalian
             db.update_job(job["id"], source_path=str(source_path))
             job["source_path"] = str(source_path)
+        _check_cancelled(key)
         info = media.probe(source_path)
+        _check_cancelled(key)
         transcript = transcribe.load_transcript(job["id"])
 
+        _check_cancelled(key)
         db.update_clip(clip_id, status="rendering", progress=0.01, message="Mulai render…", error="")
 
         def on_progress(fraction: float, message: str) -> None:
+            _check_cancelled(key)
             db.update_clip(clip_id, progress=round(fraction, 4), message=message)
 
         # Jika clip dibuat dengan detektor framing versi lama (atau belum pernah dianalisa),
         # jalankan deteksi pembicara/gameplay otomatis sebelum render agar otomatis fokus ke host.
+        _check_cancelled(key)
         if settings.get("auto_framing", True):
             try:
                 from . import framing as framing_module
@@ -541,11 +638,18 @@ def _run_render(clip_id: str) -> None:
                     cur_meta["framing"] = f_res
                     db.update_clip(clip_id, meta=cur_meta)
                     clip["meta"] = cur_meta
+            except OperationCancelled:
+                raise
             except Exception:
                 traceback.print_exc()
 
+        _check_cancelled(key)
         spec = editor.load_or_create_spec(clip, transcript, float(info.duration or 0), settings)
-        result = editor.render_spec(clip, spec, source_path, info, on_progress, settings)
+        result = editor.render_spec(
+            clip, spec, source_path, info, on_progress, settings,
+            cancel_check=lambda: _cancel_requested(key),
+            before_commit=lambda: _seal_cancellation(key),
+        )
         db.update_clip(
             clip_id, status="rendered", progress=1.0, message="Clip siap",
             file=result["file"], thumb=result["thumb"], spec=json.dumps(spec, ensure_ascii=False),
@@ -566,6 +670,13 @@ def _run_render(clip_id: str) -> None:
                 start_upload(clip_id, "youtube")
             elif want_tt:
                 start_upload(clip_id, "tiktok")
+    except OperationCancelled:
+        if job:
+            editor.cleanup_workdir(job["id"], clip_id)
+        db.update_clip(
+            clip_id, status="cancelled", progress=0.0,
+            message="Render dibatalkan", error="",
+        )
     except Exception as exc:
         traceback.print_exc()
         db.update_clip(clip_id, status="error", message="Render gagal", error=friendly_error(exc))
