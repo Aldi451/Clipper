@@ -27,6 +27,15 @@ class FFmpegError(RuntimeError):
     pass
 
 
+class FFmpegProgressTimeout(FFmpegError):
+    """Raised when FFmpeg stays alive but stops advancing the output timeline."""
+
+
+# FFmpeg biasanya melaporkan progres tiap setengah detik. Lima belas menit tanpa
+# perubahan timeline dianggap proses render macet, bukan sekadar encode lambat.
+FFMPEG_PROGRESS_STALL_TIMEOUT_SECONDS = 15 * 60
+
+
 @dataclass
 class MediaInfo:
     duration: float = 0.0
@@ -218,8 +227,13 @@ def run_with_progress(
     cwd: str | Path | None = None,
     timeout: float | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    progress_stall_timeout: float | None = None,
 ) -> None:
-    """Jalankan ffmpeg, laporkan progres, dan hentikan proses saat diminta."""
+    """Jalankan ffmpeg, laporkan progres, dan hentikan proses saat diminta.
+
+    ``progress_stall_timeout`` membatasi waktu tanpa perubahan timeline output;
+    ``timeout`` tetap membatasi total waktu proses.
+    """
     if cancel_check and cancel_check():
         raise OperationCancelled("Render dibatalkan")
 
@@ -255,14 +269,27 @@ def run_with_progress(
     stdout_thread.start()
     stderr_thread.start()
     deadline = time.monotonic() + timeout if timeout is not None else None
+    stall_timeout = (
+        float(progress_stall_timeout) if progress_stall_timeout is not None else None
+    )
+    if stall_timeout is not None and not stall_timeout > 0:
+        stall_timeout = None
+    last_progress_at = time.monotonic()
+    last_out_time = -1.0
     stdout_done = False
 
     try:
         while not stdout_done or proc.poll() is None:
             if cancel_check and cancel_check():
                 raise OperationCancelled("Render dibatalkan")
-            if deadline is not None and time.monotonic() >= deadline:
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
                 raise subprocess.TimeoutExpired(cmd, timeout)
+            if stall_timeout is not None and now - last_progress_at >= stall_timeout:
+                raise FFmpegProgressTimeout(
+                    "FFmpeg tidak melaporkan kemajuan selama "
+                    f"{stall_timeout:g} detik; proses dihentikan agar render tidak menggantung"
+                )
             try:
                 line = output.get(timeout=0.1)
             except queue.Empty:
@@ -271,12 +298,22 @@ def run_with_progress(
                 stdout_done = True
                 continue
             line = line.strip()
-            if line.startswith("out_time_ms=") and on_progress and total_seconds > 0:
+            if line.startswith(("out_time_ms=", "out_time_us=")):
                 try:
+                    # Keduanya berisi mikrodetik; out_time_ms adalah nama lama
+                    # yang tetap dipakai demi kompatibilitas FFmpeg.
                     done = int(line.split("=", 1)[1]) / 1_000_000
                 except ValueError:
                     continue
-                on_progress(max(0.0, min(1.0, done / total_seconds)))
+                if done > last_out_time:
+                    last_out_time = done
+                    last_progress_at = time.monotonic()
+                if on_progress and total_seconds > 0:
+                    on_progress(max(0.0, min(1.0, done / total_seconds)))
+            elif line == "progress=end":
+                last_progress_at = time.monotonic()
+                if on_progress:
+                    on_progress(1.0)
         proc.wait()
     except BaseException:
         if proc.poll() is None:
