@@ -654,6 +654,14 @@ Clipper memberi bobot utama pada kualitas ucapan dalam 8 detik pertama, lalu men
 energi audio, kepadatan, kesinambungan, durasi, dan kelengkapan akhir. Clip mendapat **skor 0–100**
 dan **grade** (Kuat ≥ 60, Sedang ≥ 40, Lemah). Kalau Gemini atau Ollama tersedia, ranker membandingkan
 pool kandidat yang lebih luas dan tidak memihak timestamp awal; tanpa transkrip, skor hanya proxy audio.
+
+**Quality gate: target clip adalah batas maksimum, bukan kuota.** Default `min_clip_score = 55` menyaring
+kandidat bertranskrip setelah penilaian lokal dan, bila tersedia, refinement AI (skor Gemini/Ollama
+sudah dibaurkan dengan skor lokal). Kalau kandidat yang lolos kurang dari target, Clipper sengaja
+menghasilkan lebih sedikit—bukan mengisi sisa kuota dengan momen lemah. Ambang bisa diubah di
+**Pengaturan cepat / Analisis**; nilai `0` mematikan gate. Tanpa transkrip, fallback audio tetap
+berjalan dan gate ini dilewati karena skor proxy audio tidak sebanding dengan skor semantik.
+
 Sinyal hook mencakup:
 
 | Sinyal | Contoh pemicu |

@@ -108,8 +108,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # analisis
     "min_clip_seconds": 60,      # paling pendek 1 menit
     "max_clip_seconds": 180,     # paling panjang 3 menit
-    "target_clips": 5,
+    "target_clips": 5,            # batas maksimum; quality gate boleh menghasilkan lebih sedikit
     "target_clips_mode": "custom",  # auto (berdasarkan durasi) | custom (jumlah tetap)
+    "min_clip_score": 55,         # batas skor akhir momen bertranskrip; 0 = nonaktif
     "language": "auto",          # auto | id | en | ...
     "whisper_model": "small",    # tiny | base | small | medium | large-v3
     "whisper_device": "auto",    # auto | cpu | cuda
@@ -207,6 +208,7 @@ def load_settings() -> dict[str, Any]:
             except Exception:
                 pass
         normalize_clip_lengths(data)
+        normalize_min_clip_score(data)
         _settings_cache = data
         return dict(data)
 
@@ -220,6 +222,7 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
                 continue
             current[key] = _coerce(DEFAULT_SETTINGS[key], value)
         normalize_clip_lengths(current)
+        normalize_min_clip_score(current)
         ensure_dirs()
         SETTINGS_FILE.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
         _settings_cache = current
@@ -246,6 +249,16 @@ def normalize_clip_lengths(data: dict[str, Any]) -> dict[str, Any]:
         high = low
     data["min_clip_seconds"] = low
     data["max_clip_seconds"] = high
+    return data
+
+
+def normalize_min_clip_score(data: dict[str, Any]) -> dict[str, Any]:
+    """Batasi skor minimum analisis ke rentang 0–100; 0 berarti nonaktif."""
+    try:
+        score = int(float(data.get("min_clip_score", DEFAULT_SETTINGS["min_clip_score"])))
+    except (OverflowError, TypeError, ValueError):
+        score = int(DEFAULT_SETTINGS["min_clip_score"])
+    data["min_clip_score"] = max(0, min(100, score))
     return data
 
 

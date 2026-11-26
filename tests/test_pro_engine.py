@@ -13,6 +13,7 @@ from app.analyze import (
     _clean_title,
     _ending_quality,
     _window_score,
+    apply_min_clip_score,
     candidate_pool_target,
     find_candidates,
     fixed_windows,
@@ -21,6 +22,7 @@ from app.analyze import (
     select_candidate_subset,
     target_clip_count,
 )
+from app.config import normalize_min_clip_score
 
 
 class ProEngineTests(unittest.TestCase):
@@ -173,6 +175,31 @@ class ProEngineTests(unittest.TestCase):
         reranked = select_candidate_subset([first, duplicate, distinct], 2)
         self.assertEqual(reranked, [duplicate, distinct])
 
+    def test_min_score_gate_filters_weak_transcript_candidates_not_audio_fallback(self) -> None:
+        def make_candidate(score: float, text: str) -> Candidate:
+            return Candidate(
+                start=0.0, end=20.0, score=score, text=text,
+                title="", hook="", description="", hashtags="",
+            )
+
+        strong = make_candidate(67.0, "Hook kuat dengan isi yang jelas.")
+        weak = make_candidate(54.9, "Pembuka biasa tanpa gagasan kuat.")
+        audio_only = make_candidate(0.0, "")
+
+        kept, rejected = apply_min_clip_score([strong, weak, audio_only], 55)
+
+        self.assertEqual(kept, [strong, audio_only])
+        self.assertEqual(rejected, 1)
+        self.assertEqual(strong.features["quality_threshold"], 55.0)
+        self.assertEqual(strong.features["quality_passed"], 1.0)
+        self.assertNotIn("quality_threshold", audio_only.features)
+        self.assertEqual(apply_min_clip_score([weak], 0), ([weak], 0))
+
+    def test_min_clip_score_setting_is_clamped_to_supported_range(self) -> None:
+        self.assertEqual(normalize_min_clip_score({"min_clip_score": 125})["min_clip_score"], 100)
+        self.assertEqual(normalize_min_clip_score({"min_clip_score": -4})["min_clip_score"], 0)
+        self.assertEqual(normalize_min_clip_score({"min_clip_score": "invalid"})["min_clip_score"], 55)
+
     def test_local_ending_quality_flags_cutoff_clauses_and_fillers(self) -> None:
         self.assertEqual(_ending_quality("Inilah alasan utamanya."), 1.0)
         self.assertEqual(_ending_quality("Kita harus berhenti karena"), 0.0)
@@ -219,6 +246,8 @@ class ProEngineTests(unittest.TestCase):
 
         self.assertGreater(strong_opening, delayed_opening)
         self.assertGreater(strong_score, delayed_score)
+        self.assertGreaterEqual(strong_score, 55.0)
+        self.assertLess(delayed_score, 55.0)
 
     def test_candidate_search_can_choose_a_strong_hook_from_later_in_source(self) -> None:
         ordinary = "Peristiwa itu berlangsung sesuai rencana yang sudah disampaikan oleh tim."
@@ -315,6 +344,13 @@ class ProEngineTests(unittest.TestCase):
         self.assertAlmostEqual(candidate.score, 79.5)
         self.assertIn("#Podcast", candidate.hashtags)
         self.assertEqual(candidate.features["gemini"], 1.0)
+
+        accepted, rejected = apply_min_clip_score([candidate], 80)
+        self.assertEqual(accepted, [])
+        self.assertEqual(rejected, 1)
+        accepted, rejected = apply_min_clip_score([candidate], 55)
+        self.assertEqual(accepted, [candidate])
+        self.assertEqual(rejected, 0)
 
     def test_local_llm_refinement_scores_candidates_and_handles_empty_description(self) -> None:
         candidate = Candidate(

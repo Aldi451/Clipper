@@ -286,8 +286,13 @@ function quickSettingsHtml() {
   const s = state.settings;
   return `
     <div class="field">
-      <label>Jumlah clip</label>
+      <label>Maks. jumlah clip</label>
       <input class="input" type="number" min="1" max="20" data-setting="target_clips" value="${esc(s.target_clips)}" />
+    </div>
+    <div class="field">
+      <label>Skor minimum (0–100)</label>
+      <input class="input" type="number" min="0" max="100" step="5" data-setting="min_clip_score" value="${esc(s.min_clip_score ?? 55)}" />
+      <span class="tiny dim">0 = nonaktif; hasil bisa lebih sedikit</span>
     </div>
     <div class="field">
       <label>Durasi min (detik)</label>
@@ -1499,6 +1504,16 @@ async function renderProject(jobId) {
                 <button class="btn small" data-action="retry-job" data-id="${esc(job.id)}">Coba lagi</button>
                 ${needsCookies(job.error) ? `<a class="btn small ghost" href="#/settings">Atur cookies / unduhan</a>` : ""}
               </div>` : ""}
+          </div>`
+        : ""
+    }
+    ${
+      !running && job.status === "done" && job.meta?.quality_gate?.rejected
+        ? `<div class="card tight" style="margin-bottom:16px">
+            <div class="row" style="justify-content:space-between;gap:12px">
+              <div class="tiny dim">${esc(job.message || "")}</div>
+              <a class="tiny" href="#/settings">Ubah skor minimum →</a>
+            </div>
           </div>`
         : ""
     }
@@ -2912,8 +2927,13 @@ async function renderSettings() {
           </select>
         </div>
         <div class="field">
-          <label>Jumlah clip per video</label>
+          <label>Maks. jumlah clip per video</label>
           <input class="input" type="number" min="1" max="20" data-setting="target_clips" value="${s.target_clips}" />
+        </div>
+        <div class="field">
+          <label>Skor minimum momen (0–100)</label>
+          <input class="input" type="number" min="0" max="100" step="5" data-setting="min_clip_score" value="${s.min_clip_score ?? 55}" />
+          <span class="tiny dim">0 = nonaktif</span>
         </div>
         <div class="field">
           <label>Durasi minimum (detik)</label>
@@ -2924,6 +2944,10 @@ async function renderSettings() {
           <input class="input" type="number" min="60" max="180" step="5" data-setting="max_clip_seconds" value="${s.max_clip_seconds}" />
         </div>
       </div>
+      <p class="hint" style="margin-top:12px">
+        Jumlah clip adalah batas maksimum. Skor minimum menyaring kandidat bertranskrip memakai skor lokal
+        atau gabungan AI + lokal; kalau tidak ada transkrip, fallback audio tetap jalan karena skalanya berbeda.
+      </p>
       <label class="switch" style="margin-top:14px">
         <input type="checkbox" data-setting="prefer_whisper" ${s.prefer_whisper ? "checked" : ""} />
         <span class="track"></span>
