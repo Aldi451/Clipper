@@ -290,8 +290,14 @@ def _run_analysis(job_id: str) -> None:
             )
             analyze.refine_with_llm(candidates, settings, on_progress=_refine_progress)
 
-        # Kandidat pool yang lebih lebar selalu dipangkas ke jumlah yang diminta,
-        # termasuk jika layanan AI tidak tersedia dan skor lokal menjadi fallback.
+        # Skor AI sudah dibaurkan dengan skor lokal jika ranker berhasil. Terapkan
+        # quality gate setelah tahap itu agar kandidat lemah tidak mengisi kuota.
+        # Fallback tanpa transkrip dilewatkan oleh helper karena skalanya berbeda.
+        quality_threshold = int(settings.get("min_clip_score", 55))
+        has_transcript_candidates = any(str(cand.text or "").strip() for cand in candidates)
+        candidates, quality_rejected = analyze.apply_min_clip_score(candidates, quality_threshold)
+
+        # Jumlah clip adalah batas maksimum; setelah gate, boleh tersisa lebih sedikit.
         if len(candidates) > final_target:
             candidates = analyze.select_candidate_subset(candidates, final_target)
 
@@ -392,13 +398,21 @@ def _run_analysis(job_id: str) -> None:
             )
 
         message = f"{len(candidates)} clip siap dirender"
+        if quality_rejected:
+            message += f" · {quality_rejected} kandidat di bawah skor minimum {quality_threshold}"
         if transcript_error:
             message += f" · transkrip dilewati: {transcript_error[:120]}"
         _job_set(job_id, status="done", stage="selesai", progress=1.0, message=message,
                  error="", meta={**(db.get_job(job_id) or {}).get("meta", {}),
                                  "ai_done": True,
                                  "transcript_error": transcript_error,
-                                 "language": (transcript or {}).get("language", "")})
+                                 "language": (transcript or {}).get("language", ""),
+                                 "clip_target": final_target,
+                                 "quality_gate": {
+                                     "min_score": quality_threshold,
+                                     "applied": bool(quality_threshold > 0 and has_transcript_candidates),
+                                     "rejected": quality_rejected,
+                                 }})
 
         if settings.get("auto_render") and candidates:
             render_job_all(job_id, mode="ai")

@@ -580,6 +580,45 @@ def candidate_pool_target(settings: dict[str, Any] | None, target: int) -> int:
     return max(1, target)
 
 
+def apply_min_clip_score(
+    candidates: list[Candidate], min_score: float = 55,
+) -> tuple[list[Candidate], int]:
+    """Buang momen bertranskrip di bawah ambang skor akhir lokal/AI.
+
+    Jumlah target adalah batas maksimum, bukan kuota yang harus diisi. Kandidat
+    fallback tanpa transkrip dipertahankan karena skor proxy audio tidak sebanding
+    dengan skor semantik 0–100.
+    """
+    try:
+        threshold = float(min_score)
+    except (OverflowError, TypeError, ValueError):
+        threshold = 55.0
+    if not math.isfinite(threshold):
+        threshold = 55.0
+    threshold = max(0.0, min(100.0, threshold))
+    if threshold <= 0:
+        return list(candidates), 0
+
+    kept: list[Candidate] = []
+    rejected = 0
+    for cand in candidates:
+        if not str(cand.text or "").strip():
+            kept.append(cand)
+            continue
+        try:
+            score = float(cand.score)
+        except (OverflowError, TypeError, ValueError):
+            score = 0.0
+        passed = math.isfinite(score) and score >= threshold
+        cand.features["quality_threshold"] = threshold
+        cand.features["quality_passed"] = float(passed)
+        if passed:
+            kept.append(cand)
+        else:
+            rejected += 1
+    return kept, rejected
+
+
 def select_candidate_subset(
     candidates: list[Candidate],
     target: int,
