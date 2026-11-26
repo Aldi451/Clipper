@@ -306,8 +306,8 @@ def reset_jobs_on_startup() -> None:
             (time.time(),),
         )
         conn.execute(
-            "UPDATE clips SET status='suggested', progress=0, message='' "
-            "WHERE status='rendering'"
+            "UPDATE clips SET status='suggested', progress=0, message='', error='' "
+            "WHERE status IN ('queued','rendering')"
         )
 
 

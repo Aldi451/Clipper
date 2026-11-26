@@ -547,10 +547,36 @@ def friendly_error(exc: Exception) -> str:
 # --------------------------------------------------------------------------- #
 # render
 # --------------------------------------------------------------------------- #
-def start_render(clip_id: str) -> None:
-    if not _claim(f"render:{clip_id}"):
-        return
-    render_pool.submit(_run_render, clip_id)
+def start_render(clip_id: str) -> bool:
+    """Queue one clip and persist its queued state before returning to the UI."""
+    key = f"render:{clip_id}"
+    if not _claim(key):
+        return False
+    try:
+        # Set this synchronously, before the worker probes the source. Otherwise the
+        # client can refresh before the worker marks the clip as rendering and miss
+        # the entire render (including its terminal error) because it never polls.
+        db.update_clip(
+            clip_id,
+            status="queued",
+            progress=0.0,
+            message="Menunggu render…",
+            error="",
+        )
+        render_pool.submit(_run_render, clip_id)
+    except Exception as exc:
+        _release(key)
+        try:
+            db.update_clip(
+                clip_id,
+                status="error",
+                message="Render gagal dimulai",
+                error=friendly_error(exc),
+            )
+        except Exception:
+            pass
+        raise
+    return True
 
 
 def render_job_all(job_id: str, only_dirty: bool = False, mode: str | None = None) -> int:
@@ -565,8 +591,8 @@ def render_job_all(job_id: str, only_dirty: bool = False, mode: str | None = Non
             continue
         if only_dirty and not (clip.get("meta") or {}).get("dirty"):
             continue
-        start_render(clip["id"])
-        queued += 1
+        if start_render(clip["id"]):
+            queued += 1
     return queued
 
 

@@ -9,11 +9,79 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from app import media, pipeline
+from app import db, media, pipeline
 from app.cancellation import OperationCancelled
 
 
 class RenderProgressTests(unittest.TestCase):
+    def test_render_is_marked_queued_before_background_worker_starts(self) -> None:
+        clip_id = "queued-render-test"
+        updates: list[dict[str, Any]] = []
+        submitted: list[tuple[Any, tuple[Any, ...]]] = []
+
+        class DeferredExecutor:
+            def submit(self, fn: Any, *args: Any) -> object:
+                submitted.append((fn, args))
+                return object()
+
+        try:
+            with (
+                patch.object(pipeline.db, "update_clip", side_effect=lambda _id, **fields: updates.append(fields)),
+                patch.object(pipeline, "render_pool", DeferredExecutor()),
+            ):
+                self.assertTrue(pipeline.start_render(clip_id))
+        finally:
+            pipeline._release(f"render:{clip_id}")
+
+        self.assertEqual(updates[0]["status"], "queued")
+        self.assertEqual(updates[0]["progress"], 0.0)
+        self.assertEqual(updates[0]["message"], "Menunggu render…")
+        self.assertEqual(submitted, [(pipeline._run_render, (clip_id,))])
+
+    def test_render_all_queues_only_clips_in_the_requested_mode(self) -> None:
+        clips = [
+            {"id": "ai-one", "status": "suggested", "meta": {"origin": "ai"}},
+            {"id": "manual-one", "status": "suggested", "meta": {"origin": "manual", "manual": True}},
+            {"id": "ai-uploaded", "status": "uploaded", "meta": {"origin": "ai"}},
+        ]
+        queued_ids: list[str] = []
+
+        def queue(clip_id: str) -> bool:
+            queued_ids.append(clip_id)
+            return True
+
+        with (
+            patch.object(pipeline.db, "list_clips", return_value=clips),
+            patch.object(pipeline, "start_render", side_effect=queue),
+        ):
+            queued = pipeline.render_job_all("job-render-mode-test", mode="ai")
+
+        self.assertEqual(queued, 1)
+        self.assertEqual(queued_ids, ["ai-one"])
+
+    def test_queued_clips_are_reset_when_the_app_restarts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "clipper.db"
+            with (
+                patch.object(db, "DB_FILE", db_path),
+                patch.object(db, "ensure_dirs"),
+            ):
+                db.init_db()
+                job = db.create_job("upload", title="Queue recovery test")
+                clip = db.create_clip(
+                    job["id"], title="Queued clip", duration=10,
+                    status="queued", meta={"origin": "ai"},
+                )
+                db.update_clip(clip["id"], progress=0.37, message="Menunggu render…")
+
+                db.reset_jobs_on_startup()
+                recovered = db.get_clip(clip["id"])
+
+        self.assertEqual(recovered["status"], "suggested")
+        self.assertEqual(recovered["progress"], 0.0)
+        self.assertEqual(recovered["message"], "")
+        self.assertEqual(recovered["error"], "")
+
     def test_ffmpeg_runner_stops_a_render_that_stalls_after_92_percent(self) -> None:
         progress: list[float] = []
         script = (
