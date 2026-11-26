@@ -1478,9 +1478,51 @@ async function openProjectModeModal(jobId, initialJob = null) {
   }
 }
 
-async function renderProject(jobId) {
+function captureFocusedClipField() {
+  const active = document.activeElement;
+  if (!active || !active.matches || !active.matches(".clip [data-field]")) return null;
+  const card = active.closest(".clip");
+  if (!card) return null;
+  const snapshot = {
+    clipId: card.dataset.clip,
+    field: active.dataset.field,
+    value: active.value,
+  };
+  try {
+    snapshot.selectionStart = active.selectionStart;
+    snapshot.selectionEnd = active.selectionEnd;
+    snapshot.selectionDirection = active.selectionDirection;
+  } catch (err) {}
+  return snapshot;
+}
+
+function restoreFocusedClipField(snapshot) {
+  if (!snapshot) return;
+  const field = $$(".clip [data-field]").find(
+    (el) => el.dataset.id === snapshot.clipId && el.dataset.field === snapshot.field
+  );
+  if (!field) return;
+  field.value = snapshot.value;
+  try {
+    field.focus({ preventScroll: true });
+  } catch (err) {
+    field.focus();
+  }
+  if (Number.isInteger(snapshot.selectionStart) && Number.isInteger(snapshot.selectionEnd)) {
+    try {
+      field.setSelectionRange(
+        snapshot.selectionStart,
+        snapshot.selectionEnd,
+        snapshot.selectionDirection || "none"
+      );
+    } catch (err) {}
+  }
+}
+
+async function renderProject(jobId, jobSnapshot = null) {
   const view = $("#view");
-  const job = await api("/api/jobs/" + encodeURIComponent(jobId));
+  const focusedField = captureFocusedClipField();
+  const job = jobSnapshot || await api("/api/jobs/" + encodeURIComponent(jobId));
   const allClips = job.clips || [];
   state.job = job;
   state.clips = allClips;
@@ -1653,17 +1695,29 @@ async function renderProject(jobId) {
   `;
 
   bindClipFieldHandlers();
+  restoreFocusedClipField(focusedField);
 
   if (allClips.some((c) => ["rendering", "uploading"].includes(c.status)) || running) {
     startPolling(async () => {
-      if (document.activeElement && document.activeElement.closest && document.activeElement.closest(".clip")) return;
+      if (state.route !== "project" || state.param !== jobId) return;
       const fresh = await api("/api/jobs/" + encodeURIComponent(jobId));
       const signature = (j) =>
-        JSON.stringify([j.status, Math.round(j.progress * 100), (j.clips || []).map((c) => [c.id, c.status, Math.round(c.progress * 100), c.updated_at])]);
+        JSON.stringify([
+          j.status,
+          Math.round((j.progress || 0) * 100),
+          j.message,
+          (j.clips || []).map((c) => [
+            c.id,
+            c.status,
+            Math.round((c.progress || 0) * 100),
+            c.message,
+            c.error,
+          ]),
+        ]);
       if (signature(fresh) !== signature(state.job)) {
         state.job = fresh;
         state.clips = fresh.clips;
-        await renderProject(jobId);
+        await renderProject(jobId, fresh);
       }
     }, 1700);
   }

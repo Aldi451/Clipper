@@ -1658,7 +1658,10 @@ def _render_segment(
         if speed != 1.0:
             cmd.insert(-1, "-af")
             cmd.insert(-1, f"atempo={speed:.4f},aresample=48000")
-        media.run_with_progress(cmd, out_duration, None, cwd=workdir, cancel_check=cancel_check)
+        media.run_with_progress(
+            cmd, out_duration, None, cwd=workdir, cancel_check=cancel_check,
+            progress_stall_timeout=media.FFMPEG_PROGRESS_STALL_TIMEOUT_SECONDS,
+        )
 
     build_and_run(force_still=False)
     if cancel_check and cancel_check():
@@ -1752,9 +1755,10 @@ def render_spec(
             [
                 ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error", "-nostats",
                 "-f", "concat", "-safe", "0", "-i", str(list_file),
-                "-c", "copy", str(base_path),
+                "-c", "copy", "-progress", "pipe:1", str(base_path),
             ],
             total_out, None, cwd=workdir, cancel_check=cancel_check,
+            progress_stall_timeout=media.FFMPEG_PROGRESS_STALL_TIMEOUT_SECONDS,
         )
         if not base_path.exists():
             raise EditorError("Gagal menggabungkan segmen")
@@ -1858,7 +1862,10 @@ def render_spec(
     def ffprog(fraction: float) -> None:
         report(0.7 + 0.26 * fraction, f"Render {fraction * 100:.0f}% · {width}×{height}")
 
-    media.run_with_progress(cmd, total_out, ffprog, cwd=workdir, cancel_check=cancel_check)
+    media.run_with_progress(
+        cmd, total_out, ffprog, cwd=workdir, cancel_check=cancel_check,
+        progress_stall_timeout=media.FFMPEG_PROGRESS_STALL_TIMEOUT_SECONDS,
+    )
     check_cancelled()
     if not render_path.exists() or render_path.stat().st_size < 2048:
         raise EditorError("Hasil render kosong — coba layout/pengaturan lain")
