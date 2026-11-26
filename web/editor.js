@@ -1469,7 +1469,8 @@ function panelExportHtml() {
   const scale = Number(out.height) / 1920;
   const est = Math.round(dur * (1.4 * Math.pow(scale, 1.8) + 0.6) + 12);
   const clip = ED.clip;
-  const rendering = clip.status === "rendering";
+  const rendering = clip.status === "queued" || clip.status === "rendering";
+  const queued = clip.status === "queued";
   const cancelPending = rendering && (clip.message || "").toLowerCase().startsWith("membatalkan");
   return `
     ${fieldRow("Resolusi", `<select class="select" data-out="height">
@@ -1522,9 +1523,9 @@ function panelExportHtml() {
     </div>
     <div class="row" style="gap:8px;margin-top:14px;flex-wrap:wrap">
       <button class="btn primary" data-ed="render" ${rendering ? "disabled" : ""}>
-        ${rendering ? `<span class="spinner"></span> Merender…` : "Render video"}
+        ${rendering ? `<span class="spinner"></span> ${queued ? "Menunggu render…" : "Merender…"}` : "Render video"}
       </button>
-      ${rendering ? `<button class="btn ghost danger" data-ed="cancel-render" ${cancelPending ? "disabled" : ""}>${cancelPending ? "Membatalkan…" : "Batalkan render"}</button>` : ""}
+      ${rendering ? `<button class="btn ghost danger" data-ed="cancel-render" ${cancelPending ? "disabled" : ""}>${cancelPending ? "Membatalkan…" : queued ? "Batalkan antrean" : "Batalkan render"}</button>` : ""}
       <button class="btn ghost" data-ed="download-srt">Unduh subtitle (.srt)</button>
       ${clip.has_file ? `<a class="btn ghost" href="/api/clips/${esc(clip.id)}/download">Unduh video</a>` : ""}
       <button class="btn ghost" data-ed="upload-yt" ${clip.has_file ? "" : "disabled"}>Upload ke Shorts</button>
@@ -2532,11 +2533,17 @@ async function renderFromEditor() {
   });
   try {
     await saveSpec();
-    await api(`/api/clips/${ED.clipId}/render`, { method: "POST" });
-    ED.clip = { ...ED.clip, status: "rendering", progress: 0, message: "Mulai render…" };
+    const res = await api(`/api/clips/${ED.clipId}/render`, { method: "POST" });
+    const queued = Boolean(res.queued);
+    ED.clip = {
+      ...ED.clip,
+      status: queued ? "queued" : "rendering",
+      progress: 0,
+      message: queued ? "Menunggu render…" : "Render sudah berjalan…",
+    };
     renderPanel();
     updateEditorRenderControls();
-    showRenderBadge("Render dimulai…", 0);
+    showRenderBadge(ED.clip.message, 0);
     pollRenderStatus();
   } catch (err) {
     toast(err.message, "bad");
@@ -2553,10 +2560,11 @@ function updateEditorRenderControls() {
   const topbar = document.querySelector(".ed-topbar");
   const render = topbar && topbar.querySelector('[data-ed="render"]');
   if (!render || !ED.clip) return;
-  const rendering = ED.clip.status === "rendering";
+  const queued = ED.clip.status === "queued";
+  const rendering = queued || ED.clip.status === "rendering";
   render.disabled = rendering;
   render.innerHTML = rendering
-    ? `<span class="spinner"></span> ${Math.round((ED.clip.progress || 0) * 100) || "Merender…"}`
+    ? `<span class="spinner"></span> ${queued ? "Antrean" : (Math.round((ED.clip.progress || 0) * 100) || "Merender…")}`
     : (ED.clip.has_file ? "Render ulang" : "Render");
 
   let cancel = topbar.querySelector('[data-ed="cancel-render"]');
@@ -2567,7 +2575,7 @@ function updateEditorRenderControls() {
     }
     const cancelling = (ED.clip.message || "").toLowerCase().startsWith("membatalkan");
     cancel.disabled = cancelling;
-    cancel.textContent = cancelling ? "Membatalkan…" : "Batalkan render";
+    cancel.textContent = cancelling ? "Membatalkan…" : queued ? "Batalkan antrean" : "Batalkan render";
   } else if (cancel) {
     cancel.remove();
   }
@@ -2588,18 +2596,26 @@ function pollRenderStatus() {
     try {
       const clip = await api(`/api/clips/${ED.clipId}`);
       const pct = Math.round((clip.progress || 0) * 100);
-      if (clip.status === "rendering") {
-        ED.clip = { ...ED.clip, status: "rendering", progress: clip.progress || 0, message: clip.message || "Merender…" };
+      if (clip.status === "queued" || clip.status === "rendering") {
+        const queued = clip.status === "queued";
+        ED.clip = {
+          ...ED.clip,
+          status: clip.status,
+          progress: clip.progress || 0,
+          message: clip.message || (queued ? "Menunggu render…" : "Merender…"),
+        };
         updateEditorRenderControls();
-        showRenderBadge(clip.message || "Merender…", pct);
+        showRenderBadge(ED.clip.message, pct);
         $$('[data-ed="render"]').forEach((btn) => {
           btn.disabled = true;
-          btn.innerHTML = `<span class="spinner"></span> ${pct}%`;
+          btn.innerHTML = queued
+            ? `<span class="spinner"></span> Antrean`
+            : `<span class="spinner"></span> ${pct}%`;
         });
         $$('[data-ed="cancel-render"]').forEach((cancelBtn) => {
           const cancelling = (clip.message || "").toLowerCase().startsWith("membatalkan");
           cancelBtn.disabled = cancelling;
-          cancelBtn.textContent = cancelling ? "Membatalkan…" : "Batalkan render";
+          cancelBtn.textContent = cancelling ? "Membatalkan…" : queued ? "Batalkan antrean" : "Batalkan render";
         });
       } else {
         stopPolling();
@@ -2659,8 +2675,9 @@ async function renderEditorRoute(clipId) {
   view.innerHTML = `<div class="empty"><div class="spinner"></div> Memuat editor…</div>`;
   try {
     await renderEditor(clipId);
-    if (ED.clip.status === "rendering") {
-      showRenderBadge(ED.clip.message || "Merender…", Math.round((ED.clip.progress || 0) * 100));
+    if (ED.clip.status === "queued" || ED.clip.status === "rendering") {
+      const queued = ED.clip.status === "queued";
+      showRenderBadge(ED.clip.message || (queued ? "Menunggu render…" : "Merender…"), Math.round((ED.clip.progress || 0) * 100));
       pollRenderStatus();
     }
     const upload = edEl("ed-logo-file");

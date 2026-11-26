@@ -984,6 +984,7 @@ async function renderProjects() {
 function clipStatusTag(clip) {
   const map = {
     suggested: ["Siap dirender", ""],
+    queued: ["Menunggu render", "run"],
     rendering: ["Merender", "run"],
     rendered: ["Siap upload", "done"],
     uploading: ["Upload", "run"],
@@ -1207,7 +1208,8 @@ function clipCardHtml(clip) {
   const thumb = clip.thumb
     ? `<img src="/api/clips/${esc(clip.id)}/thumb?v=${Math.round(clip.updated_at)}" onerror="this.style.display='none'" />`
     : `<span>${clip.status === "rendered" || clip.status === "uploaded" ? "🎞️" : "✂️"}</span>`;
-  const active = clip.status === "rendering" || clip.status === "uploading";
+  const renderActive = clip.status === "queued" || clip.status === "rendering";
+  const active = renderActive || clip.status === "uploading";
   const cancelling = (clip.message || "").toLowerCase().startsWith("membatalkan");
   const progress = Math.round((clip.progress || 0) * 100);
   const score = Number(clip.score || 0);
@@ -1260,7 +1262,7 @@ function clipCardHtml(clip) {
           <button class="btn small" data-action="render" data-id="${esc(clip.id)}" ${active ? "disabled" : ""}>
             ${clip.has_file ? "Render ulang" : "Render"}
           </button>
-          ${clip.status === "rendering" ? `<button class="btn small ghost danger" data-action="cancel-render" data-id="${esc(clip.id)}" ${cancelling ? "disabled" : ""}>${cancelling ? "Membatalkan…" : "Batalkan render"}</button>` : ""}
+          ${renderActive ? `<button class="btn small ghost danger" data-action="cancel-render" data-id="${esc(clip.id)}" ${cancelling ? "disabled" : ""}>${cancelling ? "Membatalkan…" : clip.status === "queued" ? "Batalkan antrean" : "Batalkan render"}</button>` : ""}
           <button class="btn small yt" data-action="upload" data-id="${esc(clip.id)}" ${!clip.has_file || active ? "disabled" : ""}>Upload YT</button>
           ${ttOn ? `<button class="btn small tt" data-action="upload-tt" data-id="${esc(clip.id)}" ${!clip.has_file || active ? "disabled" : ""}>TikTok</button>` : ""}
           ${clip.has_file ? `<a class="btn small ghost" href="/api/clips/${esc(clip.id)}/download">Unduh</a>` : ""}
@@ -1697,7 +1699,7 @@ async function renderProject(jobId, jobSnapshot = null) {
   bindClipFieldHandlers();
   restoreFocusedClipField(focusedField);
 
-  if (allClips.some((c) => ["rendering", "uploading"].includes(c.status)) || running) {
+  if (allClips.some((c) => ["queued", "rendering", "uploading"].includes(c.status)) || running) {
     startPolling(async () => {
       if (state.route !== "project" || state.param !== jobId) return;
       const fresh = await api("/api/jobs/" + encodeURIComponent(jobId));
@@ -3754,9 +3756,9 @@ document.addEventListener("click", async (e) => {
       target.dataset.label = target.textContent.trim();
       target.disabled = true;
       target.innerHTML = `<span class="spinner"></span>`;
-      await api("/api/clips/" + id + "/render", { method: "POST" });
-      toast("Render dimulai", "ok");
-      if (state.route === "project") renderProject(state.param);
+      const res = await api("/api/clips/" + id + "/render", { method: "POST" });
+      toast(res.queued ? "Render masuk antrean" : "Render clip ini sudah berjalan", "ok");
+      if (state.route === "project") await renderProject(state.param);
     } else if (action === "upload") {
       target.dataset.label = target.textContent.trim();
       target.disabled = true;
@@ -3814,12 +3816,17 @@ document.addEventListener("click", async (e) => {
         body: { only_dirty: true, mode },
       });
       toast(res.queued + " clip masuk antrean render ulang", "ok");
-      renderProject(state.job.id);
+      await renderProject(state.job.id);
     } else if (action === "render-all") {
       const mode = (target && target.dataset && target.dataset.mode) || (state.job && state.projectMode[state.job.id]) || "";
-      await api("/api/jobs/" + state.job.id + "/render", { method: "POST", body: { mode } });
-      toast("Semua clip pada mode ini masuk antrean render", "ok");
-      renderProject(state.job.id);
+      const res = await api("/api/jobs/" + state.job.id + "/render", { method: "POST", body: { mode } });
+      toast(
+        res.queued
+          ? `${res.queued} clip masuk antrean render`
+          : "Tidak ada clip baru yang bisa dijadwalkan untuk render",
+        res.queued ? "ok" : "warn"
+      );
+      await renderProject(state.job.id);
     } else if (action === "whisper-download") {
       const model = target.dataset.model || "";
       await api("/api/analyze/models/download", { method: "POST", body: { model } });

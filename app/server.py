@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from . import analyze, db, discover, editor, ingest, media, paths, pipeline, speech, tiktok, transcribe, youtube
+from . import analyze, db, discover, editor, framing, ingest, media, paths, pipeline, speech, tiktok, transcribe, youtube
 from .config import (
     APP_NAME, ASSET_DIR, MAX_UPLOAD_BYTES, VERSION, WEB_DIR, WORK_DIR,
     ensure_dirs, ffmpeg_exe, ffmpeg_for_ytdlp, load_settings, update_settings,
@@ -732,8 +732,8 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Clip tidak ditemukan")
         if clip["status"] == "uploaded":
             raise HTTPException(400, "Clip ini sudah terupload")
-        pipeline.start_render(clip_id)
-        return {"ok": True}
+        queued = pipeline.start_render(clip_id)
+        return {"ok": True, "queued": queued, "already_running": not queued}
 
     @app.post("/api/clips/{clip_id}/upload")
     def upload_clip(clip_id: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
